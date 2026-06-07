@@ -83,15 +83,27 @@ pub fn redact_command_line(command: &[String]) -> Vec<String> {
 }
 
 fn is_secret_flag(value: &str) -> bool {
-    let normalized = value.replace('_', "-");
-    matches!(
-        normalized.as_str(),
-        "--token" | "--access-token" | "--api-key" | "--apikey" | "--secret" | "--password" | "-p"
-    ) || normalized.contains("token")
-        || normalized.contains("secret")
-        || normalized.contains("api-key")
-        || normalized.contains("apikey")
-        || normalized.contains("password")
+    let normalized = value
+        .trim_start_matches('-')
+        .to_ascii_lowercase()
+        .replace('_', "-");
+    let components = normalized
+        .split(|character: char| !character.is_ascii_alphanumeric())
+        .filter(|component| !component.is_empty())
+        .collect::<Vec<_>>();
+
+    if components.iter().any(|component| {
+        matches!(
+            *component,
+            "token" | "secret" | "password" | "apikey" | "pat"
+        )
+    }) {
+        return true;
+    }
+
+    components
+        .windows(2)
+        .any(|pair| matches!(pair, ["api", "key"] | ["access", "token"]))
 }
 
 #[cfg(test)]
@@ -111,6 +123,10 @@ mod tests {
             "--access_token".to_string(),
             "token-value".to_string(),
             "--api_key=flag-secret".to_string(),
+            "--max-tokens".to_string(),
+            "1000".to_string(),
+            "--tokenizer".to_string(),
+            "cl100k".to_string(),
         ]);
 
         assert_eq!(
@@ -125,7 +141,11 @@ mod tests {
                 "ANTHROPIC_API_KEY=[REDACTED]".to_string(),
                 "--access_token".to_string(),
                 "[REDACTED]".to_string(),
-                "--api_key=[REDACTED]".to_string()
+                "--api_key=[REDACTED]".to_string(),
+                "--max-tokens".to_string(),
+                "1000".to_string(),
+                "--tokenizer".to_string(),
+                "cl100k".to_string()
             ]
         );
     }
