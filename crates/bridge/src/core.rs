@@ -55,6 +55,9 @@ where
         if request.requested_run_id.is_none() {
             request.requested_run_id = Some(Uuid::new_v4().to_string());
         }
+        if let Some(requested_run_id) = &request.requested_run_id {
+            self.ensure_run_id_available(requested_run_id)?;
+        }
         if request.session.backend != self.adapter.backend() {
             return Err(BridgeError::new(
                 "backend_mismatch",
@@ -63,6 +66,7 @@ where
         }
 
         let handle = self.adapter.start(request.clone())?;
+        self.ensure_run_id_available(&handle.run_id)?;
         let mut record = DispatchRunRecord::new(DispatchRun::new(
             handle.run_id.clone(),
             request.session.id.clone(),
@@ -90,7 +94,7 @@ where
                 workspace_root: request.workspace_root,
                 record,
                 process,
-                transcript: Vec::new(),
+                transcript: request.transcript,
             },
         );
 
@@ -104,12 +108,25 @@ where
                 "backend adapter does not declare streaming_output",
             ));
         }
+        self.run(run_id)?;
 
         let events = self.adapter.stream(run_id)?;
         for event in &events {
+            if event.run_id != run_id {
+                return Err(BridgeError::new(
+                    "event_run_mismatch",
+                    "stream event run id does not match requested run",
+                ));
+            }
             match &event.payload {
                 BridgeEventPayload::Message { message } => {
                     self.run_mut(run_id)?.transcript.push(message.clone());
+                }
+                BridgeEventPayload::Control { event } => {
+                    self.run_mut(run_id)?
+                        .record
+                        .control_events
+                        .push(event.clone());
                 }
                 BridgeEventPayload::Status { status } => {
                     self.transition_run(run_id, status.state.clone(), event.created_at.clone())?;
@@ -127,6 +144,7 @@ where
         created_at: impl Into<String>,
     ) -> Result<ReplyOutcome, BridgeError> {
         let created_at = created_at.into();
+        self.run(run_id)?;
         let capabilities = self.adapter.capabilities();
         if capabilities.interactive_reply {
             self.adapter.reply(run_id, text)?;
@@ -154,7 +172,11 @@ where
             transcript: managed.transcript,
             launch_command: None,
         };
+        if let Some(requested_run_id) = &request.requested_run_id {
+            self.ensure_run_id_available(requested_run_id)?;
+        }
         let handle = self.adapter.start(request.clone())?;
+        self.ensure_run_id_available(&handle.run_id)?;
 
         {
             let original = self.run_mut(run_id)?;
@@ -199,7 +221,7 @@ where
                     request.launch_command.unwrap_or_default(),
                     created_at,
                 ),
-                transcript: Vec::new(),
+                transcript: request.transcript,
             },
         );
 
@@ -212,6 +234,13 @@ where
             return Err(BridgeError::new(
                 "unsupported_capability",
                 "backend adapter does not declare stop_signal",
+            ));
+        }
+        let current = self.run(run_id)?.record.run.state.clone();
+        if !current.can_transition_to(&DispatchRunState::Stopping) {
+            return Err(BridgeError::new(
+                "invalid_state_transition",
+                format!("cannot transition run {run_id} from {current:?} to Stopping"),
             ));
         }
 
@@ -333,6 +362,17 @@ where
             ))
         }
     }
+
+    fn ensure_run_id_available(&self, run_id: &str) -> Result<(), BridgeError> {
+        if self.runs.contains_key(run_id) {
+            Err(BridgeError::new(
+                "duplicate_run_id",
+                format!("run {run_id} is already managed by this bridge runtime"),
+            ))
+        } else {
+            Ok(())
+        }
+    }
 }
 
 #[cfg(test)]
@@ -342,6 +382,7 @@ mod tests {
     use crate::session::DispatchMessageRole;
     use crate::wire::BridgeStatusEvent;
     use std::cell::RefCell;
+    use std::fs;
 
     struct FakeAdapter {
         capabilities: CapabilityFlags,
@@ -436,22 +477,32 @@ mod tests {
         }
     }
 
-    fn session() -> DispatchSession {
+    fn workspace_paths() -> (String, String) {
+        let root = std::env::temp_dir().join(format!("honeyhub-core-{}", Uuid::new_v4()));
+        let workspace = root.join("workspace");
+        fs::create_dir_all(&workspace).expect("workspace is created");
+        (
+            root.to_string_lossy().to_string(),
+            workspace.to_string_lossy().to_string(),
+        )
+    }
+
+    fn session(workspace_root: &str) -> DispatchSession {
         DispatchSession {
             id: "session-1".to_string(),
             backend: AgentBackend::ClaudeLocal,
             title: "Bridge core".to_string(),
-            workspace_root: "C:/work/honeyhub".to_string(),
+            workspace_root: workspace_root.to_string(),
             created_at: "2026-06-07T12:00:00Z".to_string(),
             updated_at: "2026-06-07T12:00:00Z".to_string(),
             current_run_id: None,
         }
     }
 
-    fn request() -> StartRunRequest {
+    fn request(workspace_root: &str) -> StartRunRequest {
         StartRunRequest {
-            session: session(),
-            workspace_root: "C:/work/honeyhub".to_string(),
+            session: session(workspace_root),
+            workspace_root: workspace_root.to_string(),
             task: "ship bridge core".to_string(),
             requested_run_id: None,
             follow_up_to_run_id: None,
@@ -466,14 +517,13 @@ mod tests {
 
     #[test]
     fn lifecycle_start_stream_reply_stop_records_transitions() {
+        let (allowlist_root, workspace_root) = workspace_paths();
         let adapter = FakeAdapter::new(CapabilityFlags::claude_local());
-        let mut runtime = BridgeRuntime::new(
-            adapter,
-            WorkspaceAllowlist::new(vec!["C:/work".to_string()]),
-        );
+        let mut runtime =
+            BridgeRuntime::new(adapter, WorkspaceAllowlist::new(vec![allowlist_root]));
 
         let handle = runtime
-            .start(request(), "2026-06-07T12:00:00Z")
+            .start(request(&workspace_root), "2026-06-07T12:00:00Z")
             .expect("run starts");
         runtime
             .stream_events(&handle.run_id)
@@ -517,14 +567,13 @@ mod tests {
 
     #[test]
     fn refuses_workspace_outside_allowlist() {
+        let (_allowlist_root, workspace_root) = workspace_paths();
+        let (other_root, _other_workspace) = workspace_paths();
         let adapter = FakeAdapter::new(CapabilityFlags::claude_local());
-        let mut runtime = BridgeRuntime::new(
-            adapter,
-            WorkspaceAllowlist::new(vec!["C:/allowed".to_string()]),
-        );
+        let mut runtime = BridgeRuntime::new(adapter, WorkspaceAllowlist::new(vec![other_root]));
 
         let error = runtime
-            .start(request(), "2026-06-07T12:00:00Z")
+            .start(request(&workspace_root), "2026-06-07T12:00:00Z")
             .expect_err("outside workspace is denied");
 
         assert_eq!(error.code, "workspace_not_allowed");
@@ -532,15 +581,14 @@ mod tests {
 
     #[test]
     fn routes_reply_to_follow_up_when_backend_is_not_interactive() {
+        let (allowlist_root, workspace_root) = workspace_paths();
         let mut capabilities = CapabilityFlags::claude_local();
         capabilities.interactive_reply = false;
         let adapter = FakeAdapter::new(capabilities);
-        let mut runtime = BridgeRuntime::new(
-            adapter,
-            WorkspaceAllowlist::new(vec!["C:/work".to_string()]),
-        );
+        let mut runtime =
+            BridgeRuntime::new(adapter, WorkspaceAllowlist::new(vec![allowlist_root]));
         let handle = runtime
-            .start(request(), "2026-06-07T12:00:00Z")
+            .start(request(&workspace_root), "2026-06-07T12:00:00Z")
             .expect("run starts");
         runtime
             .stream_events(&handle.run_id)
@@ -571,13 +619,12 @@ mod tests {
 
     #[test]
     fn process_exit_validates_run_id_and_preserves_stop_as_cancelled() {
+        let (allowlist_root, workspace_root) = workspace_paths();
         let adapter = FakeAdapter::new(CapabilityFlags::claude_local());
-        let mut runtime = BridgeRuntime::new(
-            adapter,
-            WorkspaceAllowlist::new(vec!["C:/work".to_string()]),
-        );
+        let mut runtime =
+            BridgeRuntime::new(adapter, WorkspaceAllowlist::new(vec![allowlist_root]));
         let handle = runtime
-            .start(request(), "2026-06-07T12:00:00Z")
+            .start(request(&workspace_root), "2026-06-07T12:00:00Z")
             .expect("run starts");
 
         let mismatch = runtime
@@ -619,5 +666,27 @@ mod tests {
                 .state,
             DispatchRunState::Cancelled
         );
+    }
+
+    #[test]
+    fn rejects_duplicate_run_id_without_overwriting_existing_record() {
+        let (allowlist_root, workspace_root) = workspace_paths();
+        let adapter = FakeAdapter::new(CapabilityFlags::claude_local());
+        let mut runtime =
+            BridgeRuntime::new(adapter, WorkspaceAllowlist::new(vec![allowlist_root]));
+        let mut first = request(&workspace_root);
+        first.requested_run_id = Some("run-fixed".to_string());
+        runtime
+            .start(first, "2026-06-07T12:00:00Z")
+            .expect("first run starts");
+
+        let mut second = request(&workspace_root);
+        second.requested_run_id = Some("run-fixed".to_string());
+        let error = runtime
+            .start(second, "2026-06-07T12:01:00Z")
+            .expect_err("duplicate run is rejected");
+
+        assert_eq!(error.code, "duplicate_run_id");
+        assert!(runtime.run("run-fixed").is_ok());
     }
 }

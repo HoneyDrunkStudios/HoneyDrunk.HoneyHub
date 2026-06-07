@@ -245,7 +245,11 @@ impl DispatchRunRecord {
 
         let previous = self.run.state.clone();
         self.run.state = next.clone();
-        if matches!(next, DispatchRunState::Running) && self.run.started_at.is_none() {
+        if matches!(
+            next,
+            DispatchRunState::Running | DispatchRunState::NeedsInput
+        ) && self.run.started_at.is_none()
+        {
             self.run.started_at = Some(created_at.clone());
         }
         if next.is_terminal() {
