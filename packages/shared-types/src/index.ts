@@ -198,6 +198,29 @@ export interface BridgeStatusEvent {
   link?: string;
 }
 
+// --- Pairing + trust boundary (ADR-0090 D8) ---
+// These mirror the bridge's serde shapes. Only token-free views ever reach a sync
+// surface, transcript, or notification; the plaintext pairing token appears once
+// in PairingGrant (the handshake response) and is never re-surfaced after that
+// single hop (ADR-0090 D8 no-secret-leak posture).
+
+export interface BridgeIdentityView {
+  deviceId: string;
+  displayName: string;
+}
+
+export interface PairedDeviceView {
+  deviceId: string;
+  displayName: string;
+  pairedAt: string;
+  revoked: boolean;
+}
+
+export interface PairingGrant {
+  device: PairedDeviceView;
+  token: string;
+}
+
 export const defaultClaudeCapabilities: CapabilityFlags = {
   streaming_output: true,
   interactive_reply: true,

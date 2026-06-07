@@ -4,6 +4,8 @@ import {
   defaultClaudeCapabilities,
   oneShotCapabilities,
   wireProtocolVersion,
+  type PairedDeviceView,
+  type PairingGrant,
   type RunHandle,
   type WireFrame
 } from "./index.js";
@@ -45,6 +47,33 @@ test("wire frames carry the provisional bridge protocol version", () => {
 
   assert.equal(frame.protocol, "honeyhub.bridge.v1");
   assert.equal(frame.event?.payload.kind, "status");
+});
+
+test("paired device views omit the pairing token", () => {
+  const view: PairedDeviceView = {
+    deviceId: "device-1",
+    displayName: "Pixel phone",
+    pairedAt: "2026-06-07T12:00:00Z",
+    revoked: false
+  };
+
+  assert.equal(view.revoked, false);
+  assert.equal("token" in view, false);
+});
+
+test("pairing grants surface the token exactly once alongside a safe view", () => {
+  const grant: PairingGrant = {
+    device: {
+      deviceId: "device-1",
+      displayName: "Laptop",
+      pairedAt: "2026-06-07T12:00:00Z",
+      revoked: false
+    },
+    token: "one-time-token"
+  };
+
+  assert.equal(grant.token, "one-time-token");
+  assert.equal("token" in grant.device, false);
 });
 
 test("run handles may carry adapter process metadata", () => {

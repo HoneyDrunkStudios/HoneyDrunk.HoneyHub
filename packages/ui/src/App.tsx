@@ -1,10 +1,16 @@
+import { useState } from "react";
 import type { DispatchRunState, UsageFidelity } from "@honeydrunk/honeyhub-types";
+import { BridgeSettings } from "./BridgeSettings";
 import "./styles.css";
 
 const sampleState: DispatchRunState = "created";
 const sampleFidelity: UsageFidelity = "exact";
 
+type View = "run" | "settings";
+
 export function App() {
+  const [view, setView] = useState<View>("run");
+
   return (
     <main className="app-shell">
       <section className="toolbar" aria-label="HoneyHub session overview">
@@ -15,7 +21,31 @@ export function App() {
         <span className="status-pill">{sampleState}</span>
       </section>
 
-      <section className="run-panel" aria-labelledby="run-title">
+      <nav className="view-tabs" aria-label="HoneyHub views">
+        <button
+          type="button"
+          aria-pressed={view === "run"}
+          onClick={() => setView("run")}
+        >
+          Run
+        </button>
+        <button
+          type="button"
+          aria-pressed={view === "settings"}
+          onClick={() => setView("settings")}
+        >
+          Bridge settings
+        </button>
+      </nav>
+
+      {/* Both panels stay mounted; we toggle visibility so the bridge-settings
+          model (paired devices, in-progress allowlist edits) survives a tab
+          switch instead of being discarded on unmount. */}
+      <section
+        className="run-panel"
+        aria-labelledby="run-title"
+        hidden={view !== "run"}
+      >
         <div>
           <p className="eyebrow">Run</p>
           <h2 id="run-title">No active session</h2>
@@ -28,6 +58,10 @@ export function App() {
           <strong>{sampleFidelity}</strong>
         </div>
       </section>
+
+      <div hidden={view !== "settings"}>
+        <BridgeSettings />
+      </div>
     </main>
   );
 }
