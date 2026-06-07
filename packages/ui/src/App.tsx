@@ -38,23 +38,30 @@ export function App() {
         </button>
       </nav>
 
-      {view === "run" ? (
-        <section className="run-panel" aria-labelledby="run-title">
-          <div>
-            <p className="eyebrow">Run</p>
-            <h2 id="run-title">No active session</h2>
-            <p className="body">
-              Pair a local bridge, choose an allowlisted workspace, and start a Claude Code run. Bridge wiring lands in the Phase 2 run screen.
-            </p>
-          </div>
-          <div className="usage-card" aria-label="Usage fidelity">
-            <span>Usage</span>
-            <strong>{sampleFidelity}</strong>
-          </div>
-        </section>
-      ) : (
+      {/* Both panels stay mounted; we toggle visibility so the bridge-settings
+          model (paired devices, in-progress allowlist edits) survives a tab
+          switch instead of being discarded on unmount. */}
+      <section
+        className="run-panel"
+        aria-labelledby="run-title"
+        hidden={view !== "run"}
+      >
+        <div>
+          <p className="eyebrow">Run</p>
+          <h2 id="run-title">No active session</h2>
+          <p className="body">
+            Pair a local bridge, choose an allowlisted workspace, and start a Claude Code run. Bridge wiring lands in the Phase 2 run screen.
+          </p>
+        </div>
+        <div className="usage-card" aria-label="Usage fidelity">
+          <span>Usage</span>
+          <strong>{sampleFidelity}</strong>
+        </div>
+      </section>
+
+      <div hidden={view !== "settings"}>
         <BridgeSettings />
-      )}
+      </div>
     </main>
   );
 }

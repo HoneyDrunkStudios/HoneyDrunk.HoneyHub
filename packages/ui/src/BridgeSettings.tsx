@@ -29,24 +29,30 @@ export function BridgeSettings({ initialState, factory }: BridgeSettingsProps) {
   // Validate eagerly against the current state (so a thrown error surfaces in this
   // tick), then commit with a functional update so the transition always applies
   // to the latest committed state rather than a stale render-time snapshot.
-  const apply = (compute: (prev: BridgeSettingsState) => BridgeSettingsState) => {
+  const apply = (
+    compute: (prev: BridgeSettingsState) => BridgeSettingsState
+  ): boolean => {
     try {
       compute(state);
       setState((prev) => compute(prev));
       setError(undefined);
+      return true;
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "unexpected error");
+      return false;
     }
   };
 
   const onPair = () => {
-    apply((prev) => pairDevice(prev, deviceName, factory));
-    setDeviceName("");
+    if (apply((prev) => pairDevice(prev, deviceName, factory))) {
+      setDeviceName("");
+    }
   };
 
   const onAddRoot = () => {
-    apply((prev) => addWorkspaceRoot(prev, workspaceRoot));
-    setWorkspaceRoot("");
+    if (apply((prev) => addWorkspaceRoot(prev, workspaceRoot))) {
+      setWorkspaceRoot("");
+    }
   };
 
   return (

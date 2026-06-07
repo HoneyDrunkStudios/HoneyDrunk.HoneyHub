@@ -141,9 +141,16 @@ impl PairingRegistry {
     }
 
     fn find_active(&self, token: &str) -> Option<&PairedDevice> {
-        self.devices
-            .iter()
-            .find(|device| !device.revoked && constant_time_eq(&device.token, token))
+        // Full scan with no early return so verification time does not depend on
+        // which device matches (or whether an earlier device mismatched) — the
+        // constant-time posture extends from the byte compare to the device walk.
+        self.devices.iter().fold(None, |matched, device| {
+            if !device.revoked && constant_time_eq(&device.token, token) {
+                Some(device)
+            } else {
+                matched
+            }
+        })
     }
 
     /// Revoke a paired device by id. A revoked device's token is rejected by
