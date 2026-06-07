@@ -62,6 +62,9 @@ struct RunProcess {
     /// The backend's own session id, captured from `system`/`result` events so a
     /// later `resume` can re-attach to the same Claude Code session.
     backend_session_id: Option<String>,
+    /// Set once the process exit has been observed and its terminal status events
+    /// emitted, so a later `stream` poll does not emit them again.
+    finished: bool,
 }
 
 impl Drop for RunProcess {
@@ -139,6 +142,17 @@ impl ClaudeLocalAdapter {
         let stdout = child.stdout.take().ok_or_else(|| {
             BridgeError::new("backend_unavailable", "claude CLI exposed no stdout")
         })?;
+
+        // Drain stderr on its own thread so a chatty CLI cannot fill the stderr
+        // pipe buffer and block the child while we are reading stdout.
+        if let Some(stderr) = child.stderr.take() {
+            std::thread::spawn(move || {
+                let mut reader = BufReader::new(stderr);
+                let mut sink = std::io::sink();
+                let _ = std::io::copy(&mut reader, &mut sink);
+            });
+        }
+
         let (sender, receiver) = channel();
         let reader = std::thread::spawn(move || {
             let buffered = BufReader::new(stdout);
@@ -211,15 +225,26 @@ fn assistant_text(value: &Value) -> String {
 
 fn usage_signal(value: &Value, session_id: &str, run_id: &str, now: &str) -> UsageSignal {
     let usage = value.get("usage");
-    let input_tokens = usage
-        .and_then(|usage| usage.get("input_tokens"))
-        .and_then(Value::as_u64);
-    let output_tokens = usage
-        .and_then(|usage| usage.get("output_tokens"))
-        .and_then(Value::as_u64);
-    let total_tokens = match (input_tokens, output_tokens) {
-        (Some(input), Some(output)) => Some(input + output),
-        _ => None,
+    let token_field = |name: &str| {
+        usage
+            .and_then(|usage| usage.get(name))
+            .and_then(Value::as_u64)
+    };
+    let input_tokens = token_field("input_tokens");
+    let output_tokens = token_field("output_tokens");
+    // Claude usage also reports cache-read / cache-creation input tokens; fold them
+    // into the total so an `exact` signal does not under-report (ADR-0092 D2).
+    let cache_read = token_field("cache_read_input_tokens");
+    let cache_creation = token_field("cache_creation_input_tokens");
+    let total_tokens = if input_tokens.is_some() || output_tokens.is_some() {
+        Some(
+            input_tokens.unwrap_or(0)
+                + output_tokens.unwrap_or(0)
+                + cache_read.unwrap_or(0)
+                + cache_creation.unwrap_or(0),
+        )
+    } else {
+        None
     };
     UsageSignal {
         id: Uuid::new_v4().to_string(),
@@ -255,6 +280,27 @@ fn artifact_kind(label: &str) -> ArtifactKind {
         "log_bundle" => ArtifactKind::LogBundle,
         _ => ArtifactKind::Report,
     }
+}
+
+fn terminal_status(
+    session_id: &str,
+    run_id: &str,
+    now: &str,
+    state: DispatchRunState,
+) -> BridgeEvent {
+    BridgeEvent::status(
+        Uuid::new_v4().to_string(),
+        session_id,
+        run_id,
+        0,
+        now.to_string(),
+        BridgeStatusEvent {
+            state,
+            backend: AgentBackend::ClaudeLocal,
+            repo_hint: None,
+            link: None,
+        },
+    )
 }
 
 /// Parse one JSONL line from the CLI into zero or more `BridgeEvent`s. Unknown or
@@ -413,24 +459,27 @@ impl AgentBackendAdapter for ClaudeLocalAdapter {
 
         let mut command = self.base_command();
         command.current_dir(&request.workspace_root);
-        let (child, mut stdin, lines, reader) = Self::spawn(command)?;
+        let (child, stdin, lines, reader) = Self::spawn(command)?;
         let process_id = child.id();
 
-        // Seed the first turn with the task, keeping stdin OPEN so later replies
-        // are same-process live input rather than a resume.
-        write_user_line(&mut stdin, &request.task)?;
+        let mut run = RunProcess {
+            session_id: request.session.id.clone(),
+            child,
+            stdin: Some(stdin),
+            lines,
+            reader: Some(reader),
+            backend_session_id: None,
+            finished: false,
+        };
 
-        self.lock_runs()?.insert(
-            run_id.clone(),
-            RunProcess {
-                session_id: request.session.id.clone(),
-                child,
-                stdin: Some(stdin),
-                lines,
-                reader: Some(reader),
-                backend_session_id: None,
-            },
-        );
+        // Seed the first turn with the task, keeping stdin OPEN so later replies
+        // are same-process live input rather than a resume. If the seed write
+        // fails, dropping `run` here kills and reaps the child (no orphan).
+        if let Some(stdin) = run.stdin.as_mut() {
+            write_user_line(stdin, &request.task)?;
+        }
+
+        self.lock_runs()?.insert(run_id.clone(), run);
 
         Ok(RunHandle {
             run_id,
@@ -464,6 +513,39 @@ impl AgentBackendAdapter for ClaudeLocalAdapter {
                 &mut run.backend_session_id,
             ));
         }
+
+        // Once the process has exited, emit a terminal status transition (exactly
+        // once) so the run does not sit in `running`/`needs_input` forever after
+        // the CLI finishes. A clean exit finalizes then completes; a non-zero exit
+        // fails.
+        if !run.finished {
+            if let Ok(Some(status)) = run.child.try_wait() {
+                run.finished = true;
+                let now = (self.clock)();
+                if status.success() {
+                    events.push(terminal_status(
+                        &session_id,
+                        run_id,
+                        &now,
+                        DispatchRunState::Finalizing,
+                    ));
+                    events.push(terminal_status(
+                        &session_id,
+                        run_id,
+                        &now,
+                        DispatchRunState::Completed,
+                    ));
+                } else {
+                    events.push(terminal_status(
+                        &session_id,
+                        run_id,
+                        &now,
+                        DispatchRunState::Failed,
+                    ));
+                }
+            }
+        }
+
         Ok(events)
     }
 
@@ -479,9 +561,13 @@ impl AgentBackendAdapter for ClaudeLocalAdapter {
     }
 
     fn stop(&self, run_id: &str) -> Result<(), BridgeError> {
-        let mut guard = self.lock_runs()?;
-        let run = guard
-            .get_mut(run_id)
+        // Remove the run so its `Child`, reader thread, and channel are released
+        // (no per-stopped-run leak). Killing the tree before drop covers the
+        // Windows case where `Child::kill` alone would miss child processes; the
+        // `RunProcess` drop then reaps and joins.
+        let mut run = self
+            .lock_runs()?
+            .remove(run_id)
             .ok_or_else(|| BridgeError::new("run_not_found", format!("run {run_id} not found")))?;
         run.stdin.take();
         kill_process_tree(&mut run.child);
@@ -504,6 +590,7 @@ impl AgentBackendAdapter for ClaudeLocalAdapter {
                 lines,
                 reader: Some(reader),
                 backend_session_id: Some(session_id_or_transcript.to_string()),
+                finished: false,
             },
         );
 
@@ -558,6 +645,28 @@ mod tests {
                 assert_eq!(signal.output_tokens, Some(40));
                 assert_eq!(signal.total_tokens, Some(140));
                 assert_eq!(signal.total_usd, Some(0.0123));
+            }
+            other => panic!("expected a usage payload, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn usage_total_includes_cache_tokens() {
+        let mut backend_session = None;
+        let line = r#"{"type":"result","session_id":"s","total_cost_usd":0.5,"usage":{"input_tokens":100,"output_tokens":40,"cache_read_input_tokens":10,"cache_creation_input_tokens":5}}"#;
+        let events = parse_line(
+            &test_clock(),
+            line,
+            "run-1",
+            "session-1",
+            &mut backend_session,
+        );
+        match &events[0].payload {
+            crate::wire::BridgeEventPayload::Usage { signal } => {
+                assert_eq!(signal.input_tokens, Some(100));
+                assert_eq!(signal.output_tokens, Some(40));
+                // 100 + 40 + 10 + 5
+                assert_eq!(signal.total_tokens, Some(155));
             }
             other => panic!("expected a usage payload, got {other:?}"),
         }
