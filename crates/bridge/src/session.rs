@@ -1,5 +1,6 @@
-use crate::adapter::AgentBackend;
+use crate::adapter::{AgentBackend, BridgeError};
 use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -54,8 +55,10 @@ pub enum DispatchControlEventKind {
     StateChanged,
     Launch,
     Reply,
+    FollowUp,
     Stop,
     Resume,
+    ProcessExit,
     Approve,
     Reject,
     Timeout,
@@ -153,6 +156,132 @@ pub struct PolicyHint {
     pub created_at: String,
 }
 
+impl DispatchRunState {
+    pub fn can_transition_to(&self, next: &Self) -> bool {
+        matches!(
+            (self, next),
+            (Self::Created, Self::Queued)
+                | (Self::Created, Self::Failed)
+                | (Self::Created, Self::Cancelled)
+                | (Self::Queued, Self::Starting)
+                | (Self::Queued, Self::Failed)
+                | (Self::Queued, Self::Cancelled)
+                | (Self::Starting, Self::Running)
+                | (Self::Starting, Self::NeedsInput)
+                | (Self::Starting, Self::Stopping)
+                | (Self::Starting, Self::Failed)
+                | (Self::Starting, Self::Cancelled)
+                | (Self::Running, Self::NeedsInput)
+                | (Self::Running, Self::Finalizing)
+                | (Self::Running, Self::Stopping)
+                | (Self::Running, Self::Failed)
+                | (Self::Running, Self::Cancelled)
+                | (Self::NeedsInput, Self::Running)
+                | (Self::NeedsInput, Self::Finalizing)
+                | (Self::NeedsInput, Self::Stopping)
+                | (Self::NeedsInput, Self::Failed)
+                | (Self::NeedsInput, Self::Cancelled)
+                | (Self::Finalizing, Self::Completed)
+                | (Self::Finalizing, Self::Failed)
+                | (Self::Finalizing, Self::Cancelled)
+                | (Self::Stopping, Self::Failed)
+                | (Self::Stopping, Self::Cancelled)
+        )
+    }
+
+    pub fn is_terminal(&self) -> bool {
+        matches!(self, Self::Completed | Self::Failed | Self::Cancelled)
+    }
+}
+
+impl DispatchRun {
+    pub fn new(
+        id: impl Into<String>,
+        session_id: impl Into<String>,
+        task: impl Into<String>,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            session_id: session_id.into(),
+            state: DispatchRunState::Created,
+            task: task.into(),
+            started_at: None,
+            completed_at: None,
+            failure_reason: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DispatchRunRecord {
+    pub run: DispatchRun,
+    pub control_events: Vec<DispatchControlEvent>,
+}
+
+impl DispatchRunRecord {
+    pub fn new(run: DispatchRun) -> Self {
+        Self {
+            run,
+            control_events: Vec::new(),
+        }
+    }
+
+    pub fn transition_to(
+        &mut self,
+        next: DispatchRunState,
+        created_at: impl Into<String>,
+    ) -> Result<DispatchControlEvent, BridgeError> {
+        let created_at = created_at.into();
+        if !self.run.state.can_transition_to(&next) {
+            return Err(BridgeError::new(
+                "invalid_state_transition",
+                format!(
+                    "cannot transition run {} from {:?} to {:?}",
+                    self.run.id, self.run.state, next
+                ),
+            ));
+        }
+
+        let previous = self.run.state.clone();
+        self.run.state = next.clone();
+        if matches!(
+            next,
+            DispatchRunState::Running | DispatchRunState::NeedsInput
+        ) && self.run.started_at.is_none()
+        {
+            self.run.started_at = Some(created_at.clone());
+        }
+        if next.is_terminal() {
+            self.run.completed_at = Some(created_at.clone());
+        }
+
+        self.append_event(
+            DispatchControlEventKind::StateChanged,
+            created_at,
+            format!("state: {:?} -> {:?}", previous, next),
+        )
+    }
+
+    pub fn append_event(
+        &mut self,
+        kind: DispatchControlEventKind,
+        created_at: impl Into<String>,
+        summary: impl Into<String>,
+    ) -> Result<DispatchControlEvent, BridgeError> {
+        let event = DispatchControlEvent {
+            id: Uuid::new_v4().to_string(),
+            session_id: self.run.session_id.clone(),
+            run_id: self.run.id.clone(),
+            kind,
+            created_at: created_at.into(),
+            summary: summary.into(),
+        };
+        self.control_events.push(event.clone());
+        Ok(event)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -226,6 +355,44 @@ mod tests {
                 "summary": "Run started"
             })
         );
+    }
+
+    #[test]
+    fn rejects_invalid_transition_without_silent_noop() {
+        let mut record =
+            DispatchRunRecord::new(DispatchRun::new("run-1", "session-1", "build bridge core"));
+
+        record
+            .transition_to(DispatchRunState::Queued, "2026-06-07T12:00:00Z")
+            .expect("created can queue");
+        let error = record
+            .transition_to(DispatchRunState::Completed, "2026-06-07T12:00:01Z")
+            .expect_err("queued cannot complete directly");
+
+        assert_eq!(error.code, "invalid_state_transition");
+        assert_eq!(record.run.state, DispatchRunState::Queued);
+        assert_eq!(record.control_events.len(), 1);
+    }
+
+    #[test]
+    fn completion_requires_finalizing_state() {
+        let mut record =
+            DispatchRunRecord::new(DispatchRun::new("run-1", "session-1", "build bridge core"));
+        record
+            .transition_to(DispatchRunState::Queued, "2026-06-07T12:00:00Z")
+            .expect("created can queue");
+        record
+            .transition_to(DispatchRunState::Starting, "2026-06-07T12:00:01Z")
+            .expect("queued can start");
+        record
+            .transition_to(DispatchRunState::Running, "2026-06-07T12:00:02Z")
+            .expect("starting can run");
+
+        let error = record
+            .transition_to(DispatchRunState::Completed, "2026-06-07T12:00:03Z")
+            .expect_err("running cannot complete directly");
+
+        assert_eq!(error.code, "invalid_state_transition");
     }
 
     #[test]
