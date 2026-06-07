@@ -174,7 +174,6 @@ impl DispatchRunState {
                 | (Self::Running, Self::NeedsInput)
                 | (Self::Running, Self::Finalizing)
                 | (Self::Running, Self::Stopping)
-                | (Self::Running, Self::Completed)
                 | (Self::Running, Self::Failed)
                 | (Self::Running, Self::Cancelled)
                 | (Self::NeedsInput, Self::Running)
@@ -185,7 +184,6 @@ impl DispatchRunState {
                 | (Self::Finalizing, Self::Completed)
                 | (Self::Finalizing, Self::Failed)
                 | (Self::Finalizing, Self::Cancelled)
-                | (Self::Stopping, Self::Completed)
                 | (Self::Stopping, Self::Failed)
                 | (Self::Stopping, Self::Cancelled)
         )
@@ -370,6 +368,27 @@ mod tests {
         assert_eq!(error.code, "invalid_state_transition");
         assert_eq!(record.run.state, DispatchRunState::Queued);
         assert_eq!(record.control_events.len(), 1);
+    }
+
+    #[test]
+    fn completion_requires_finalizing_state() {
+        let mut record =
+            DispatchRunRecord::new(DispatchRun::new("run-1", "session-1", "build bridge core"));
+        record
+            .transition_to(DispatchRunState::Queued, "2026-06-07T12:00:00Z")
+            .expect("created can queue");
+        record
+            .transition_to(DispatchRunState::Starting, "2026-06-07T12:00:01Z")
+            .expect("queued can start");
+        record
+            .transition_to(DispatchRunState::Running, "2026-06-07T12:00:02Z")
+            .expect("starting can run");
+
+        let error = record
+            .transition_to(DispatchRunState::Completed, "2026-06-07T12:00:03Z")
+            .expect_err("running cannot complete directly");
+
+        assert_eq!(error.code, "invalid_state_transition");
     }
 
     #[test]

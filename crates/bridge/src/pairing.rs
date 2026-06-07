@@ -30,13 +30,14 @@ impl WorkspaceAllowlist {
     }
 
     pub fn allows(&self, workspace_root: &str) -> bool {
-        let workspace = normalize_path_text(workspace_root);
-        if workspace.is_empty() {
+        let Some(workspace) = normalize_path_text(workspace_root) else {
             return false;
-        }
+        };
 
         self.roots.iter().any(|root| {
-            let root = normalize_path_text(root);
+            let Some(root) = normalize_path_text(root) else {
+                return false;
+            };
             !root.is_empty() && (workspace == root || workspace.starts_with(&format!("{root}/")))
         })
     }
@@ -57,13 +58,24 @@ impl BackendAllowlist {
     }
 }
 
-fn normalize_path_text(path: &str) -> String {
+fn normalize_path_text(path: &str) -> Option<String> {
     let trimmed = path.trim().replace('\\', "/");
-    let normalized = trimmed.trim_end_matches('/').to_string();
+    let mut parts = Vec::new();
+    for part in trimmed.split('/') {
+        if part.is_empty() || part == "." {
+            continue;
+        }
+        if part == ".." {
+            return None;
+        }
+        parts.push(part);
+    }
+
+    let normalized = parts.join("/");
     if cfg!(windows) {
-        normalized.to_ascii_lowercase()
+        Some(normalized.to_ascii_lowercase())
     } else {
-        normalized
+        Some(normalized)
     }
 }
 
@@ -76,8 +88,10 @@ mod tests {
         let allowlist = WorkspaceAllowlist::new(vec!["C:/work/honeyhub".to_string()]);
 
         assert!(allowlist.allows("C:/work/honeyhub"));
+        assert!(allowlist.allows("C:/work/honeyhub/./crates/bridge"));
         assert!(allowlist.allows("C:/work/honeyhub/crates/bridge"));
         assert!(!allowlist.allows("C:/work/honeyhub-other"));
+        assert!(!allowlist.allows("C:/work/honeyhub/../other"));
         assert!(!allowlist.allows("C:/work/other"));
     }
 }

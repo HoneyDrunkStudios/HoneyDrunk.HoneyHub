@@ -52,7 +52,11 @@ impl WireFrame {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(
+    tag = "kind",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase"
+)]
 pub enum ClientCommand {
     Start { request: Box<StartRunRequest> },
     Reply { run_id: String, text: String },
@@ -167,6 +171,21 @@ mod tests {
                         }
                     }
                 }
+            })
+        );
+    }
+
+    #[test]
+    fn serializes_client_command_fields_as_camel_case() {
+        let command = ClientCommand::Resume {
+            session_id_or_transcript: "session-1".to_string(),
+        };
+
+        assert_eq!(
+            serde_json::to_value(command).expect("command serializes"),
+            json!({
+                "kind": "resume",
+                "sessionIdOrTranscript": "session-1"
             })
         );
     }

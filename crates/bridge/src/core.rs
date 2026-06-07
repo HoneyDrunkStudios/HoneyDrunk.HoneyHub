@@ -7,6 +7,7 @@ use crate::session::{
 };
 use crate::wire::{BridgeEvent, BridgeEventPayload};
 use std::collections::HashMap;
+use uuid::Uuid;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ReplyOutcome {
@@ -51,6 +52,9 @@ where
     ) -> Result<RunHandle, BridgeError> {
         let created_at = created_at.into();
         self.ensure_workspace_allowed(&request.workspace_root)?;
+        if request.requested_run_id.is_none() {
+            request.requested_run_id = Some(Uuid::new_v4().to_string());
+        }
         if request.session.backend != self.adapter.backend() {
             return Err(BridgeError::new(
                 "backend_mismatch",
@@ -59,7 +63,6 @@ where
         }
 
         let handle = self.adapter.start(request.clone())?;
-        request.requested_run_id = Some(handle.run_id.clone());
         let mut record = DispatchRunRecord::new(DispatchRun::new(
             handle.run_id.clone(),
             request.session.id.clone(),
@@ -142,17 +145,16 @@ where
         }
 
         let managed = self.run(run_id)?.clone();
-        let mut request = StartRunRequest {
+        let request = StartRunRequest {
             session: managed.session,
             workspace_root: managed.workspace_root,
             task: text.to_string(),
-            requested_run_id: None,
+            requested_run_id: Some(Uuid::new_v4().to_string()),
             follow_up_to_run_id: Some(run_id.to_string()),
             transcript: managed.transcript,
             launch_command: None,
         };
         let handle = self.adapter.start(request.clone())?;
-        request.requested_run_id = Some(handle.run_id.clone());
 
         {
             let original = self.run_mut(run_id)?;
@@ -253,14 +255,41 @@ where
         run_id: &str,
         exit: ProcessExitStatus,
     ) -> Result<(), BridgeError> {
+        if exit.run_id != run_id {
+            return Err(BridgeError::new(
+                "process_exit_run_mismatch",
+                "process exit status run id does not match the target run",
+            ));
+        }
+
         let managed = self.run_mut(run_id)?;
-        let next = if exit.success {
-            DispatchRunState::Completed
+        if exit.success {
+            match managed.record.run.state {
+                DispatchRunState::Stopping => {
+                    managed
+                        .record
+                        .transition_to(DispatchRunState::Cancelled, exit.exited_at.clone())?;
+                }
+                DispatchRunState::Finalizing => {
+                    managed
+                        .record
+                        .transition_to(DispatchRunState::Completed, exit.exited_at.clone())?;
+                }
+                _ => {
+                    managed
+                        .record
+                        .transition_to(DispatchRunState::Finalizing, exit.exited_at.clone())?;
+                    managed
+                        .record
+                        .transition_to(DispatchRunState::Completed, exit.exited_at.clone())?;
+                }
+            }
         } else {
             managed.record.run.failure_reason = Some(exit.summary());
-            DispatchRunState::Failed
-        };
-        managed.record.transition_to(next, exit.exited_at.clone())?;
+            managed
+                .record
+                .transition_to(DispatchRunState::Failed, exit.exited_at.clone())?;
+        }
         managed.record.append_event(
             DispatchControlEventKind::ProcessExit,
             exit.exited_at,
@@ -538,5 +567,57 @@ mod tests {
         );
         assert_eq!(start_requests[1].transcript.len(), 1);
         assert!(matches!(outcome, ReplyOutcome::FollowUpRunStarted(_)));
+    }
+
+    #[test]
+    fn process_exit_validates_run_id_and_preserves_stop_as_cancelled() {
+        let adapter = FakeAdapter::new(CapabilityFlags::claude_local());
+        let mut runtime = BridgeRuntime::new(
+            adapter,
+            WorkspaceAllowlist::new(vec!["C:/work".to_string()]),
+        );
+        let handle = runtime
+            .start(request(), "2026-06-07T12:00:00Z")
+            .expect("run starts");
+
+        let mismatch = runtime
+            .handle_process_exit(
+                &handle.run_id,
+                ProcessExitStatus {
+                    run_id: "other-run".to_string(),
+                    code: Some(0),
+                    signal: None,
+                    success: true,
+                    exited_at: "2026-06-07T12:03:00Z".to_string(),
+                },
+            )
+            .expect_err("mismatched exit is rejected");
+        assert_eq!(mismatch.code, "process_exit_run_mismatch");
+
+        runtime
+            .stop(&handle.run_id, "2026-06-07T12:04:00Z")
+            .expect("stop accepted");
+        runtime
+            .handle_process_exit(
+                &handle.run_id,
+                ProcessExitStatus {
+                    run_id: handle.run_id.clone(),
+                    code: Some(0),
+                    signal: None,
+                    success: true,
+                    exited_at: "2026-06-07T12:05:00Z".to_string(),
+                },
+            )
+            .expect("exit applies");
+
+        assert_eq!(
+            runtime
+                .run(&handle.run_id)
+                .expect("run exists")
+                .record
+                .run
+                .state,
+            DispatchRunState::Cancelled
+        );
     }
 }
