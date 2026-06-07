@@ -69,11 +69,10 @@ struct RunProcess {
 
 impl Drop for RunProcess {
     fn drop(&mut self) {
-        // Closing stdin signals EOF; killing + reaping prevents a zombie, and the
-        // reader thread ends once stdout closes.
+        // Closing stdin signals EOF; tearing down the process tree + reaping
+        // prevents a zombie, and the reader thread ends once stdout closes.
         self.stdin.take();
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        kill_process_tree(&mut self.child);
         if let Some(reader) = self.reader.take() {
             let _ = reader.join();
         }
@@ -130,6 +129,25 @@ impl ClaudeLocalAdapter {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+
+        // Put the child in its own process group so `stop` can signal the whole
+        // tree (the CLI may spawn tool/MCP subprocesses), matching the Windows
+        // `taskkill /T` behaviour.
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            // SAFETY: `setpgid(0, 0)` runs in the forked child before exec; it only
+            // sets the child's process group and is async-signal-safe.
+            unsafe {
+                command.pre_exec(|| {
+                    if libc::setpgid(0, 0) == -1 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                    Ok(())
+                });
+            }
+        }
+
         let mut child = command.spawn().map_err(|error| {
             BridgeError::new(
                 "backend_unavailable",
@@ -202,7 +220,21 @@ fn kill_process_tree(child: &mut Child) {
     let _ = child.wait();
 }
 
-#[cfg(not(windows))]
+#[cfg(unix)]
+fn kill_process_tree(child: &mut Child) {
+    // The child leads its own process group (set via `pre_exec`), so signalling
+    // the group id (equal to the child pid) tears down the whole tree rather than
+    // just the direct child. Best-effort: an already-dead group yields ESRCH.
+    let pid = child.id() as libc::pid_t;
+    // SAFETY: `killpg` only sends a signal to a process group; it touches no memory.
+    unsafe {
+        libc::killpg(pid, libc::SIGKILL);
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+#[cfg(not(any(windows, unix)))]
 fn kill_process_tree(child: &mut Child) {
     let _ = child.kill();
     let _ = child.wait();
