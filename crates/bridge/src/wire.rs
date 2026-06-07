@@ -1,4 +1,4 @@
-use crate::adapter::{BridgeError, StartRunRequest};
+use crate::adapter::{AgentBackend, BridgeError, StartRunRequest};
 use crate::session::{
     DispatchControlEvent, DispatchMessage, DispatchRunState, PolicyHint, UsageSignal,
 };
@@ -243,7 +243,7 @@ pub enum BridgeEventPayload {
 #[serde(rename_all = "camelCase")]
 pub struct BridgeStatusEvent {
     pub state: DispatchRunState,
-    pub backend: String,
+    pub backend: AgentBackend,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub repo_hint: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -270,7 +270,7 @@ mod tests {
             "2026-06-07T12:00:00Z",
             BridgeStatusEvent {
                 state: DispatchRunState::Running,
-                backend: "claude.local".to_string(),
+                backend: AgentBackend::ClaudeLocal,
                 repo_hint: Some("HoneyDrunk.HoneyHub".to_string()),
                 link: None,
             },

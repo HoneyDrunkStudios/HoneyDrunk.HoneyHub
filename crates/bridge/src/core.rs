@@ -7,6 +7,7 @@ use crate::session::{
 };
 use crate::wire::{BridgeEvent, BridgeEventPayload};
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -52,6 +53,7 @@ where
     ) -> Result<RunHandle, BridgeError> {
         let created_at = created_at.into();
         self.ensure_workspace_allowed(&request.workspace_root)?;
+        self.ensure_request_workspace_matches(&request)?;
         if request.requested_run_id.is_none() {
             request.requested_run_id = Some(Uuid::new_v4().to_string());
         }
@@ -108,16 +110,14 @@ where
                 "backend adapter does not declare streaming_output",
             ));
         }
-        self.run(run_id)?;
+        let session_id = self.run(run_id)?.session.id.clone();
 
         let events = self.adapter.stream(run_id)?;
         for event in &events {
-            if event.run_id != run_id {
-                return Err(BridgeError::new(
-                    "event_run_mismatch",
-                    "stream event run id does not match requested run",
-                ));
-            }
+            self.validate_stream_event(event, run_id, &session_id)?;
+        }
+
+        for event in &events {
             match &event.payload {
                 BridgeEventPayload::Message { message } => {
                     self.run_mut(run_id)?.transcript.push(message.clone());
@@ -144,7 +144,13 @@ where
         created_at: impl Into<String>,
     ) -> Result<ReplyOutcome, BridgeError> {
         let created_at = created_at.into();
-        self.run(run_id)?;
+        let current = self.run(run_id)?.record.run.state.clone();
+        if current.is_terminal() {
+            return Err(BridgeError::new(
+                "terminal_run_reply",
+                format!("cannot reply to terminal run {run_id} in state {current:?}"),
+            ));
+        }
         let capabilities = self.adapter.capabilities();
         if capabilities.interactive_reply {
             self.adapter.reply(run_id, text)?;
@@ -292,6 +298,15 @@ where
         }
 
         let managed = self.run_mut(run_id)?;
+        if managed.record.run.state.is_terminal() {
+            managed.record.append_event(
+                DispatchControlEventKind::ProcessExit,
+                exit.exited_at,
+                "process exit recorded after terminal state",
+            )?;
+            return Ok(());
+        }
+
         if exit.success {
             match managed.record.run.state {
                 DispatchRunState::Stopping => {
@@ -324,6 +339,82 @@ where
             exit.exited_at,
             "process exit recorded",
         )?;
+        Ok(())
+    }
+
+    fn validate_stream_event(
+        &self,
+        event: &BridgeEvent,
+        expected_run_id: &str,
+        expected_session_id: &str,
+    ) -> Result<(), BridgeError> {
+        if event.run_id != expected_run_id {
+            return Err(BridgeError::new(
+                "event_run_mismatch",
+                "stream event run id does not match requested run",
+            ));
+        }
+        if event.session_id != expected_session_id {
+            return Err(BridgeError::new(
+                "event_session_mismatch",
+                "stream event session id does not match managed run session",
+            ));
+        }
+
+        match &event.payload {
+            BridgeEventPayload::Message { message } => {
+                if message.run_id != event.run_id || message.session_id != event.session_id {
+                    return Err(BridgeError::new(
+                        "event_message_mismatch",
+                        "stream message ids do not match containing event",
+                    ));
+                }
+            }
+            BridgeEventPayload::Control { event: control } => {
+                if control.run_id != event.run_id || control.session_id != event.session_id {
+                    return Err(BridgeError::new(
+                        "event_control_mismatch",
+                        "stream control event ids do not match containing event",
+                    ));
+                }
+            }
+            BridgeEventPayload::Usage { signal } => {
+                if signal.run_id != event.run_id || signal.session_id != event.session_id {
+                    return Err(BridgeError::new(
+                        "event_usage_mismatch",
+                        "stream usage signal ids do not match containing event",
+                    ));
+                }
+                if signal.backend != self.adapter.backend() {
+                    return Err(BridgeError::new(
+                        "event_backend_mismatch",
+                        "stream usage backend does not match bridge adapter",
+                    ));
+                }
+            }
+            BridgeEventPayload::PolicyHint { hint } => {
+                if hint.session_id != event.session_id
+                    || hint
+                        .run_id
+                        .as_ref()
+                        .is_some_and(|run_id| run_id != &event.run_id)
+                {
+                    return Err(BridgeError::new(
+                        "event_policy_hint_mismatch",
+                        "stream policy hint ids do not match containing event",
+                    ));
+                }
+            }
+            BridgeEventPayload::Status { status } => {
+                if status.backend != self.adapter.backend() {
+                    return Err(BridgeError::new(
+                        "event_backend_mismatch",
+                        "stream status backend does not match bridge adapter",
+                    ));
+                }
+            }
+        }
+
         Ok(())
     }
 
@@ -363,6 +454,38 @@ where
         }
     }
 
+    fn ensure_request_workspace_matches(
+        &self,
+        request: &StartRunRequest,
+    ) -> Result<(), BridgeError> {
+        let request_workspace = Self::canonical_workspace(&request.workspace_root)?;
+        let session_workspace = Self::canonical_workspace(&request.session.workspace_root)?;
+        if request_workspace == session_workspace {
+            Ok(())
+        } else {
+            Err(BridgeError::new(
+                "workspace_mismatch",
+                "request workspace root does not match session workspace root",
+            ))
+        }
+    }
+
+    fn canonical_workspace(workspace_root: &str) -> Result<PathBuf, BridgeError> {
+        let path = Path::new(workspace_root);
+        if !path.is_absolute() {
+            return Err(BridgeError::new(
+                "workspace_not_allowed",
+                "workspace root must be an absolute path",
+            ));
+        }
+        path.canonicalize().map_err(|_| {
+            BridgeError::new(
+                "workspace_not_allowed",
+                "workspace root could not be resolved on disk",
+            )
+        })
+    }
+
     fn ensure_run_id_available(&self, run_id: &str) -> Result<(), BridgeError> {
         if self.runs.contains_key(run_id) {
             Err(BridgeError::new(
@@ -388,6 +511,7 @@ mod tests {
         capabilities: CapabilityFlags,
         starts: RefCell<u64>,
         start_requests: RefCell<Vec<StartRunRequest>>,
+        stream_events: RefCell<Option<Vec<BridgeEvent>>>,
         replies: RefCell<Vec<String>>,
         stops: RefCell<Vec<String>>,
     }
@@ -398,9 +522,15 @@ mod tests {
                 capabilities,
                 starts: RefCell::new(0),
                 start_requests: RefCell::new(Vec::new()),
+                stream_events: RefCell::new(None),
                 replies: RefCell::new(Vec::new()),
                 stops: RefCell::new(Vec::new()),
             }
+        }
+
+        fn with_stream_events(self, events: Vec<BridgeEvent>) -> Self {
+            *self.stream_events.borrow_mut() = Some(events);
+            self
         }
     }
 
@@ -425,6 +555,10 @@ mod tests {
         }
 
         fn stream(&self, run_id: &str) -> Result<Vec<BridgeEvent>, BridgeError> {
+            if let Some(events) = self.stream_events.borrow().clone() {
+                return Ok(events);
+            }
+
             Ok(vec![
                 BridgeEvent {
                     id: "event-0".to_string(),
@@ -452,7 +586,7 @@ mod tests {
                     "2026-06-07T12:01:00Z",
                     BridgeStatusEvent {
                         state: DispatchRunState::NeedsInput,
-                        backend: "claude.local".to_string(),
+                        backend: AgentBackend::ClaudeLocal,
                         repo_hint: Some("HoneyDrunk.HoneyHub".to_string()),
                         link: None,
                     },
@@ -688,5 +822,109 @@ mod tests {
 
         assert_eq!(error.code, "duplicate_run_id");
         assert!(runtime.run("run-fixed").is_ok());
+    }
+
+    #[test]
+    fn rejects_session_workspace_mismatch_before_launch() {
+        let (allowlist_root, workspace_root) = workspace_paths();
+        let (_other_root, other_workspace) = workspace_paths();
+        let adapter = FakeAdapter::new(CapabilityFlags::claude_local());
+        let mut runtime =
+            BridgeRuntime::new(adapter, WorkspaceAllowlist::new(vec![allowlist_root]));
+        let mut mismatched = request(&workspace_root);
+        mismatched.session.workspace_root = other_workspace;
+
+        let error = runtime
+            .start(mismatched, "2026-06-07T12:00:00Z")
+            .expect_err("mismatched session workspace is rejected");
+
+        assert_eq!(error.code, "workspace_mismatch");
+        assert_eq!(*runtime.adapter.starts.borrow(), 0);
+    }
+
+    #[test]
+    fn rejects_inconsistent_stream_payloads_without_mutating_run() {
+        let (allowlist_root, workspace_root) = workspace_paths();
+        let message = DispatchMessage {
+            id: "message-1".to_string(),
+            session_id: "session-1".to_string(),
+            run_id: "other-run".to_string(),
+            role: DispatchMessageRole::Agent,
+            body: "bad ids".to_string(),
+            created_at: "2026-06-07T12:01:00Z".to_string(),
+            is_partial: Some(false),
+        };
+        let adapter = FakeAdapter::new(CapabilityFlags::claude_local()).with_stream_events(vec![
+            BridgeEvent::message(
+                "event-1",
+                "session-1",
+                "run-fixed",
+                1,
+                "2026-06-07T12:01:00Z",
+                message,
+            ),
+        ]);
+        let mut runtime =
+            BridgeRuntime::new(adapter, WorkspaceAllowlist::new(vec![allowlist_root]));
+        let mut start = request(&workspace_root);
+        start.requested_run_id = Some("run-fixed".to_string());
+        let handle = runtime
+            .start(start, "2026-06-07T12:00:00Z")
+            .expect("run starts");
+
+        let error = runtime
+            .stream_events(&handle.run_id)
+            .expect_err("mismatched payload ids are rejected");
+
+        assert_eq!(error.code, "event_message_mismatch");
+        assert!(runtime
+            .run(&handle.run_id)
+            .expect("run exists")
+            .transcript
+            .is_empty());
+    }
+
+    #[test]
+    fn terminal_runs_reject_replies_and_ignore_late_exit_transitions() {
+        let (allowlist_root, workspace_root) = workspace_paths();
+        let adapter = FakeAdapter::new(CapabilityFlags::claude_local());
+        let mut runtime =
+            BridgeRuntime::new(adapter, WorkspaceAllowlist::new(vec![allowlist_root]));
+        let handle = runtime
+            .start(request(&workspace_root), "2026-06-07T12:00:00Z")
+            .expect("run starts");
+
+        runtime
+            .handle_process_exit(
+                &handle.run_id,
+                ProcessExitStatus {
+                    run_id: handle.run_id.clone(),
+                    code: Some(0),
+                    signal: None,
+                    success: true,
+                    exited_at: "2026-06-07T12:01:00Z".to_string(),
+                },
+            )
+            .expect("exit completes run");
+        runtime
+            .handle_process_exit(
+                &handle.run_id,
+                ProcessExitStatus {
+                    run_id: handle.run_id.clone(),
+                    code: Some(0),
+                    signal: None,
+                    success: true,
+                    exited_at: "2026-06-07T12:02:00Z".to_string(),
+                },
+            )
+            .expect("late exit is recorded without a transition");
+        let error = runtime
+            .reply(&handle.run_id, "continue", "2026-06-07T12:03:00Z")
+            .expect_err("terminal run cannot receive replies");
+
+        let managed = runtime.run(&handle.run_id).expect("run exists");
+        assert_eq!(managed.record.run.state, DispatchRunState::Completed);
+        assert_eq!(error.code, "terminal_run_reply");
+        assert!(runtime.adapter.replies.borrow().is_empty());
     }
 }

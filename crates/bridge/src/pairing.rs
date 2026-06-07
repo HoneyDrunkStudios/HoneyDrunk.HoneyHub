@@ -70,16 +70,16 @@ impl BackendAllowlist {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::fs;
 
     #[test]
     fn allowlist_accepts_root_or_descendant_only() {
-        let root = std::env::temp_dir().join(format!("honeyhub-{}", Uuid::new_v4()));
+        let root = tempfile::TempDir::new().expect("temp root is created");
+        let root = root.path();
         let workspace = root.join("workspace");
         let child = workspace.join("crates").join("bridge");
         let outside = root.join("outside");
-        fs::create_dir_all(&child).expect("child workspace is created");
-        fs::create_dir_all(&outside).expect("outside workspace is created");
+        std::fs::create_dir_all(&child).expect("child workspace is created");
+        std::fs::create_dir_all(&outside).expect("outside workspace is created");
 
         let allowlist = WorkspaceAllowlist::new(vec![workspace.to_string_lossy().to_string()]);
 
