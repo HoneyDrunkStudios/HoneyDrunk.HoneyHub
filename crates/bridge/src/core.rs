@@ -137,7 +137,8 @@ where
                 }
                 _ => {}
             }
-            self.run_mut(run_id)?.event_log.push(event.clone());
+            let managed = self.run_mut(run_id)?;
+            Self::push_bridge_event(managed, event.clone());
         }
         Ok(events)
     }
@@ -175,14 +176,21 @@ where
             return Ok(ReplyOutcome::LiveReplyAccepted);
         }
 
-        let managed = self.run(run_id)?.clone();
+        let (session, workspace_root, transcript) = {
+            let managed = self.run(run_id)?;
+            (
+                managed.session.clone(),
+                managed.workspace_root.clone(),
+                managed.transcript.clone(),
+            )
+        };
         let request = StartRunRequest {
-            session: managed.session,
-            workspace_root: managed.workspace_root,
+            session,
+            workspace_root,
             task: text.to_string(),
             requested_run_id: Some(Uuid::new_v4().to_string()),
             follow_up_to_run_id: Some(run_id.to_string()),
-            transcript: managed.transcript,
+            transcript,
             launch_command: None,
         };
         if let Some(requested_run_id) = &request.requested_run_id {
@@ -527,9 +535,12 @@ where
 
     fn push_control_bridge_event(managed: &mut ManagedRun, event: DispatchControlEvent) {
         let sequence = managed.event_log.len() as u64;
-        managed
-            .event_log
-            .push(Self::control_bridge_event(sequence, event));
+        Self::push_bridge_event(managed, Self::control_bridge_event(sequence, event));
+    }
+
+    fn push_bridge_event(managed: &mut ManagedRun, mut event: BridgeEvent) {
+        event.sequence = managed.event_log.len() as u64;
+        managed.event_log.push(event);
     }
 
     fn control_bridge_event(sequence: u64, event: DispatchControlEvent) -> BridgeEvent {
@@ -986,6 +997,10 @@ mod tests {
             .expect("events replay");
         assert!(all_events.iter().any(|event| event.id == "event-0"));
         assert!(all_events.iter().any(|event| event.id == "event-1"));
+        assert!(all_events
+            .iter()
+            .enumerate()
+            .all(|(sequence, event)| event.sequence == sequence as u64));
 
         let missed_events = runtime
             .replay_events(&ReconnectRequest {
