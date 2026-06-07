@@ -11,6 +11,6 @@ pub use artifact::{ArtifactKind, DispatchArtifact};
 pub use pairing::{BackendAllowlist, BridgeIdentity, WorkspaceAllowlist};
 pub use process::ProcessHandle;
 pub use session::{
-    DispatchControlEvent, DispatchMessage, DispatchRun, DispatchRunState, DispatchSession,
-    UsageFidelity, UsageSignal,
+    DispatchControlEvent, DispatchControlEventKind, DispatchMessage, DispatchMessageRole,
+    DispatchRun, DispatchRunState, DispatchSession, UsageFidelity, UsageSignal,
 };

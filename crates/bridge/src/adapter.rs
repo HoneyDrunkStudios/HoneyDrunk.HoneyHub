@@ -1,13 +1,17 @@
 use crate::session::{DispatchMessage, DispatchSession};
+use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AgentBackend {
+    #[serde(rename = "claude.local")]
     ClaudeLocal,
+    #[serde(rename = "codex.local")]
     CodexLocal,
+    #[serde(rename = "copilot.local")]
     CopilotLocal,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CapabilityFlags {
     pub streaming_output: bool,
     pub interactive_reply: bool,
@@ -32,19 +36,21 @@ impl CapabilityFlags {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct StartRunRequest {
     pub session: DispatchSession,
     pub workspace_root: String,
     pub task: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct RunHandle {
     pub run_id: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BridgeError {
     pub code: String,
     pub message: String,

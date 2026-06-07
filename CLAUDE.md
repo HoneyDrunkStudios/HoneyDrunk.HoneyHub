@@ -4,9 +4,9 @@ This repo is the HoneyHub Agent Cockpit. It is a mixed TypeScript and Rust works
 
 ## Context
 
-- Architecture context: `C:\Users\tatte\source\repos\HoneyDrunkStudios\HoneyDrunk.Architecture\repos\HoneyDrunk.HoneyHub\overview.md`
+- Architecture context: `HoneyDrunk.Architecture/repos/HoneyDrunk.HoneyHub/overview.md`
 - Standup class: `studios-typescript-native`
-- Required PR checks: `PR / Node Workspace` and `PR / Rust Workspace` once the shared Actions TypeScript/Rust jobs are merged.
+- Required PR check: `pr / build`
 
 ## Boundaries
 
