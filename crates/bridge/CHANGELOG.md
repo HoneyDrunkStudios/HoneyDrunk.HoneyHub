@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.4.0] - 2026-06-07
+
+- Added the `claude.local` adapter (`adapters::claude_local`): drives the official Claude Code CLI in `stream-json` mode as a long-lived child process under the user's own local session, never holding or proxying subscription auth.
+- `start`/`stream`/`reply`/`stop`/`resume`: replies are same-process live input written to the still-open stdin; `stop` kills the process tree (`taskkill /T` on Windows); `resume` re-attaches via a fresh `-r <session_id>` process. Unavailable/unauthenticated launches fail honestly with `backend_unavailable`.
+- CLI JSONL is parsed into `BridgeEvent`s (assistant text + token deltas → messages, `needs_input` → status, artifacts → `DispatchArtifact`, `result` → exact tokens + USD `UsageSignal` taken directly, no rate-table computation).
+- Added an `Artifact` `BridgeEventPayload` variant; `BridgeRuntime` collects streamed artifacts onto the run.
+- Added a clock seam (`EventClock`) so the crate stays wall-clock-free while the adapter stamps live events.
+
 ## [0.3.0] - 2026-06-07
 
 - Added `PairingRegistry` for the bridge trust boundary: per-device identity, user-initiated pairing that issues a revocable token, constant-time token verification, and device revocation.

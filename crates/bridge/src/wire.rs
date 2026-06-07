@@ -1,4 +1,5 @@
 use crate::adapter::{AgentBackend, BridgeError, StartRunRequest};
+use crate::artifact::DispatchArtifact;
 use crate::session::{
     DispatchControlEvent, DispatchMessage, DispatchRunState, PolicyHint, UsageSignal,
 };
@@ -227,6 +228,24 @@ impl BridgeEvent {
             payload: BridgeEventPayload::PolicyHint { hint },
         }
     }
+
+    pub fn artifact(
+        id: impl Into<String>,
+        session_id: impl Into<String>,
+        run_id: impl Into<String>,
+        sequence: u64,
+        created_at: impl Into<String>,
+        artifact: DispatchArtifact,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            session_id: session_id.into(),
+            run_id: run_id.into(),
+            sequence,
+            created_at: created_at.into(),
+            payload: BridgeEventPayload::Artifact { artifact },
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -237,6 +256,7 @@ pub enum BridgeEventPayload {
     Usage { signal: UsageSignal },
     PolicyHint { hint: PolicyHint },
     Status { status: BridgeStatusEvent },
+    Artifact { artifact: DispatchArtifact },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -254,6 +274,7 @@ pub struct BridgeStatusEvent {
 mod tests {
     use super::*;
     use crate::adapter::AgentBackend;
+    use crate::artifact::ArtifactKind;
     use crate::session::{
         DispatchControlEventKind, DispatchMessageRole, DispatchSession, PolicyHintSeverity,
         UsageConfidence, UsageFidelity,
@@ -296,6 +317,57 @@ mod tests {
                             "state": "running",
                             "backend": "claude.local",
                             "repoHint": "HoneyDrunk.HoneyHub"
+                        }
+                    }
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn serializes_artifact_server_event_frame() {
+        let event = BridgeEvent::artifact(
+            "event-2",
+            "session-1",
+            "run-1",
+            2,
+            "2026-06-07T12:00:00Z",
+            DispatchArtifact {
+                id: "artifact-1".to_string(),
+                session_id: "session-1".to_string(),
+                run_id: "run-1".to_string(),
+                kind: ArtifactKind::PullRequest,
+                label: "Open PR".to_string(),
+                href: Some("https://example.test/pr/1".to_string()),
+                repo_relative_path: None,
+                created_at: "2026-06-07T12:00:00Z".to_string(),
+            },
+        );
+        let frame = WireFrame::server_event("frame-2", event, "2026-06-07T12:00:00Z");
+
+        assert_eq!(
+            serde_json::to_value(frame).expect("frame serializes"),
+            json!({
+                "protocol": "honeyhub.bridge.v1",
+                "frameId": "frame-2",
+                "kind": "server_event",
+                "createdAt": "2026-06-07T12:00:00Z",
+                "event": {
+                    "id": "event-2",
+                    "sessionId": "session-1",
+                    "runId": "run-1",
+                    "sequence": 2,
+                    "createdAt": "2026-06-07T12:00:00Z",
+                    "payload": {
+                        "kind": "artifact",
+                        "artifact": {
+                            "id": "artifact-1",
+                            "sessionId": "session-1",
+                            "runId": "run-1",
+                            "kind": "pull_request",
+                            "label": "Open PR",
+                            "href": "https://example.test/pr/1",
+                            "createdAt": "2026-06-07T12:00:00Z"
                         }
                     }
                 }
@@ -419,6 +491,27 @@ mod tests {
             WireFrame::server_event(
                 "frame-hint",
                 BridgeEvent::policy_hint("event-hint", "session-1", "run-1", 4, created_at, hint),
+                created_at,
+            ),
+            WireFrame::server_event(
+                "frame-artifact",
+                BridgeEvent::artifact(
+                    "event-artifact",
+                    "session-1",
+                    "run-1",
+                    5,
+                    created_at,
+                    DispatchArtifact {
+                        id: "artifact-1".to_string(),
+                        session_id: "session-1".to_string(),
+                        run_id: "run-1".to_string(),
+                        kind: ArtifactKind::Branch,
+                        label: "feature/x".to_string(),
+                        href: None,
+                        repo_relative_path: Some("crates/bridge".to_string()),
+                        created_at: created_at.to_string(),
+                    },
+                ),
                 created_at,
             ),
             WireFrame::client_command(

@@ -41,8 +41,38 @@ The runtime never calls undeclared live-reply or stop capabilities. `start`
 returns a `RunHandle` that includes the run id and adapter-owned process id when
 the backend launches a child process. If `interactive_reply` is false, `reply` is
 routed through a follow-up run carrying the prior run id, workspace context, and
-caller-provided follow-up task. Backend-specific CLI adapters land in later
-packets.
+caller-provided follow-up task.
+
+## `claude.local` Backend
+
+`adapters::ClaudeLocalAdapter` is the first concrete adapter (ADR-0090 D2). It
+**shells out** to the official Claude Code CLI under the user's own local session
+and never holds, stores, or proxies subscription auth (`[Firm]` D10). It declares
+the spike-observed capability profile: streaming output, same-process interactive
+reply, resume, stop, structured events, and **exact** tokens + USD usage.
+
+- **start** launches `claude -p --output-format stream-json --input-format
+  stream-json --include-partial-messages --verbose [--model <m>]` as a long-lived
+  child in the run's workspace, then writes the task as a line-delimited `user`
+  JSON object to stdin and **keeps stdin open**.
+- **stream** drains the child's stdout JSONL and maps it to `BridgeEvent`s:
+  assistant text and `content_block_delta` tokens → messages; `needs_input` →
+  a `NeedsInput` status; `artifact` → a `DispatchArtifact`; `result` → an exact
+  `UsageSignal` (tokens and USD taken directly, no rate-table computation —
+  ADR-0092 D2) and the captured backend `session_id`.
+- **reply** is a same-process live reply: another `user` line written to the
+  still-open stdin (no resume).
+- **stop** closes stdin and kills the process tree (`taskkill /T` on Windows,
+  `kill` elsewhere).
+- **resume** re-attaches with a fresh `claude -p -r <session_id> ...` child.
+- If the CLI is unavailable or unauthenticated, `start` fails honestly with
+  `backend_unavailable` — the adapter never fabricates a stream.
+
+Because methods take `&self`, live child processes are held behind a `Mutex`. The
+adapter takes an injected `EventClock` (the crate stays wall-clock-free); a host
+can pass its own, or use `default_event_clock`. Produced branches/PRs/drafts are
+reported as `DispatchArtifact`s (metadata + link only, ADR-0090 D9); the adapter
+opens no direct-write path to authoritative state.
 
 ## Process Lifecycle
 

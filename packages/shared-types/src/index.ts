@@ -189,7 +189,8 @@ export type BridgeEventPayload =
   | { kind: "control"; event: DispatchControlEvent }
   | { kind: "usage"; signal: UsageSignal }
   | { kind: "policy_hint"; hint: PolicyHint }
-  | { kind: "status"; status: BridgeStatusEvent };
+  | { kind: "status"; status: BridgeStatusEvent }
+  | { kind: "artifact"; artifact: DispatchArtifact };
 
 export interface BridgeStatusEvent {
   state: DispatchRunState;

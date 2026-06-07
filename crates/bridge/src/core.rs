@@ -1,4 +1,5 @@
 use crate::adapter::{AgentBackendAdapter, BridgeError, RunHandle, StartRunRequest};
+use crate::artifact::DispatchArtifact;
 use crate::pairing::{BackendAllowlist, WorkspaceAllowlist};
 use crate::process::{ProcessExitStatus, ProcessHandle};
 use crate::session::{
@@ -24,6 +25,7 @@ pub struct ManagedRun {
     pub process: ProcessHandle,
     pub transcript: Vec<DispatchMessage>,
     pub event_log: Vec<BridgeEvent>,
+    pub artifacts: Vec<DispatchArtifact>,
 }
 
 pub struct BridgeRuntime<A>
@@ -108,6 +110,7 @@ where
                 process,
                 transcript: request.transcript,
                 event_log: Self::control_events_to_bridge_events(control_events),
+                artifacts: Vec::new(),
             },
         );
 
@@ -141,6 +144,9 @@ where
                 }
                 BridgeEventPayload::Status { status } => {
                     self.transition_run(run_id, status.state.clone(), event.created_at.clone())?;
+                }
+                BridgeEventPayload::Artifact { artifact } => {
+                    self.run_mut(run_id)?.artifacts.push(artifact.clone());
                 }
                 _ => {}
             }
@@ -256,6 +262,7 @@ where
                 ),
                 transcript: request.transcript,
                 event_log: Self::control_events_to_bridge_events(control_events),
+                artifacts: Vec::new(),
             },
         );
 
@@ -453,6 +460,14 @@ where
                     return Err(BridgeError::new(
                         "event_backend_mismatch",
                         "stream status backend does not match bridge adapter",
+                    ));
+                }
+            }
+            BridgeEventPayload::Artifact { artifact } => {
+                if artifact.run_id != event.run_id || artifact.session_id != event.session_id {
+                    return Err(BridgeError::new(
+                        "event_artifact_mismatch",
+                        "stream artifact ids do not match containing event",
                     ));
                 }
             }
@@ -1070,6 +1085,49 @@ mod tests {
 
         assert!(missed_events.iter().all(|event| event.id != "event-0"));
         assert!(missed_events.iter().any(|event| event.id == "event-1"));
+    }
+
+    #[test]
+    fn stream_collects_artifacts_into_managed_run() {
+        use crate::artifact::{ArtifactKind, DispatchArtifact};
+        let (allowlist_root, workspace_root) = workspace_paths();
+        let artifact_event = BridgeEvent::artifact(
+            "event-artifact",
+            "session-1",
+            "run-fixed",
+            0,
+            "2026-06-07T12:01:00Z",
+            DispatchArtifact {
+                id: "artifact-1".to_string(),
+                session_id: "session-1".to_string(),
+                run_id: "run-fixed".to_string(),
+                kind: ArtifactKind::PullRequest,
+                label: "Open PR".to_string(),
+                href: Some("https://example.test/pr/1".to_string()),
+                repo_relative_path: None,
+                created_at: "2026-06-07T12:01:00Z".to_string(),
+            },
+        );
+        let adapter = FakeAdapter::new(CapabilityFlags::claude_local())
+            .with_stream_events(vec![artifact_event]);
+        let mut runtime = BridgeRuntime::new(
+            adapter,
+            WorkspaceAllowlist::new(vec![allowlist_root]),
+            BackendAllowlist::new(vec![AgentBackend::ClaudeLocal]),
+        );
+        let mut start = request(&workspace_root);
+        start.requested_run_id = Some("run-fixed".to_string());
+        let handle = runtime
+            .start(start, "2026-06-07T12:00:00Z")
+            .expect("run starts");
+
+        runtime
+            .stream_events(&handle.run_id)
+            .expect("artifact stream applies");
+
+        let managed = runtime.run(&handle.run_id).expect("run exists");
+        assert_eq!(managed.artifacts.len(), 1);
+        assert_eq!(managed.artifacts[0].kind, ArtifactKind::PullRequest);
     }
 
     #[test]
