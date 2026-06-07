@@ -28,6 +28,18 @@ impl WorkspaceAllowlist {
     pub fn roots(&self) -> &[String] {
         &self.roots
     }
+
+    pub fn allows(&self, workspace_root: &str) -> bool {
+        let workspace = normalize_path_text(workspace_root);
+        if workspace.is_empty() {
+            return false;
+        }
+
+        self.roots.iter().any(|root| {
+            let root = normalize_path_text(root);
+            !root.is_empty() && (workspace == root || workspace.starts_with(&format!("{root}/")))
+        })
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -42,5 +54,30 @@ impl BackendAllowlist {
 
     pub fn backends(&self) -> &[String] {
         &self.backends
+    }
+}
+
+fn normalize_path_text(path: &str) -> String {
+    let trimmed = path.trim().replace('\\', "/");
+    let normalized = trimmed.trim_end_matches('/').to_string();
+    if cfg!(windows) {
+        normalized.to_ascii_lowercase()
+    } else {
+        normalized
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn allowlist_accepts_root_or_descendant_only() {
+        let allowlist = WorkspaceAllowlist::new(vec!["C:/work/honeyhub".to_string()]);
+
+        assert!(allowlist.allows("C:/work/honeyhub"));
+        assert!(allowlist.allows("C:/work/honeyhub/crates/bridge"));
+        assert!(!allowlist.allows("C:/work/honeyhub-other"));
+        assert!(!allowlist.allows("C:/work/other"));
     }
 }

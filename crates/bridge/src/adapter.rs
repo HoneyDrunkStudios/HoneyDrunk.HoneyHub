@@ -1,4 +1,5 @@
 use crate::session::{DispatchMessage, DispatchSession};
+use crate::wire::BridgeEvent;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -34,6 +35,18 @@ impl CapabilityFlags {
             usage_estimated: false,
         }
     }
+
+    pub fn one_shot() -> Self {
+        Self {
+            streaming_output: true,
+            interactive_reply: false,
+            resume_session: false,
+            stop_signal: false,
+            structured_events: false,
+            usage_exact: false,
+            usage_estimated: true,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -42,6 +55,14 @@ pub struct StartRunRequest {
     pub session: DispatchSession,
     pub workspace_root: String,
     pub task: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub requested_run_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub follow_up_to_run_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub transcript: Vec<DispatchMessage>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub launch_command: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -69,7 +90,7 @@ pub trait AgentBackendAdapter {
     fn backend(&self) -> AgentBackend;
     fn capabilities(&self) -> CapabilityFlags;
     fn start(&self, request: StartRunRequest) -> Result<RunHandle, BridgeError>;
-    fn stream(&self, run_id: &str) -> Result<Vec<DispatchMessage>, BridgeError>;
+    fn stream(&self, run_id: &str) -> Result<Vec<BridgeEvent>, BridgeError>;
     fn reply(&self, run_id: &str, text: &str) -> Result<(), BridgeError>;
     fn stop(&self, run_id: &str) -> Result<(), BridgeError>;
     fn resume(&self, session_id_or_transcript: &str) -> Result<RunHandle, BridgeError>;
@@ -96,7 +117,7 @@ mod tests {
             })
         }
 
-        fn stream(&self, _run_id: &str) -> Result<Vec<DispatchMessage>, BridgeError> {
+        fn stream(&self, _run_id: &str) -> Result<Vec<BridgeEvent>, BridgeError> {
             Ok(Vec::new())
         }
 
