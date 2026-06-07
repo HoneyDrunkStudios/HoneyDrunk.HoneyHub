@@ -26,15 +26,18 @@ export function BridgeSettings({ initialState, factory }: BridgeSettingsProps) {
   const [workspaceRoot, setWorkspaceRoot] = useState("");
   const [error, setError] = useState<string | undefined>(undefined);
 
-  // Validate eagerly against the current state (so a thrown error surfaces in this
-  // tick), then commit with a functional update so the transition always applies
-  // to the latest committed state rather than a stale render-time snapshot.
+  // Compute the next state exactly once (model transitions can consume a
+  // PairingFactory id/token, so a second evaluation would waste one) and commit
+  // it. Each handler is a discrete user event, so `state` is the latest committed
+  // value here — there is no batched multi-update in a single tick to go stale
+  // against. Returns whether the transition succeeded so callers clear inputs
+  // only on success.
   const apply = (
     compute: (prev: BridgeSettingsState) => BridgeSettingsState
   ): boolean => {
     try {
-      compute(state);
-      setState((prev) => compute(prev));
+      const next = compute(state);
+      setState(next);
       setError(undefined);
       return true;
     } catch (cause) {
@@ -84,7 +87,7 @@ export function BridgeSettings({ initialState, factory }: BridgeSettingsProps) {
               now. It is shown only once.
             </p>
             <code>{state.lastGrant.token}</code>
-            <button type="button" onClick={() => setState(acknowledgeGrant(state))}>
+            <button type="button" onClick={() => setState(acknowledgeGrant)}>
               Done
             </button>
           </div>

@@ -174,19 +174,22 @@ impl PairingRegistry {
     }
 }
 
-/// Compare two secrets without short-circuiting on the first differing byte or on
-/// a length mismatch, so a token check does not leak prefix or length information
-/// through timing. A length difference is folded into the accumulator rather than
-/// returned early, and the loop runs over the longer input.
+/// Constant-time comparison of two token strings. A length mismatch returns
+/// `false` immediately: a pairing token is a fixed-length **public** protocol
+/// constant (not a secret), so rejecting a wrong-length input leaks nothing
+/// sensitive — and it bounds the work to the expected token length, so an
+/// oversized attacker-supplied token cannot force `O(devices * attacker_len)`
+/// comparisons. For equal-length inputs the loop does **not** short-circuit on the
+/// first differing byte, so it never leaks where two secrets diverge.
 fn constant_time_eq(left: &str, right: &str) -> bool {
     let left = left.as_bytes();
     let right = right.as_bytes();
-    let mut diff = (left.len() ^ right.len()) as u64;
-    let len = left.len().max(right.len());
-    for index in 0..len {
-        let a = left.get(index).copied().unwrap_or(0);
-        let b = right.get(index).copied().unwrap_or(0);
-        diff |= u64::from(a ^ b);
+    if left.len() != right.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (a, b) in left.iter().zip(right.iter()) {
+        diff |= a ^ b;
     }
     diff == 0
 }
