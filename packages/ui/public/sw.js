@@ -1,11 +1,14 @@
 const CACHE_NAME = "honeyhub-shell-v1";
+const SCOPE_URL = new URL(self.registration.scope);
+const SCOPE_PATH = SCOPE_URL.pathname;
+const scopedUrl = (path) => new URL(path, self.registration.scope).toString();
 const APP_SHELL = [
-  "/",
-  "/manifest.webmanifest",
-  "/icons/icon-192.png",
-  "/icons/icon-512.png",
-  "/icons/icon-192.svg",
-  "/icons/icon-512.svg"
+  scopedUrl("./"),
+  scopedUrl("manifest.webmanifest"),
+  scopedUrl("icons/icon-192.png"),
+  scopedUrl("icons/icon-512.png"),
+  scopedUrl("icons/icon-192.svg"),
+  scopedUrl("icons/icon-512.svg")
 ];
 const CACHEABLE_DESTINATIONS = new Set(["script", "style", "worker", "font"]);
 
@@ -26,19 +29,21 @@ self.addEventListener("activate", (event) => {
 self.addEventListener("fetch", (event) => {
   const url = new URL(event.request.url);
 
-  if (event.request.method !== "GET" || url.origin !== self.location.origin) {
+  if (event.request.method !== "GET" || url.origin !== self.location.origin || !url.pathname.startsWith(SCOPE_PATH)) {
     return;
   }
 
   if (event.request.mode === "navigate") {
-    event.respondWith(fetch(event.request).catch(() => caches.match("/")));
+    event.respondWith(fetch(event.request).catch(() => caches.match(scopedUrl("./"))));
     return;
   }
 
+  const scopedPath = url.pathname.slice(SCOPE_PATH.length);
+
   if (
     CACHEABLE_DESTINATIONS.has(event.request.destination) ||
-    url.pathname.startsWith("/assets/") ||
-    url.pathname.startsWith("/src/")
+    scopedPath.startsWith("assets/") ||
+    scopedPath.startsWith("src/")
   ) {
     event.respondWith(
       caches.match(event.request).then((cached) => {
