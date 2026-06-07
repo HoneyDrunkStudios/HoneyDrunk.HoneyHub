@@ -1,0 +1,18 @@
+name: Grid Review Request
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, ready_for_review]
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+
+jobs:
+  request-grid-review:
+    uses: HoneyDrunkStudios/HoneyDrunk.Actions/.github/workflows/job-review-request.yml@031616f4b131ddfa4f436a3b74160b7c104b827f # main, pinned 2026-06-07
+    with:
+      review-config-path: .honeydrunk-review.yaml
+    secrets:
+      github-token: ${{ secrets.GITHUB_TOKEN }}

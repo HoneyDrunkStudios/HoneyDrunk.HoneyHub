@@ -1,0 +1,3 @@
+enabled: true
+runner: local-worker
+review_risk_class: normal

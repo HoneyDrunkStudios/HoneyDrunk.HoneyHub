@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="HoneyHub icon">
+  <rect width="512" height="512" rx="96" fill="#101418"/>
+  <path d="M256 68 410 158v196L256 444 102 354V158L256 68Z" fill="#f6c343"/>
+  <path d="M256 124 356 182v116l-100 60-100-60V182l100-58Z" fill="#1b2328"/>
+  <path d="M204 224h104v42H204v-42Zm0 72h104v42H204v-42Z" fill="#f6c343"/>
+</svg>

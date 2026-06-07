@@ -1,0 +1,13 @@
+node_modules/
+dist/
+coverage/
+.vite/
+.next/
+target/
+.tauri/
+*.log
+.env
+.env.*
+!.env.example
+.DS_Store
+.vs/
