@@ -39,18 +39,46 @@ use uuid::Uuid;
 /// deterministic.
 pub type EventClock = Arc<dyn Fn() -> String + Send + Sync>;
 
-/// A best-effort production clock: epoch milliseconds as a fixed-width string.
-/// It sorts correctly for reconnect replay; a host that wants RFC3339 stamps can
-/// inject its own clock instead.
+/// A production clock that emits RFC3339 UTC timestamps (e.g.
+/// `2026-06-07T12:00:00.000Z`). It matches the RFC3339 strings the rest of the
+/// system uses, so adapter-minted events sort correctly against caller-supplied
+/// timestamps during reconnect replay (`BridgeRuntime::replay_events` orders by
+/// `created_at`). A host may still inject its own clock.
 pub fn default_event_clock() -> EventClock {
     Arc::new(|| {
         use std::time::{SystemTime, UNIX_EPOCH};
-        let millis = SystemTime::now()
+        let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .map(|elapsed| elapsed.as_millis())
-            .unwrap_or(0);
-        format!("{millis:013}")
+            .unwrap_or_default();
+        format_rfc3339_utc(now.as_secs(), now.subsec_millis())
     })
+}
+
+fn format_rfc3339_utc(secs: u64, millis: u32) -> String {
+    let days = (secs / 86_400) as i64;
+    let rem = secs % 86_400;
+    let (hour, minute, second) = (rem / 3600, (rem % 3600) / 60, rem % 60);
+    let (year, month, day) = civil_from_days(days);
+    format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}.{millis:03}Z")
+}
+
+/// Howard Hinnant's `civil_from_days`: convert days since the Unix epoch
+/// (1970-01-01) into a `(year, month, day)` proleptic-Gregorian date.
+fn civil_from_days(days: i64) -> (i64, u32, u32) {
+    let z = days + 719_468;
+    let era = (if z >= 0 { z } else { z - 146_096 }) / 146_097;
+    let doe = z - era * 146_097; // [0, 146096]
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365; // [0, 399]
+    let year = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // [0, 365]
+    let mp = (5 * doy + 2) / 153; // [0, 11]
+    let day = doy - (153 * mp + 2) / 5 + 1; // [1, 31]
+    let month = if mp < 10 { mp + 3 } else { mp - 9 }; // [1, 12]
+    (
+        if month <= 2 { year + 1 } else { year },
+        month as u32,
+        day as u32,
+    )
 }
 
 struct RunProcess {
@@ -639,6 +667,19 @@ mod tests {
 
     fn test_clock() -> EventClock {
         Arc::new(|| "2026-06-07T12:00:00Z".to_string())
+    }
+
+    #[test]
+    fn formats_rfc3339_utc_timestamps() {
+        assert_eq!(format_rfc3339_utc(0, 0), "1970-01-01T00:00:00.000Z");
+        assert_eq!(
+            format_rfc3339_utc(1_000_000_000, 0),
+            "2001-09-09T01:46:40.000Z"
+        );
+        assert_eq!(
+            format_rfc3339_utc(1_700_000_000, 123),
+            "2023-11-14T22:13:20.123Z"
+        );
     }
 
     #[test]
