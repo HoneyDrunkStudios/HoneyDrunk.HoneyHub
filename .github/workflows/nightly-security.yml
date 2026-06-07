@@ -1,0 +1,20 @@
+name: Nightly Security
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 9 * * 1"
+
+permissions:
+  contents: read
+
+jobs:
+  node-audit:
+    name: Node Security Audit
+    uses: HoneyDrunkStudios/HoneyDrunk.Actions/.github/workflows/job-node-security-audit.yml@main
+    with:
+      node-version-file: .nvmrc
+
+  rust-audit:
+    name: Rust Security Audit
+    uses: HoneyDrunkStudios/HoneyDrunk.Actions/.github/workflows/job-rust-security-audit.yml@main

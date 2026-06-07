@@ -1,0 +1,20 @@
+name: Nightly Dependencies
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 8 * * 1"
+
+permissions:
+  contents: read
+
+jobs:
+  node-deps:
+    name: Node Dependency Report
+    uses: HoneyDrunkStudios/HoneyDrunk.Actions/.github/workflows/job-node-dependency-report.yml@main
+    with:
+      node-version-file: .nvmrc
+
+  rust-deps:
+    name: Rust Dependency Report
+    uses: HoneyDrunkStudios/HoneyDrunk.Actions/.github/workflows/job-rust-dependency-report.yml@main

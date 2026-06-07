@@ -1,0 +1,19 @@
+name: pr
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  node:
+    name: Node Workspace
+    uses: HoneyDrunkStudios/HoneyDrunk.Actions/.github/workflows/job-node-workspace.yml@main
+    with:
+      node-version-file: .nvmrc
+
+  rust:
+    name: Rust Workspace
+    uses: HoneyDrunkStudios/HoneyDrunk.Actions/.github/workflows/job-rust-workspace.yml@main
