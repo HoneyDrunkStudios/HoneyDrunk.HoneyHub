@@ -199,9 +199,10 @@ export interface BridgeStatusEvent {
 }
 
 // --- Pairing + trust boundary (ADR-0090 D8) ---
-// These mirror the bridge's serde shapes. Only token-free views ever cross the
-// wire; the plaintext pairing token appears once in PairingGrant and is never
-// re-surfaced (ADR-0090 D8 no-secret-leak posture).
+// These mirror the bridge's serde shapes. Only token-free views ever reach a sync
+// surface, transcript, or notification; the plaintext pairing token appears once
+// in PairingGrant (the handshake response) and is never re-surfaced after that
+// single hop (ADR-0090 D8 no-secret-leak posture).
 
 export interface BridgeIdentityView {
   deviceId: string;

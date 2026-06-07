@@ -26,9 +26,13 @@ export function BridgeSettings({ initialState, factory }: BridgeSettingsProps) {
   const [workspaceRoot, setWorkspaceRoot] = useState("");
   const [error, setError] = useState<string | undefined>(undefined);
 
-  const apply = (next: () => BridgeSettingsState) => {
+  // Validate eagerly against the current state (so a thrown error surfaces in this
+  // tick), then commit with a functional update so the transition always applies
+  // to the latest committed state rather than a stale render-time snapshot.
+  const apply = (compute: (prev: BridgeSettingsState) => BridgeSettingsState) => {
     try {
-      setState(next());
+      compute(state);
+      setState((prev) => compute(prev));
       setError(undefined);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "unexpected error");
@@ -36,12 +40,12 @@ export function BridgeSettings({ initialState, factory }: BridgeSettingsProps) {
   };
 
   const onPair = () => {
-    apply(() => pairDevice(state, deviceName, factory));
+    apply((prev) => pairDevice(prev, deviceName, factory));
     setDeviceName("");
   };
 
   const onAddRoot = () => {
-    apply(() => addWorkspaceRoot(state, workspaceRoot));
+    apply((prev) => addWorkspaceRoot(prev, workspaceRoot));
     setWorkspaceRoot("");
   };
 
@@ -90,7 +94,7 @@ export function BridgeSettings({ initialState, factory }: BridgeSettingsProps) {
               {!device.revoked && (
                 <button
                   type="button"
-                  onClick={() => apply(() => revokeDevice(state, device.deviceId))}
+                  onClick={() => apply((prev) => revokeDevice(prev, device.deviceId))}
                 >
                   Revoke
                 </button>
@@ -117,7 +121,7 @@ export function BridgeSettings({ initialState, factory }: BridgeSettingsProps) {
               <code>{root}</code>
               <button
                 type="button"
-                onClick={() => apply(() => removeWorkspaceRoot(state, root))}
+                onClick={() => apply((prev) => removeWorkspaceRoot(prev, root))}
               >
                 Remove
               </button>
@@ -134,7 +138,7 @@ export function BridgeSettings({ initialState, factory }: BridgeSettingsProps) {
               type="checkbox"
               checked={state.backends.includes(backend)}
               onChange={(event) =>
-                apply(() => setBackendAllowed(state, backend, event.target.checked))
+                apply((prev) => setBackendAllowed(prev, backend, event.target.checked))
               }
             />
             {backend}

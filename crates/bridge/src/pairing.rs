@@ -26,9 +26,14 @@ impl BridgeIdentity {
 /// PWA presents on every wire-protocol connection; it lives only in local bridge
 /// config (ADR-0090 D11 local-only classification) and is never serialized into a
 /// transcript, notification, or any sync surface.
+///
+/// This type is **crate-private** on purpose: it carries the plaintext token, so
+/// downstream code never gets a handle that could be accidentally logged or
+/// serialized onto a sync surface. The public API only ever hands out the
+/// token-free [`PairedDeviceView`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct PairedDevice {
+pub(crate) struct PairedDevice {
     pub device_id: Uuid,
     pub display_name: String,
     pub token: String,
@@ -61,7 +66,10 @@ impl From<&PairedDevice> for PairedDeviceView {
 /// The result of a successful pairing handshake. The plaintext `token` is
 /// returned here exactly once — the caller shows it to the client device and
 /// must not persist or display it again (ADR-0090 D8 no-secret-leak posture).
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// It serializes as the handshake response the client receives over the wire;
+/// after that single hop the token is never re-surfaced.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct PairingGrant {
     pub device: PairedDeviceView,
     pub token: String,
@@ -87,10 +95,6 @@ impl PairingRegistry {
 
     pub fn identity(&self) -> &BridgeIdentity {
         &self.identity
-    }
-
-    pub fn devices(&self) -> &[PairedDevice] {
-        &self.devices
     }
 
     /// Visible (token-free) views of every paired device, safe to surface in the
@@ -123,17 +127,23 @@ impl PairingRegistry {
         }
     }
 
-    /// Verify a token presented on a wire-protocol connection. Returns the paired
-    /// device only when the token matches an active (non-revoked) pairing; a
-    /// revoked or unknown token is rejected.
-    pub fn verify(&self, token: &str) -> Option<&PairedDevice> {
-        self.devices
-            .iter()
-            .find(|device| !device.revoked && constant_time_eq(&device.token, token))
+    /// Verify a token presented on a wire-protocol connection. Returns a
+    /// token-free view of the paired device only when the token matches an active
+    /// (non-revoked) pairing; a revoked or unknown token is rejected. The view
+    /// shape means a caller can identify the device without ever holding the
+    /// secret.
+    pub fn verify(&self, token: &str) -> Option<PairedDeviceView> {
+        self.find_active(token).map(PairedDeviceView::from)
     }
 
     pub fn is_authorized(&self, token: &str) -> bool {
-        self.verify(token).is_some()
+        self.find_active(token).is_some()
+    }
+
+    fn find_active(&self, token: &str) -> Option<&PairedDevice> {
+        self.devices
+            .iter()
+            .find(|device| !device.revoked && constant_time_eq(&device.token, token))
     }
 
     /// Revoke a paired device by id. A revoked device's token is rejected by
@@ -157,17 +167,19 @@ impl PairingRegistry {
     }
 }
 
-/// Compare two secrets without short-circuiting on the first differing byte, so a
-/// token check does not leak length/prefix information through timing.
+/// Compare two secrets without short-circuiting on the first differing byte or on
+/// a length mismatch, so a token check does not leak prefix or length information
+/// through timing. A length difference is folded into the accumulator rather than
+/// returned early, and the loop runs over the longer input.
 fn constant_time_eq(left: &str, right: &str) -> bool {
     let left = left.as_bytes();
     let right = right.as_bytes();
-    if left.len() != right.len() {
-        return false;
-    }
-    let mut diff = 0u8;
-    for (a, b) in left.iter().zip(right.iter()) {
-        diff |= a ^ b;
+    let mut diff = (left.len() ^ right.len()) as u64;
+    let len = left.len().max(right.len());
+    for index in 0..len {
+        let a = left.get(index).copied().unwrap_or(0);
+        let b = right.get(index).copied().unwrap_or(0);
+        diff |= u64::from(a ^ b);
     }
     diff == 0
 }
