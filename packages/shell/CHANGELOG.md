@@ -1,5 +1,9 @@
 # Changelog
 
+## [0.4.0] - 2026-06-07
+
+- Updated workspace package version alignment for the Claude Code adapter release.
+
 ## [0.3.0] - 2026-06-07
 
 - Updated workspace package version alignment for the pairing + allowlist release.

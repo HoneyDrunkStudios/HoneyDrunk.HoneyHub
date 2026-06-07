@@ -1,5 +1,9 @@
 # Changelog
 
+## [0.4.0] - 2026-06-07
+
+- Updated workspace package version alignment for the Claude Code adapter release.
+
 ## [0.3.0] - 2026-06-07
 
 - Added a bridge-settings view: pair/revoke devices (with one-time pairing-token display), manage the workspace-root allowlist (absolute-path validation, explicit errors), and toggle the backend allowlist.

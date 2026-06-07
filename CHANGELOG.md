@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.0] - 2026-06-07
+
+- Added the `claude.local` backend adapter for packet 06: drives the official Claude Code CLI under the user's own local session (no subscription auth held or proxied), with same-process live reply, process-tree stop, session resume, exact tokens + USD usage, artifact detection, and honest failure when the CLI is unavailable.
+- Extended the bridge wire protocol with an artifact stream event (mirrored in shared-types) and a clock seam for stamping live adapter events.
+- Added a live duplex fake-`claude` test fixture and an integration test exercising start → stream → needs_input → reply → stop → resume.
+- Kept package versions aligned across the HoneyHub workspace.
+
 ## [0.3.0] - 2026-06-07
 
 - Added the bridge trust boundary for packet 05: per-device identity, user-initiated revocable pairing tokens, workspace-root allowlist lifecycle, and a backend allowlist wired into the runtime launch gate.

@@ -1,4 +1,5 @@
 use crate::adapter::{AgentBackend, BridgeError, StartRunRequest};
+use crate::artifact::DispatchArtifact;
 use crate::session::{
     DispatchControlEvent, DispatchMessage, DispatchRunState, PolicyHint, UsageSignal,
 };
@@ -227,6 +228,24 @@ impl BridgeEvent {
             payload: BridgeEventPayload::PolicyHint { hint },
         }
     }
+
+    pub fn artifact(
+        id: impl Into<String>,
+        session_id: impl Into<String>,
+        run_id: impl Into<String>,
+        sequence: u64,
+        created_at: impl Into<String>,
+        artifact: DispatchArtifact,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            session_id: session_id.into(),
+            run_id: run_id.into(),
+            sequence,
+            created_at: created_at.into(),
+            payload: BridgeEventPayload::Artifact { artifact },
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -237,6 +256,7 @@ pub enum BridgeEventPayload {
     Usage { signal: UsageSignal },
     PolicyHint { hint: PolicyHint },
     Status { status: BridgeStatusEvent },
+    Artifact { artifact: DispatchArtifact },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

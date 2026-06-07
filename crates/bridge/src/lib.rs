@@ -1,4 +1,5 @@
 pub mod adapter;
+pub mod adapters;
 pub mod artifact;
 pub mod core;
 pub mod pairing;
@@ -9,6 +10,7 @@ pub mod wire;
 pub use adapter::{
     AgentBackend, AgentBackendAdapter, BridgeError, CapabilityFlags, RunHandle, StartRunRequest,
 };
+pub use adapters::{default_event_clock, ClaudeLocalAdapter, EventClock};
 pub use artifact::{ArtifactKind, DispatchArtifact};
 pub use core::{BridgeRuntime, ManagedRun, ReplyOutcome};
 pub use pairing::{

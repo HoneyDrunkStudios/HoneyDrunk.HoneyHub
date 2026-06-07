@@ -1,5 +1,9 @@
 # Changelog
 
+## [0.4.0] - 2026-06-07
+
+- Added an `artifact` variant to `BridgeEventPayload`, mirroring the bridge's new artifact stream event.
+
 ## [0.3.0] - 2026-06-07
 
 - Added pairing view types (`BridgeIdentityView`, `PairedDeviceView`, `PairingGrant`) mirroring the bridge serde shapes; only token-free views cross the wire.
