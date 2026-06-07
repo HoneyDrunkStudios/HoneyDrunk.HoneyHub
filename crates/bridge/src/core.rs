@@ -1,5 +1,5 @@
 use crate::adapter::{AgentBackendAdapter, BridgeError, RunHandle, StartRunRequest};
-use crate::pairing::WorkspaceAllowlist;
+use crate::pairing::{BackendAllowlist, WorkspaceAllowlist};
 use crate::process::{ProcessExitStatus, ProcessHandle};
 use crate::session::{
     DispatchControlEvent, DispatchControlEventKind, DispatchMessage, DispatchRun,
@@ -32,6 +32,7 @@ where
 {
     adapter: A,
     workspace_allowlist: WorkspaceAllowlist,
+    backend_allowlist: BackendAllowlist,
     runs: HashMap<String, ManagedRun>,
 }
 
@@ -39,10 +40,15 @@ impl<A> BridgeRuntime<A>
 where
     A: AgentBackendAdapter,
 {
-    pub fn new(adapter: A, workspace_allowlist: WorkspaceAllowlist) -> Self {
+    pub fn new(
+        adapter: A,
+        workspace_allowlist: WorkspaceAllowlist,
+        backend_allowlist: BackendAllowlist,
+    ) -> Self {
         Self {
             adapter,
             workspace_allowlist,
+            backend_allowlist,
             runs: HashMap::new(),
         }
     }
@@ -53,6 +59,7 @@ where
         created_at: impl Into<String>,
     ) -> Result<RunHandle, BridgeError> {
         let created_at = created_at.into();
+        self.ensure_backend_allowed()?;
         self.ensure_workspace_allowed(&request.workspace_root)?;
         self.ensure_request_workspace_matches(&request)?;
         if request.requested_run_id.is_none() {
@@ -554,6 +561,17 @@ where
         )
     }
 
+    fn ensure_backend_allowed(&self) -> Result<(), BridgeError> {
+        if self.backend_allowlist.allows(&self.adapter.backend()) {
+            Ok(())
+        } else {
+            Err(BridgeError::new(
+                "backend_not_allowed",
+                "backend is not on the configured bridge allowlist",
+            ))
+        }
+    }
+
     fn ensure_workspace_allowed(&self, workspace_root: &str) -> Result<(), BridgeError> {
         if self.workspace_allowlist.allows(workspace_root) {
             Ok(())
@@ -766,8 +784,11 @@ mod tests {
     fn lifecycle_start_stream_reply_stop_records_transitions() {
         let (allowlist_root, workspace_root) = workspace_paths();
         let adapter = FakeAdapter::new(CapabilityFlags::claude_local());
-        let mut runtime =
-            BridgeRuntime::new(adapter, WorkspaceAllowlist::new(vec![allowlist_root]));
+        let mut runtime = BridgeRuntime::new(
+            adapter,
+            WorkspaceAllowlist::new(vec![allowlist_root]),
+            BackendAllowlist::new(vec![AgentBackend::ClaudeLocal]),
+        );
 
         let handle = runtime
             .start(request(&workspace_root), "2026-06-07T12:00:00Z")
@@ -825,7 +846,11 @@ mod tests {
         let (_allowlist_root, workspace_root) = workspace_paths();
         let (other_root, _other_workspace) = workspace_paths();
         let adapter = FakeAdapter::new(CapabilityFlags::claude_local());
-        let mut runtime = BridgeRuntime::new(adapter, WorkspaceAllowlist::new(vec![other_root]));
+        let mut runtime = BridgeRuntime::new(
+            adapter,
+            WorkspaceAllowlist::new(vec![other_root]),
+            BackendAllowlist::new(vec![AgentBackend::ClaudeLocal]),
+        );
 
         let error = runtime
             .start(request(&workspace_root), "2026-06-07T12:00:00Z")
@@ -835,13 +860,34 @@ mod tests {
     }
 
     #[test]
+    fn refuses_backend_outside_allowlist() {
+        let (allowlist_root, workspace_root) = workspace_paths();
+        let adapter = FakeAdapter::new(CapabilityFlags::claude_local());
+        let mut runtime = BridgeRuntime::new(
+            adapter,
+            WorkspaceAllowlist::new(vec![allowlist_root]),
+            BackendAllowlist::new(vec![AgentBackend::CodexLocal]),
+        );
+
+        let error = runtime
+            .start(request(&workspace_root), "2026-06-07T12:00:00Z")
+            .expect_err("disallowed backend is denied");
+
+        assert_eq!(error.code, "backend_not_allowed");
+        assert_eq!(*runtime.adapter.starts.borrow(), 0);
+    }
+
+    #[test]
     fn routes_reply_to_follow_up_when_backend_is_not_interactive() {
         let (allowlist_root, workspace_root) = workspace_paths();
         let mut capabilities = CapabilityFlags::claude_local();
         capabilities.interactive_reply = false;
         let adapter = FakeAdapter::new(capabilities);
-        let mut runtime =
-            BridgeRuntime::new(adapter, WorkspaceAllowlist::new(vec![allowlist_root]));
+        let mut runtime = BridgeRuntime::new(
+            adapter,
+            WorkspaceAllowlist::new(vec![allowlist_root]),
+            BackendAllowlist::new(vec![AgentBackend::ClaudeLocal]),
+        );
         let handle = runtime
             .start(request(&workspace_root), "2026-06-07T12:00:00Z")
             .expect("run starts");
@@ -876,8 +922,11 @@ mod tests {
     fn process_exit_validates_run_id_and_preserves_stop_as_cancelled() {
         let (allowlist_root, workspace_root) = workspace_paths();
         let adapter = FakeAdapter::new(CapabilityFlags::claude_local());
-        let mut runtime =
-            BridgeRuntime::new(adapter, WorkspaceAllowlist::new(vec![allowlist_root]));
+        let mut runtime = BridgeRuntime::new(
+            adapter,
+            WorkspaceAllowlist::new(vec![allowlist_root]),
+            BackendAllowlist::new(vec![AgentBackend::ClaudeLocal]),
+        );
         let handle = runtime
             .start(request(&workspace_root), "2026-06-07T12:00:00Z")
             .expect("run starts");
@@ -927,8 +976,11 @@ mod tests {
     fn rejects_duplicate_run_id_without_overwriting_existing_record() {
         let (allowlist_root, workspace_root) = workspace_paths();
         let adapter = FakeAdapter::new(CapabilityFlags::claude_local());
-        let mut runtime =
-            BridgeRuntime::new(adapter, WorkspaceAllowlist::new(vec![allowlist_root]));
+        let mut runtime = BridgeRuntime::new(
+            adapter,
+            WorkspaceAllowlist::new(vec![allowlist_root]),
+            BackendAllowlist::new(vec![AgentBackend::ClaudeLocal]),
+        );
         let mut first = request(&workspace_root);
         first.requested_run_id = Some("run-fixed".to_string());
         runtime
@@ -949,8 +1001,11 @@ mod tests {
     fn stop_timeout_records_terminal_escalation() {
         let (allowlist_root, workspace_root) = workspace_paths();
         let adapter = FakeAdapter::new(CapabilityFlags::claude_local());
-        let mut runtime =
-            BridgeRuntime::new(adapter, WorkspaceAllowlist::new(vec![allowlist_root]));
+        let mut runtime = BridgeRuntime::new(
+            adapter,
+            WorkspaceAllowlist::new(vec![allowlist_root]),
+            BackendAllowlist::new(vec![AgentBackend::ClaudeLocal]),
+        );
         let handle = runtime
             .start(request(&workspace_root), "2026-06-07T12:00:00Z")
             .expect("run starts");
@@ -979,8 +1034,11 @@ mod tests {
     fn reconnect_replays_events_after_last_seen_event() {
         let (allowlist_root, workspace_root) = workspace_paths();
         let adapter = FakeAdapter::new(CapabilityFlags::claude_local());
-        let mut runtime =
-            BridgeRuntime::new(adapter, WorkspaceAllowlist::new(vec![allowlist_root]));
+        let mut runtime = BridgeRuntime::new(
+            adapter,
+            WorkspaceAllowlist::new(vec![allowlist_root]),
+            BackendAllowlist::new(vec![AgentBackend::ClaudeLocal]),
+        );
         let handle = runtime
             .start(request(&workspace_root), "2026-06-07T12:00:00Z")
             .expect("run starts");
@@ -1019,8 +1077,11 @@ mod tests {
         let (allowlist_root, workspace_root) = workspace_paths();
         let (_other_root, other_workspace) = workspace_paths();
         let adapter = FakeAdapter::new(CapabilityFlags::claude_local());
-        let mut runtime =
-            BridgeRuntime::new(adapter, WorkspaceAllowlist::new(vec![allowlist_root]));
+        let mut runtime = BridgeRuntime::new(
+            adapter,
+            WorkspaceAllowlist::new(vec![allowlist_root]),
+            BackendAllowlist::new(vec![AgentBackend::ClaudeLocal]),
+        );
         let mut mismatched = request(&workspace_root);
         mismatched.session.workspace_root = other_workspace;
 
@@ -1054,8 +1115,11 @@ mod tests {
                 message,
             ),
         ]);
-        let mut runtime =
-            BridgeRuntime::new(adapter, WorkspaceAllowlist::new(vec![allowlist_root]));
+        let mut runtime = BridgeRuntime::new(
+            adapter,
+            WorkspaceAllowlist::new(vec![allowlist_root]),
+            BackendAllowlist::new(vec![AgentBackend::ClaudeLocal]),
+        );
         let mut start = request(&workspace_root);
         start.requested_run_id = Some("run-fixed".to_string());
         let handle = runtime
@@ -1078,8 +1142,11 @@ mod tests {
     fn terminal_runs_reject_replies_and_ignore_late_exit_transitions() {
         let (allowlist_root, workspace_root) = workspace_paths();
         let adapter = FakeAdapter::new(CapabilityFlags::claude_local());
-        let mut runtime =
-            BridgeRuntime::new(adapter, WorkspaceAllowlist::new(vec![allowlist_root]));
+        let mut runtime = BridgeRuntime::new(
+            adapter,
+            WorkspaceAllowlist::new(vec![allowlist_root]),
+            BackendAllowlist::new(vec![AgentBackend::ClaudeLocal]),
+        );
         let handle = runtime
             .start(request(&workspace_root), "2026-06-07T12:00:00Z")
             .expect("run starts");

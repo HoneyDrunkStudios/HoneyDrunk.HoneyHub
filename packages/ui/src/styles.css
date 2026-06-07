@@ -99,6 +99,112 @@ h2 {
   font-size: 1.15rem;
 }
 
+.view-tabs {
+  display: flex;
+  gap: 8px;
+  padding: 0 0 16px;
+}
+
+.view-tabs button {
+  padding: 8px 14px;
+  border: 1px solid #2b3541;
+  border-radius: 6px;
+  background: #151b22;
+  color: #b8c3cf;
+  cursor: pointer;
+}
+
+.view-tabs button[aria-pressed="true"] {
+  border-color: #78d5d7;
+  color: #eef2f6;
+}
+
+.bridge-settings {
+  display: grid;
+  gap: 20px;
+  padding: 24px;
+  border: 1px solid #2b3541;
+  border-radius: 8px;
+  background: #151b22;
+}
+
+.bridge-settings fieldset {
+  display: grid;
+  gap: 10px;
+  border: 1px solid #2b3541;
+  border-radius: 8px;
+  padding: 16px;
+}
+
+.bridge-settings legend {
+  padding: 0 6px;
+  color: #78d5d7;
+  font-weight: 700;
+}
+
+.bridge-settings input[type="text"],
+.bridge-settings input:not([type]) {
+  padding: 8px 10px;
+  border: 1px solid #38434f;
+  border-radius: 6px;
+  background: #101820;
+  color: #eef2f6;
+}
+
+.bridge-settings button {
+  justify-self: start;
+  padding: 8px 14px;
+  border: 1px solid #38434f;
+  border-radius: 6px;
+  background: #18212a;
+  color: #eef2f6;
+  cursor: pointer;
+}
+
+.bridge-settings ul {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.bridge-settings li {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.pairing-token {
+  display: grid;
+  gap: 8px;
+  padding: 12px;
+  border: 1px solid #f8d86a;
+  border-radius: 6px;
+  background: #1c1a10;
+}
+
+.pairing-token code {
+  word-break: break-all;
+  color: #f8d86a;
+}
+
+.device-state {
+  color: #b8c3cf;
+  font-size: 0.85rem;
+}
+
+.settings-error {
+  margin: 0;
+  color: #ff9b9b;
+}
+
+.backend-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
 @media (max-width: 720px) {
   .toolbar {
     align-items: flex-start;

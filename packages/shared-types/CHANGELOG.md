@@ -1,5 +1,9 @@
 # Changelog
 
+## [0.3.0] - 2026-06-07
+
+- Added pairing view types (`BridgeIdentityView`, `PairedDeviceView`, `PairingGrant`) mirroring the bridge serde shapes; only token-free views cross the wire.
+
 ## [0.2.0] - 2026-06-07
 
 - Added provisional HoneyHub bridge wire protocol, command, event, and start request types.

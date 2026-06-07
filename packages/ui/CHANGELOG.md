@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.3.0] - 2026-06-07
+
+- Added a bridge-settings view: pair/revoke devices (with one-time pairing-token display), manage the workspace-root allowlist (absolute-path validation, explicit errors), and toggle the backend allowlist.
+- Added a pure, testable `bridgeSettings` model behind the view and a `Run`/`Bridge settings` tab switch in the app shell.
+
 ## [0.2.0] - 2026-06-07
 
 - Updated workspace package version alignment for the bridge core contract release.

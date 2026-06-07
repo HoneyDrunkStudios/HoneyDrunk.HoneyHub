@@ -64,10 +64,43 @@ lifecycle control events and adapter-streamed events are appended to the same lo
 for a run or session after `lastEventId`. This is a local runtime replay seam; later
 storage packets can persist the same event stream across process restarts.
 
-## Workspace Allowlist
+## Pairing and Trust Boundary
 
-The bridge core refuses starts outside the injected `WorkspaceAllowlist`. Packet 05
-owns allowlist UX and persistence; this crate exposes the enforcement seam now.
+The bridge is trusted code on the developer machine, so pairing must be explicit
+(ADR-0090 D8). `PairingRegistry` holds the bridge's per-device `BridgeIdentity` and
+the set of paired client devices:
+
+- `pair(display_name, paired_at)` registers a client device and returns a
+  `PairingGrant` whose plaintext `token` is surfaced **exactly once**. The PWA
+  presents that token on every wire-protocol connection.
+- `verify(token)` accepts a token only when it matches an active (non-revoked)
+  pairing; comparison is constant-time. `revoke(device_id)` invalidates a device's
+  token from that point on.
+- `device_views()` returns token-free `PairedDeviceView`s — the only shape that may
+  cross a sync surface. The pairing token lives only in local bridge config and is
+  never serialized into a transcript or notification (ADR-0090 D8/D11).
+
+Pairing is transport-agnostic: the bundled-desktop case pairs over localhost with
+one explicit confirm; the mobile case reuses the same token model over the
+Tailscale relay (`[Provisional]`, ADR-0091 D5).
+
+## Workspace and Backend Allowlists
+
+`WorkspaceAllowlist` is the user-configured set of absolute workspace roots the
+bridge may operate within. `add_root` rejects relative paths and duplicates;
+`allows` canonicalizes before the prefix check so `..` and symlinks cannot escape a
+root. Absolute paths are stored because the bridge needs them to gate launches, but
+the allowlist is local-only and is never synced off the host (ADR-0090 D11) — only
+repo-relative derivations may cross a sync surface.
+
+`BackendAllowlist` is the user-controlled set of `AgentBackend`s the bridge may
+launch. `BridgeRuntime::start` refuses (`backend_not_allowed`) any launch whose
+backend is not on the allowlist, before any process starts. At v1 only
+`claude.local` has an adapter (packet 06); the allowlist keeps future adapters
+opt-in.
+
+`BridgeTrustConfig` bundles the pairing registry and both allowlists into one
+serializable, local-only unit for the store packet (07) to persist.
 
 ## Wire Protocol [Provisional]
 

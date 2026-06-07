@@ -11,7 +11,10 @@ pub use adapter::{
 };
 pub use artifact::{ArtifactKind, DispatchArtifact};
 pub use core::{BridgeRuntime, ManagedRun, ReplyOutcome};
-pub use pairing::{BackendAllowlist, BridgeIdentity, WorkspaceAllowlist};
+pub use pairing::{
+    BackendAllowlist, BridgeIdentity, BridgeTrustConfig, PairedDevice, PairedDeviceView,
+    PairingGrant, PairingRegistry, WorkspaceAllowlist,
+};
 pub use process::{redact_command_line, ProcessExitStatus, ProcessHandle};
 pub use session::{
     DispatchControlEvent, DispatchControlEventKind, DispatchMessage, DispatchMessageRole,
