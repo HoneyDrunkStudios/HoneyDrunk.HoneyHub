@@ -137,6 +137,11 @@ export interface StartRunRequest {
   launchCommand?: string[];
 }
 
+export interface RunHandle {
+  runId: string;
+  processId?: number;
+}
+
 export type WireProtocolVersion = "honeyhub.bridge.v1";
 
 export const wireProtocolVersion: WireProtocolVersion = "honeyhub.bridge.v1";

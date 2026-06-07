@@ -2,10 +2,10 @@ use crate::adapter::{AgentBackendAdapter, BridgeError, RunHandle, StartRunReques
 use crate::pairing::WorkspaceAllowlist;
 use crate::process::{ProcessExitStatus, ProcessHandle};
 use crate::session::{
-    DispatchControlEventKind, DispatchMessage, DispatchRun, DispatchRunRecord, DispatchRunState,
-    DispatchSession,
+    DispatchControlEvent, DispatchControlEventKind, DispatchMessage, DispatchRun,
+    DispatchRunRecord, DispatchRunState, DispatchSession,
 };
-use crate::wire::{BridgeEvent, BridgeEventPayload};
+use crate::wire::{BridgeEvent, BridgeEventPayload, ReconnectRequest};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
@@ -23,6 +23,7 @@ pub struct ManagedRun {
     pub record: DispatchRunRecord,
     pub process: ProcessHandle,
     pub transcript: Vec<DispatchMessage>,
+    pub event_log: Vec<BridgeEvent>,
 }
 
 pub struct BridgeRuntime<A>
@@ -74,18 +75,20 @@ where
             request.session.id.clone(),
             request.task.clone(),
         ));
-        record.transition_to(DispatchRunState::Queued, created_at.clone())?;
-        record.transition_to(DispatchRunState::Starting, created_at.clone())?;
-        record.append_event(
-            DispatchControlEventKind::Launch,
-            created_at.clone(),
-            "launch recorded",
-        )?;
-        record.transition_to(DispatchRunState::Running, created_at.clone())?;
+        let control_events = vec![
+            record.transition_to(DispatchRunState::Queued, created_at.clone())?,
+            record.transition_to(DispatchRunState::Starting, created_at.clone())?,
+            record.append_event(
+                DispatchControlEventKind::Launch,
+                created_at.clone(),
+                "launch recorded",
+            )?,
+            record.transition_to(DispatchRunState::Running, created_at.clone())?,
+        ];
 
         let process = ProcessHandle::launched(
             handle.run_id.clone(),
-            None,
+            handle.process_id,
             request.launch_command.clone().unwrap_or_default(),
             created_at.clone(),
         );
@@ -97,6 +100,7 @@ where
                 record,
                 process,
                 transcript: request.transcript,
+                event_log: Self::control_events_to_bridge_events(control_events),
             },
         );
 
@@ -133,6 +137,7 @@ where
                 }
                 _ => {}
             }
+            self.run_mut(run_id)?.event_log.push(event.clone());
         }
         Ok(events)
     }
@@ -156,15 +161,17 @@ where
             self.adapter.reply(run_id, text)?;
             let managed = self.run_mut(run_id)?;
             if managed.record.run.state == DispatchRunState::NeedsInput {
-                managed
+                let event = managed
                     .record
                     .transition_to(DispatchRunState::Running, created_at.clone())?;
+                Self::push_control_bridge_event(managed, event);
             }
-            managed.record.append_event(
+            let event = managed.record.append_event(
                 DispatchControlEventKind::Reply,
                 created_at,
                 "interactive reply accepted",
             )?;
+            Self::push_control_bridge_event(managed, event);
             return Ok(ReplyOutcome::LiveReplyAccepted);
         }
 
@@ -187,18 +194,21 @@ where
         {
             let original = self.run_mut(run_id)?;
             if original.record.run.state == DispatchRunState::NeedsInput {
-                original
+                let event = original
                     .record
                     .transition_to(DispatchRunState::Finalizing, created_at.clone())?;
-                original
+                Self::push_control_bridge_event(original, event);
+                let event = original
                     .record
                     .transition_to(DispatchRunState::Completed, created_at.clone())?;
+                Self::push_control_bridge_event(original, event);
             }
-            original.record.append_event(
+            let event = original.record.append_event(
                 DispatchControlEventKind::FollowUp,
                 created_at.clone(),
                 "reply routed to follow-up run",
             )?;
+            Self::push_control_bridge_event(original, event);
         }
 
         let mut record = DispatchRunRecord::new(DispatchRun::new(
@@ -206,14 +216,16 @@ where
             request.session.id.clone(),
             request.task.clone(),
         ));
-        record.transition_to(DispatchRunState::Queued, created_at.clone())?;
-        record.transition_to(DispatchRunState::Starting, created_at.clone())?;
-        record.append_event(
-            DispatchControlEventKind::Launch,
-            created_at.clone(),
-            "follow-up launch recorded",
-        )?;
-        record.transition_to(DispatchRunState::Running, created_at.clone())?;
+        let control_events = vec![
+            record.transition_to(DispatchRunState::Queued, created_at.clone())?,
+            record.transition_to(DispatchRunState::Starting, created_at.clone())?,
+            record.append_event(
+                DispatchControlEventKind::Launch,
+                created_at.clone(),
+                "follow-up launch recorded",
+            )?,
+            record.transition_to(DispatchRunState::Running, created_at.clone())?,
+        ];
 
         self.runs.insert(
             handle.run_id.clone(),
@@ -223,11 +235,12 @@ where
                 record,
                 process: ProcessHandle::launched(
                     handle.run_id.clone(),
-                    None,
+                    handle.process_id,
                     request.launch_command.unwrap_or_default(),
                     created_at,
                 ),
                 transcript: request.transcript,
+                event_log: Self::control_events_to_bridge_events(control_events),
             },
         );
 
@@ -252,14 +265,16 @@ where
 
         self.adapter.stop(run_id)?;
         let managed = self.run_mut(run_id)?;
-        managed
+        let event = managed
             .record
             .transition_to(DispatchRunState::Stopping, created_at.clone())?;
-        managed.record.append_event(
+        Self::push_control_bridge_event(managed, event);
+        let event = managed.record.append_event(
             DispatchControlEventKind::Stop,
             created_at,
             "stop requested",
         )?;
+        Self::push_control_bridge_event(managed, event);
         Ok(())
     }
 
@@ -277,11 +292,17 @@ where
             ));
         }
 
-        managed.record.append_event(
+        let event = managed.record.append_event(
             DispatchControlEventKind::Timeout,
-            created_at,
-            "graceful stop timed out; escalation required",
+            created_at.clone(),
+            "graceful stop timed out; escalated to failed",
         )?;
+        Self::push_control_bridge_event(managed, event);
+        managed.record.run.failure_reason = Some("graceful stop timed out".to_string());
+        let event = managed
+            .record
+            .transition_to(DispatchRunState::Failed, created_at)?;
+        Self::push_control_bridge_event(managed, event);
         Ok(())
     }
 
@@ -299,46 +320,53 @@ where
 
         let managed = self.run_mut(run_id)?;
         if managed.record.run.state.is_terminal() {
-            managed.record.append_event(
+            let event = managed.record.append_event(
                 DispatchControlEventKind::ProcessExit,
                 exit.exited_at,
                 "process exit recorded after terminal state",
             )?;
+            Self::push_control_bridge_event(managed, event);
             return Ok(());
         }
 
         if exit.success {
             match managed.record.run.state {
                 DispatchRunState::Stopping => {
-                    managed
+                    let event = managed
                         .record
                         .transition_to(DispatchRunState::Cancelled, exit.exited_at.clone())?;
+                    Self::push_control_bridge_event(managed, event);
                 }
                 DispatchRunState::Finalizing => {
-                    managed
+                    let event = managed
                         .record
                         .transition_to(DispatchRunState::Completed, exit.exited_at.clone())?;
+                    Self::push_control_bridge_event(managed, event);
                 }
                 _ => {
-                    managed
+                    let event = managed
                         .record
                         .transition_to(DispatchRunState::Finalizing, exit.exited_at.clone())?;
-                    managed
+                    Self::push_control_bridge_event(managed, event);
+                    let event = managed
                         .record
                         .transition_to(DispatchRunState::Completed, exit.exited_at.clone())?;
+                    Self::push_control_bridge_event(managed, event);
                 }
             }
         } else {
             managed.record.run.failure_reason = Some(exit.summary());
-            managed
+            let event = managed
                 .record
                 .transition_to(DispatchRunState::Failed, exit.exited_at.clone())?;
+            Self::push_control_bridge_event(managed, event);
         }
-        managed.record.append_event(
+        let event = managed.record.append_event(
             DispatchControlEventKind::ProcessExit,
             exit.exited_at,
             "process exit recorded",
         )?;
+        Self::push_control_bridge_event(managed, event);
         Ok(())
     }
 
@@ -424,6 +452,51 @@ where
             .ok_or_else(|| BridgeError::new("run_not_found", format!("run {run_id} not found")))
     }
 
+    pub fn replay_events(
+        &self,
+        request: &ReconnectRequest,
+    ) -> Result<Vec<BridgeEvent>, BridgeError> {
+        let mut events = if let Some(run_id) = &request.run_id {
+            let managed = self.run(run_id)?;
+            if managed.session.id != request.session_id {
+                return Err(BridgeError::new(
+                    "session_mismatch",
+                    "reconnect run does not belong to requested session",
+                ));
+            }
+            managed.event_log.clone()
+        } else {
+            let mut events = self
+                .runs
+                .values()
+                .filter(|managed| managed.session.id == request.session_id)
+                .flat_map(|managed| managed.event_log.clone())
+                .collect::<Vec<_>>();
+            events.sort_by(|left, right| {
+                left.created_at
+                    .cmp(&right.created_at)
+                    .then(left.sequence.cmp(&right.sequence))
+                    .then(left.id.cmp(&right.id))
+            });
+            events
+        };
+
+        if let Some(last_event_id) = &request.last_event_id {
+            let position = events
+                .iter()
+                .position(|event| &event.id == last_event_id)
+                .ok_or_else(|| {
+                    BridgeError::new(
+                        "event_not_found",
+                        "last event id was not found in reconnect log",
+                    )
+                })?;
+            events.drain(..=position);
+        }
+
+        Ok(events)
+    }
+
     fn run_mut(&mut self, run_id: &str) -> Result<&mut ManagedRun, BridgeError> {
         self.runs
             .get_mut(run_id)
@@ -438,9 +511,36 @@ where
     ) -> Result<(), BridgeError> {
         let managed = self.run_mut(run_id)?;
         if managed.record.run.state != next {
-            managed.record.transition_to(next, created_at)?;
+            let event = managed.record.transition_to(next, created_at)?;
+            Self::push_control_bridge_event(managed, event);
         }
         Ok(())
+    }
+
+    fn control_events_to_bridge_events(events: Vec<DispatchControlEvent>) -> Vec<BridgeEvent> {
+        events
+            .into_iter()
+            .enumerate()
+            .map(|(sequence, event)| Self::control_bridge_event(sequence as u64, event))
+            .collect()
+    }
+
+    fn push_control_bridge_event(managed: &mut ManagedRun, event: DispatchControlEvent) {
+        let sequence = managed.event_log.len() as u64;
+        managed
+            .event_log
+            .push(Self::control_bridge_event(sequence, event));
+    }
+
+    fn control_bridge_event(sequence: u64, event: DispatchControlEvent) -> BridgeEvent {
+        BridgeEvent::control(
+            event.id.clone(),
+            event.session_id.clone(),
+            event.run_id.clone(),
+            sequence,
+            event.created_at.clone(),
+            event,
+        )
     }
 
     fn ensure_workspace_allowed(&self, workspace_root: &str) -> Result<(), BridgeError> {
@@ -551,6 +651,7 @@ mod tests {
                 run_id: request
                     .requested_run_id
                     .unwrap_or_else(|| format!("run-{starts}")),
+                process_id: Some(4321),
             })
         }
 
@@ -607,6 +708,7 @@ mod tests {
         fn resume(&self, _session_id_or_transcript: &str) -> Result<RunHandle, BridgeError> {
             Ok(RunHandle {
                 run_id: "resumed-run".to_string(),
+                process_id: None,
             })
         }
     }
@@ -659,6 +761,14 @@ mod tests {
         let handle = runtime
             .start(request(&workspace_root), "2026-06-07T12:00:00Z")
             .expect("run starts");
+        assert_eq!(
+            runtime
+                .run(&handle.run_id)
+                .expect("run exists")
+                .process
+                .process_id,
+            Some(4321)
+        );
         runtime
             .stream_events(&handle.run_id)
             .expect("stream applies");
@@ -822,6 +932,71 @@ mod tests {
 
         assert_eq!(error.code, "duplicate_run_id");
         assert!(runtime.run("run-fixed").is_ok());
+    }
+
+    #[test]
+    fn stop_timeout_records_terminal_escalation() {
+        let (allowlist_root, workspace_root) = workspace_paths();
+        let adapter = FakeAdapter::new(CapabilityFlags::claude_local());
+        let mut runtime =
+            BridgeRuntime::new(adapter, WorkspaceAllowlist::new(vec![allowlist_root]));
+        let handle = runtime
+            .start(request(&workspace_root), "2026-06-07T12:00:00Z")
+            .expect("run starts");
+
+        runtime
+            .stop(&handle.run_id, "2026-06-07T12:01:00Z")
+            .expect("stop starts");
+        runtime
+            .handle_stop_timeout(&handle.run_id, "2026-06-07T12:01:05Z")
+            .expect("timeout escalates");
+
+        let managed = runtime.run(&handle.run_id).expect("run exists");
+        assert_eq!(managed.record.run.state, DispatchRunState::Failed);
+        assert_eq!(
+            managed.record.run.failure_reason,
+            Some("graceful stop timed out".to_string())
+        );
+        assert!(managed
+            .record
+            .control_events
+            .iter()
+            .any(|event| event.kind == DispatchControlEventKind::Timeout));
+    }
+
+    #[test]
+    fn reconnect_replays_events_after_last_seen_event() {
+        let (allowlist_root, workspace_root) = workspace_paths();
+        let adapter = FakeAdapter::new(CapabilityFlags::claude_local());
+        let mut runtime =
+            BridgeRuntime::new(adapter, WorkspaceAllowlist::new(vec![allowlist_root]));
+        let handle = runtime
+            .start(request(&workspace_root), "2026-06-07T12:00:00Z")
+            .expect("run starts");
+        runtime
+            .stream_events(&handle.run_id)
+            .expect("stream applies");
+
+        let all_events = runtime
+            .replay_events(&ReconnectRequest {
+                session_id: "session-1".to_string(),
+                run_id: Some(handle.run_id.clone()),
+                last_event_id: None,
+            })
+            .expect("events replay");
+        assert!(all_events.iter().any(|event| event.id == "event-0"));
+        assert!(all_events.iter().any(|event| event.id == "event-1"));
+
+        let missed_events = runtime
+            .replay_events(&ReconnectRequest {
+                session_id: "session-1".to_string(),
+                run_id: Some(handle.run_id.clone()),
+                last_event_id: Some("event-0".to_string()),
+            })
+            .expect("missed events replay");
+
+        assert!(missed_events.iter().all(|event| event.id != "event-0"));
+        assert!(missed_events.iter().any(|event| event.id == "event-1"));
     }
 
     #[test]

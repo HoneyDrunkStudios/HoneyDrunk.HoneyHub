@@ -69,6 +69,8 @@ pub struct StartRunRequest {
 #[serde(rename_all = "camelCase")]
 pub struct RunHandle {
     pub run_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub process_id: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -114,6 +116,7 @@ mod tests {
         fn start(&self, _request: StartRunRequest) -> Result<RunHandle, BridgeError> {
             Ok(RunHandle {
                 run_id: "run-1".to_string(),
+                process_id: Some(1234),
             })
         }
 
@@ -132,6 +135,7 @@ mod tests {
         fn resume(&self, _session_id_or_transcript: &str) -> Result<RunHandle, BridgeError> {
             Ok(RunHandle {
                 run_id: "run-2".to_string(),
+                process_id: None,
             })
         }
     }

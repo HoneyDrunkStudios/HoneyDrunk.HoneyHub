@@ -4,6 +4,7 @@ import {
   defaultClaudeCapabilities,
   oneShotCapabilities,
   wireProtocolVersion,
+  type RunHandle,
   type WireFrame
 } from "./index.js";
 
@@ -44,4 +45,13 @@ test("wire frames carry the provisional bridge protocol version", () => {
 
   assert.equal(frame.protocol, "honeyhub.bridge.v1");
   assert.equal(frame.event?.payload.kind, "status");
+});
+
+test("run handles may carry adapter process metadata", () => {
+  const handle: RunHandle = {
+    runId: "run-1",
+    processId: 4321
+  };
+
+  assert.equal(handle.processId, 4321);
 });

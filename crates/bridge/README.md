@@ -37,10 +37,12 @@ backend behavior:
 - `usage_exact`
 - `usage_estimated`
 
-The runtime never calls undeclared live-reply or stop capabilities. If
-`interactive_reply` is false, `reply` is routed through a follow-up run carrying the
-prior run id, workspace context, and caller-provided follow-up task. Backend-specific
-CLI adapters land in later packets.
+The runtime never calls undeclared live-reply or stop capabilities. `start`
+returns a `RunHandle` that includes the run id and adapter-owned process id when
+the backend launches a child process. If `interactive_reply` is false, `reply` is
+routed through a follow-up run carrying the prior run id, workspace context, and
+caller-provided follow-up task. Backend-specific CLI adapters land in later
+packets.
 
 ## Process Lifecycle
 
@@ -49,8 +51,18 @@ command, launch timestamp, and graceful stop timeout. Command-line fields that l
 like tokens, API keys, secrets, or passwords are redacted before persistence.
 
 `BridgeRuntime::stop` requests a graceful stop only when the adapter declares
-`stop_signal`. `BridgeRuntime::handle_process_exit` transitions successful exits to
-`completed` and unsuccessful exits to `failed`.
+`stop_signal`. `BridgeRuntime::handle_stop_timeout` records timeout escalation and
+transitions the run to `failed` so clients do not wait forever in `stopping`.
+`BridgeRuntime::handle_process_exit` transitions successful exits to `completed`
+and unsuccessful exits to `failed`.
+
+## Reconnect Replay
+
+`BridgeRuntime` keeps an in-memory `BridgeEvent` log for each managed run. Local
+lifecycle control events and adapter-streamed events are appended to the same log.
+`BridgeRuntime::replay_events` accepts a `ReconnectRequest` and returns all events
+for a run or session after `lastEventId`. This is a local runtime replay seam; later
+storage packets can persist the same event stream across process restarts.
 
 ## Workspace Allowlist
 

@@ -4,8 +4,9 @@
 
 - Added `BridgeRuntime` for backend-agnostic run lifecycle orchestration.
 - Added transition validation and per-run `DispatchControlEvent` logs.
+- Added replayable in-memory `BridgeEvent` logs for reconnect handling.
 - Added provisional `honeyhub.bridge.v1` wire frames, commands, and server event payloads.
-- Added process launch metadata, exit status handling, graceful stop timeout, and command-line secret redaction.
+- Added process launch metadata, exit status handling, graceful stop timeout escalation, and command-line secret redaction.
 - Added workspace allowlist enforcement seam.
 
 ## [0.1.0] - 2026-06-07
