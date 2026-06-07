@@ -83,14 +83,15 @@ pub fn redact_command_line(command: &[String]) -> Vec<String> {
 }
 
 fn is_secret_flag(value: &str) -> bool {
+    let normalized = value.replace('_', "-");
     matches!(
-        value,
+        normalized.as_str(),
         "--token" | "--access-token" | "--api-key" | "--apikey" | "--secret" | "--password" | "-p"
-    ) || value.contains("token")
-        || value.contains("secret")
-        || value.contains("api-key")
-        || value.contains("apikey")
-        || value.contains("password")
+    ) || normalized.contains("token")
+        || normalized.contains("secret")
+        || normalized.contains("api-key")
+        || normalized.contains("apikey")
+        || normalized.contains("password")
 }
 
 #[cfg(test)]
@@ -105,6 +106,11 @@ mod tests {
             "super-secret".to_string(),
             "--model=sonnet".to_string(),
             "--token=abc123".to_string(),
+            "OPENAI_API_KEY=sk-test".to_string(),
+            "ANTHROPIC_API_KEY=sk-ant-test".to_string(),
+            "--access_token".to_string(),
+            "token-value".to_string(),
+            "--api_key=flag-secret".to_string(),
         ]);
 
         assert_eq!(
@@ -114,7 +120,12 @@ mod tests {
                 "--api-key".to_string(),
                 "[REDACTED]".to_string(),
                 "--model=sonnet".to_string(),
-                "--token=[REDACTED]".to_string()
+                "--token=[REDACTED]".to_string(),
+                "OPENAI_API_KEY=[REDACTED]".to_string(),
+                "ANTHROPIC_API_KEY=[REDACTED]".to_string(),
+                "--access_token".to_string(),
+                "[REDACTED]".to_string(),
+                "--api_key=[REDACTED]".to_string()
             ]
         );
     }
