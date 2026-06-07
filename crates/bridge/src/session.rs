@@ -26,6 +26,22 @@ pub enum UsageFidelity {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+pub enum UsageConfidence {
+    Low,
+    Medium,
+    High,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PolicyHintSeverity {
+    Info,
+    Warning,
+    Block,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum DispatchMessageRole {
     User,
     Agent,
@@ -116,8 +132,25 @@ pub struct UsageSignal {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub total_usd: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub premium_requests: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub duration_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub confidence: Option<UsageConfidence>,
     pub recorded_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PolicyHint {
+    pub id: String,
+    pub session_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<String>,
+    pub code: String,
+    pub severity: PolicyHintSeverity,
+    pub message: String,
+    pub created_at: String,
 }
 
 #[cfg(test)]
@@ -191,6 +224,65 @@ mod tests {
                 "kind": "state_changed",
                 "createdAt": "2026-06-07T12:01:01Z",
                 "summary": "Run started"
+            })
+        );
+    }
+
+    #[test]
+    fn serializes_usage_and_policy_contracts_with_optional_fields() {
+        let usage = UsageSignal {
+            id: "usage-1".to_string(),
+            session_id: "session-1".to_string(),
+            run_id: "run-1".to_string(),
+            backend: AgentBackend::CodexLocal,
+            fidelity: UsageFidelity::Estimated,
+            model_label: Some("codex-latest".to_string()),
+            input_tokens: Some(120),
+            output_tokens: Some(40),
+            total_tokens: Some(160),
+            total_usd: None,
+            premium_requests: Some(1),
+            duration_ms: Some(2500),
+            confidence: Some(UsageConfidence::Medium),
+            recorded_at: "2026-06-07T12:02:00Z".to_string(),
+        };
+        let hint = PolicyHint {
+            id: "hint-1".to_string(),
+            session_id: "session-1".to_string(),
+            run_id: None,
+            code: "local_only".to_string(),
+            severity: PolicyHintSeverity::Warning,
+            message: "Keep execution local".to_string(),
+            created_at: "2026-06-07T12:02:01Z".to_string(),
+        };
+
+        assert_eq!(
+            serde_json::to_value(usage).expect("usage serializes"),
+            json!({
+                "id": "usage-1",
+                "sessionId": "session-1",
+                "runId": "run-1",
+                "backend": "codex.local",
+                "fidelity": "estimated",
+                "modelLabel": "codex-latest",
+                "inputTokens": 120,
+                "outputTokens": 40,
+                "totalTokens": 160,
+                "premiumRequests": 1,
+                "durationMs": 2500,
+                "confidence": "medium",
+                "recordedAt": "2026-06-07T12:02:00Z"
+            })
+        );
+        assert_eq!(
+            serde_json::to_value(hint).expect("hint serializes"),
+            json!({
+                "id": "hint-1",
+                "sessionId": "session-1",
+                "code": "local_only",
+                "severity": "warning",
+                "message": "Keep execution local",
+                "createdAt": "2026-06-07T12:02:01Z"
             })
         );
     }

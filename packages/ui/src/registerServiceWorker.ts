@@ -1,7 +1,9 @@
 export function registerServiceWorker() {
-  if ("serviceWorker" in navigator) {
+  if ("serviceWorker" in navigator && import.meta.env.PROD) {
     window.addEventListener("load", () => {
-      navigator.serviceWorker.register("/sw.js").catch(() => {
+      const serviceWorkerUrl = new URL("sw.js", new URL(import.meta.env.BASE_URL, window.location.origin));
+
+      navigator.serviceWorker.register(serviceWorkerUrl).catch(() => {
         // PWA installability should not block local development.
       });
     });

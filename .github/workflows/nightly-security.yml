@@ -30,11 +30,8 @@ jobs:
       - name: Run npm audit
         run: npm audit --workspaces --audit-level=high
 
-      - name: Generate Cargo lockfile
-        run: cargo generate-lockfile
-
       - name: Install cargo-audit
         run: cargo install cargo-audit --version 0.22.2 --locked
 
       - name: Run Cargo audit
-        run: cargo audit
+        run: cargo audit --file Cargo.lock

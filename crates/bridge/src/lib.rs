@@ -12,5 +12,6 @@ pub use pairing::{BackendAllowlist, BridgeIdentity, WorkspaceAllowlist};
 pub use process::ProcessHandle;
 pub use session::{
     DispatchControlEvent, DispatchControlEventKind, DispatchMessage, DispatchMessageRole,
-    DispatchRun, DispatchRunState, DispatchSession, UsageFidelity, UsageSignal,
+    DispatchRun, DispatchRunState, DispatchSession, PolicyHint, PolicyHintSeverity,
+    UsageConfidence, UsageFidelity, UsageSignal,
 };

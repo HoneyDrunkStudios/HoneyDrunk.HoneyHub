@@ -15,7 +15,7 @@ HoneyHub drives vendor CLIs under the user's own local session. It does not hold
 
 Prerequisites:
 
-- Node.js 22 or newer.
+- Node.js 22.12.0 or newer.
 - npm 11 or newer.
 - Rust stable with `cargo` and `clippy`.
 
