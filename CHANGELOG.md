@@ -2,7 +2,7 @@
 
 ## [0.15.0] - 2026-06-13
 
-- Added the **routing engine** (ADR-0092 D3 / packet 09 §3d): an app-tier router suggests which backend to run a task on — capability-first for complex tasks, cost-first for light ones, with a soft "optimize your own subscriptions" tiebreak — reading a **bundled** cost-rate/policy snapshot (permitted for local-first apps under the invariant-45 local-first carve-out; HoneyHub owns the consumer schema; a HoneyDrunk.AI producer and fetch-and-cache delivery are follow-ups, since published model rates move only a few times a year). The run screen shows the suggestion + rationale and lets the user override. App-tier only — no new bridge/wire plumbing.
+- Added the **routing engine** (ADR-0092 D3 / packet 09 §3d): an app-tier router suggests which backend to run a task on — capability-first for complex tasks, cost-first for light ones — reading a **bundled** cost-rate/policy snapshot (permitted for local-first apps under the invariant-45 local-first carve-out; HoneyHub owns the consumer schema; a HoneyDrunk.AI producer and fetch-and-cache delivery are follow-ups, since published model rates move only a few times a year). The run screen shows the suggestion + rationale and lets the user override. App-tier only — no new bridge/wire plumbing. The recent-usage ("optimize your own subscriptions") tiebreak ships as a tested hook but is not yet wired to live usage.
 - Bumped the TS app packages (ui/shell/root 0.15.0); the bridge crate (0.21.0) and shared-types (0.15.0) are unchanged.
 
 ## [0.14.0] - 2026-06-09
