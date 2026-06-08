@@ -85,6 +85,13 @@ pub fn discover_agents_in_root(workspace_root: &str) -> Vec<AgentDefinition> {
 
     for source in sources() {
         let dir = root.join(source.subdir);
+        // The source folder itself must stay inside the allowlisted root: if it (or an
+        // ancestor) is a symlink that escapes the workspace, don't even *list* it —
+        // listing leaks external filenames/metadata, which the per-file check below
+        // (it only gates reads) would not prevent.
+        if !is_within_root(&dir, workspace_root) {
+            continue;
+        }
         let Ok(entries) = fs::read_dir(&dir) else {
             continue;
         };
@@ -179,7 +186,16 @@ fn build_definition(
 /// label rather than the raw absolute root — so the no-absolute-path posture holds
 /// even for those roots.
 fn workspace_label(workspace_root: &str) -> String {
-    Path::new(workspace_root)
+    // Trim trailing separators first: a user-entered root like `/home/user/work/`
+    // (the UI only trims whitespace) would otherwise have no `file_name`. Keep the
+    // original if trimming empties it (e.g. `/`), so the hash fallback still applies.
+    let trimmed = workspace_root.trim_end_matches(['/', '\\']);
+    let candidate = if trimmed.is_empty() {
+        workspace_root
+    } else {
+        trimmed
+    };
+    Path::new(candidate)
         .file_name()
         .and_then(|component| component.to_str())
         .map(str::to_string)
@@ -344,11 +360,12 @@ mod tests {
 
     #[test]
     fn workspace_label_never_returns_a_rootless_absolute_path() {
-        // A normal root → its basename.
+        // A normal root → its basename, and a trailing separator does not defeat it.
         assert_eq!(
             workspace_label("/home/user/HoneyDrunk.HoneyHub"),
             "HoneyDrunk.HoneyHub"
         );
+        assert_eq!(workspace_label("/home/user/work/"), "work");
         // A root with no final component must NOT serialize the raw absolute root —
         // it falls back to an opaque, hash-derived label. (`/` and `""` are rootless
         // on every platform; a backslash is not a separator off Windows.)

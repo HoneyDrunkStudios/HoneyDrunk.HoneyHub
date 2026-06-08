@@ -215,9 +215,13 @@ export class MockWireClient implements WireClient {
     // catalog (one Claude subagent, one Copilot agent) so the Agents surface is
     // exercised offline.
     const label = (workspaceRoot ?? "/work/demo").split(/[\\/]/).filter(Boolean).pop() ?? "demo";
+    // Mirror the host id shape: an opaque root-hash prefix + the relative source path
+    // (the real ids are FNV-hashed), so demos/tests don't depend on a format the host
+    // never produces.
+    const rootHash = "0000000000000000";
     const agents: AgentDefinition[] = [
       {
-        id: `demo:.claude/agents/code-reviewer.md`,
+        id: `${rootHash}:.claude/agents/code-reviewer.md`,
         name: "Code Reviewer",
         description: "Reviews a diff against the Grid invariants before a PR.",
         backend: "claude.local",
@@ -226,7 +230,7 @@ export class MockWireClient implements WireClient {
         workspaceLabel: label
       },
       {
-        id: `demo:.github/release-agent.md`,
+        id: `${rootHash}:.github/release-agent.md`,
         name: "release agent",
         description: "Drafts release notes from merged PRs.",
         backend: "copilot.local",
