@@ -97,15 +97,23 @@ export function recommendBackend(
   const complexity = estimateComplexity(input.task);
   const preferCapability = complexity >= snapshot.policy.complexityThreshold;
 
-  // No snapshot rate for any available backend → fall back honestly to the policy
-  // default (or the first available), with a clear rationale.
+  // No snapshot rate for any available backend → fall back honestly. Prefer the
+  // policy default when it is available; otherwise the first available backend — and
+  // say which, so the rationale never claims "the default" when it isn't.
   if (available.length === 0) {
-    const fallback =
-      input.availableBackends.find((backend) => backend === snapshot.policy.defaultBackend) ??
-      input.availableBackends[0];
+    const defaultAvailable = input.availableBackends.includes(snapshot.policy.defaultBackend);
+    const fallback = defaultAvailable
+      ? snapshot.policy.defaultBackend
+      : input.availableBackends[0];
+    const rationale =
+      fallback === undefined
+        ? "No backends available to route to."
+        : defaultAvailable
+          ? "No routing data for the available backends — using the default."
+          : "No routing data and the default is unavailable — using the first available backend.";
     return {
       backend: fallback ?? snapshot.policy.defaultBackend,
-      rationale: "No routing data for the available backends — using the default.",
+      rationale,
       ranked: fallback ? [{ backend: fallback, score: 0 }] : [],
       complexity,
       snapshotSource: snapshot.source

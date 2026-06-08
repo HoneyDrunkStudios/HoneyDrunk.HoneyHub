@@ -65,8 +65,13 @@ export function RunScreen({
   );
   // The backend a run will launch on: the user's pick once they override, otherwise
   // the live suggestion. Derived (not synced via an effect), so it is never stale at
-  // launch and the select reflects it synchronously.
-  const backend = pinnedBackend ?? recommendation.backend;
+  // launch and the select reflects it synchronously. A pin that is no longer offered
+  // (the user changed their configured backends) is ignored, falling back to the
+  // suggestion.
+  const backend =
+    pinnedBackend !== undefined && routableBackends.includes(pinnedBackend)
+      ? pinnedBackend
+      : recommendation.backend;
 
   // Keep the active run id available to the event handler without re-subscribing.
   const runIdRef = useRef<string | undefined>(undefined);
@@ -272,7 +277,12 @@ export function RunScreen({
           <select
             id="backend"
             value={backend}
-            onChange={(event) => setPinnedBackend(event.target.value as AgentBackend)}
+            onChange={(event) => {
+              const chosen = event.target.value as AgentBackend;
+              // Re-selecting the suggested backend returns to auto-follow; anything
+              // else pins the choice.
+              setPinnedBackend(chosen === recommendation.backend ? undefined : chosen);
+            }}
           >
             {routableBackends.map((option) => (
               <option key={option} value={option}>

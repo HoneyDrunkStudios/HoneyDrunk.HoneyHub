@@ -117,6 +117,18 @@ describe("recommendBackend", () => {
     expect(rec.rationale).toMatch(/default/i);
   });
 
+  it("names the first available backend when the default itself is unavailable", () => {
+    const emptyRates = { ...BUNDLED_SNAPSHOT, rates: [] };
+    // The policy default (claude.local) is not among the available backends here.
+    const rec = recommendBackend(
+      { task: "anything", availableBackends: ["codex.local", "copilot.local"] },
+      emptyRates
+    );
+    expect(rec.backend).toBe("codex.local");
+    expect(rec.rationale).toMatch(/first available/i);
+    expect(rec.rationale).not.toMatch(/using the default/i);
+  });
+
   it("is deterministic for the same input", () => {
     const input = { task: "Refactor the module", availableBackends: ALL };
     expect(recommendBackend(input, BUNDLED_SNAPSHOT)).toEqual(
