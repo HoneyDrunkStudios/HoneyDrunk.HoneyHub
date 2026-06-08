@@ -539,10 +539,16 @@ where
     /// wall-time is a weak staleness signal — the token/message thresholds carry the
     /// `stale_session` rule). Pure given `now`; `coach` itself is deterministic.
     pub fn coaching_hints(&self, now: &str) -> Vec<PolicyHint> {
+        struct LatestRun {
+            /// `(started_at, run_id)` of the chosen anchor run, kept as the max so the
+            /// selection is deterministic regardless of `HashMap` iteration order.
+            key: (Option<String>, String),
+            /// Settled (non-partial) message count of **that** run's transcript.
+            message_count: usize,
+        }
         struct SessionAggregate {
             backend: AgentBackend,
-            latest_run: Option<String>,
-            message_count: usize,
+            latest: Option<LatestRun>,
             usage: Vec<UsageSignal>,
         }
 
@@ -553,36 +559,59 @@ where
                 .entry(managed.session.id.clone())
                 .or_insert_with(|| SessionAggregate {
                     backend: managed.session.backend.clone(),
-                    latest_run: None,
-                    message_count: 0,
+                    latest: None,
                     usage: Vec::new(),
                 });
-            // Count settled (non-partial) transcript messages; streamed deltas
-            // (`is_partial == Some(true)`) are not turns and must not inflate the count.
-            aggregate.message_count += managed
-                .transcript
-                .iter()
-                .filter(|message| message.is_partial != Some(true))
-                .count();
+            // Usage is per-turn (each run emits its own signal), so it sums across the
+            // session's runs.
             for event in &managed.event_log {
                 if let BridgeEventPayload::Usage { signal } = &event.payload {
                     aggregate.usage.push(signal.clone());
                 }
             }
-            // Any run id from the session is a valid anchor for persistence; the last
-            // one wins (HashMap order is unspecified — the hint id is keyed on the
-            // session + code, not the run, so this only affects which run a persisted
-            // hint attaches to).
-            aggregate.latest_run = Some(managed.record.run.id.clone());
+            // Anchor a hint to the session's **latest** run, chosen deterministically:
+            // the run with the greatest `(started_at, run_id)` (RFC3339 timestamps sort
+            // chronologically; the id breaks ties). `self.runs` is a `HashMap` whose
+            // order is unspecified, so a "last one wins" pick would attach persisted
+            // hints to different runs between identical calls. The message count is read
+            // from **only** that latest run: `reply()` carries the prior transcript into
+            // each follow-up run, so the latest run already holds the full cumulative
+            // history — summing every run's transcript would double-count the carried
+            // messages and trip `stale_session` too early on resume-based backends.
+            let candidate = (
+                managed.record.run.started_at.clone(),
+                managed.record.run.id.clone(),
+            );
+            let replace = match &aggregate.latest {
+                None => true,
+                Some(current) => candidate > current.key,
+            };
+            if replace {
+                let message_count = managed
+                    .transcript
+                    .iter()
+                    .filter(|message| message.is_partial != Some(true))
+                    .count();
+                aggregate.latest = Some(LatestRun {
+                    key: candidate,
+                    message_count,
+                });
+            }
         }
 
         let mut hints = Vec::new();
         for (session_id, aggregate) in &sessions {
             let snapshot = CoachingSnapshot {
                 session_id,
-                run_id: aggregate.latest_run.as_deref(),
+                run_id: aggregate
+                    .latest
+                    .as_ref()
+                    .map(|latest| latest.key.1.as_str()),
                 backend: aggregate.backend.clone(),
-                message_count: aggregate.message_count,
+                message_count: aggregate
+                    .latest
+                    .as_ref()
+                    .map_or(0, |latest| latest.message_count),
                 elapsed_minutes: None,
                 usage: &aggregate.usage,
                 now,
@@ -1576,5 +1605,114 @@ mod tests {
         let stale = hints.iter().find(|h| h.code == "stale_session").unwrap();
         assert_eq!(stale.created_at, "2026-06-08T12:05:00Z");
         assert_eq!(stale.session_id, "session-1");
+    }
+
+    #[test]
+    fn coaching_hints_anchor_the_latest_run_deterministically() {
+        // A session with two runs: the hint must anchor to the latest run (greatest
+        // started_at) regardless of HashMap order, and be identical across calls.
+        let (allowlist_root, workspace_root) = workspace_paths();
+        let usage = UsageSignal {
+            id: "usage-1".to_string(),
+            session_id: "session-1".to_string(),
+            run_id: "run-late".to_string(),
+            backend: AgentBackend::ClaudeLocal,
+            fidelity: crate::session::UsageFidelity::Exact,
+            model_label: None,
+            input_tokens: Some(200_000),
+            output_tokens: Some(0),
+            total_tokens: Some(200_000),
+            total_usd: Some(0.5),
+            premium_requests: None,
+            duration_ms: None,
+            confidence: None,
+            recorded_at: "2026-06-08T12:05:00Z".to_string(),
+        };
+        let adapter = FakeAdapter::new(CapabilityFlags::claude_local()).with_stream_events(vec![
+            BridgeEvent::usage(
+                "event-usage",
+                "session-1",
+                "run-late",
+                1,
+                "2026-06-08T12:05:00Z",
+                usage,
+            ),
+        ]);
+        let mut runtime = BridgeRuntime::new(
+            adapter,
+            WorkspaceAllowlist::new(vec![allowlist_root]),
+            BackendAllowlist::new(vec![AgentBackend::ClaudeLocal]),
+        );
+
+        let mut early = request(&workspace_root);
+        early.requested_run_id = Some("run-early".to_string());
+        runtime
+            .start(early, "2026-06-08T12:00:00Z")
+            .expect("early run starts");
+        let mut late = request(&workspace_root);
+        late.requested_run_id = Some("run-late".to_string());
+        runtime
+            .start(late, "2026-06-08T12:05:00Z")
+            .expect("late run starts");
+        runtime
+            .stream_events("run-late")
+            .expect("usage applies to the late run");
+
+        let first = runtime.coaching_hints("2026-06-08T12:10:00Z");
+        let second = runtime.coaching_hints("2026-06-08T12:10:00Z");
+        assert_eq!(first, second, "coaching hints must be deterministic");
+        let stale = first
+            .iter()
+            .find(|hint| hint.code == "stale_session")
+            .expect("a stale_session advisory");
+        // The later-started run is the anchor, not whichever HashMap yields last.
+        assert_eq!(stale.run_id.as_deref(), Some("run-late"));
+    }
+
+    #[test]
+    fn coaching_message_count_uses_latest_run_not_the_carried_forward_sum() {
+        // A resume-based reply carries the prior transcript into each follow-up run,
+        // so the latest run already holds the cumulative history. Counting every run's
+        // transcript would double-count and trip stale_session too early. Two runs of
+        // 20 settled messages each: summed (40) would be stale; latest-only (20) is not.
+        let (allowlist_root, workspace_root) = workspace_paths();
+        let adapter = FakeAdapter::new(CapabilityFlags::claude_local());
+        let mut runtime = BridgeRuntime::new(
+            adapter,
+            WorkspaceAllowlist::new(vec![allowlist_root]),
+            BackendAllowlist::new(vec![AgentBackend::ClaudeLocal]),
+        );
+        let messages = |run: &str| -> Vec<DispatchMessage> {
+            (0..20)
+                .map(|index| DispatchMessage {
+                    id: format!("{run}-m{index}"),
+                    session_id: "session-1".to_string(),
+                    run_id: run.to_string(),
+                    role: DispatchMessageRole::Agent,
+                    body: "x".to_string(),
+                    created_at: "2026-06-08T12:00:00Z".to_string(),
+                    is_partial: Some(false),
+                })
+                .collect()
+        };
+
+        let mut early = request(&workspace_root);
+        early.requested_run_id = Some("run-early".to_string());
+        early.transcript = messages("run-early");
+        runtime
+            .start(early, "2026-06-08T12:00:00Z")
+            .expect("early run starts");
+        let mut late = request(&workspace_root);
+        late.requested_run_id = Some("run-late".to_string());
+        late.transcript = messages("run-late");
+        runtime
+            .start(late, "2026-06-08T12:05:00Z")
+            .expect("late run starts");
+
+        let hints = runtime.coaching_hints("2026-06-08T12:10:00Z");
+        assert!(
+            !hints.iter().any(|hint| hint.code == "stale_session"),
+            "message_count must use the latest run only, not the carried-forward sum"
+        );
     }
 }
