@@ -10,7 +10,7 @@ import type {
 import { UsageBadge } from "../../components/UsageBadge";
 import { backendLabel } from "../../backends";
 import { recommendBackend } from "../routing/router";
-import { BUNDLED_SNAPSHOT } from "../routing/routingSnapshot";
+import { loadRoutingSnapshot } from "../routing/routingSnapshot";
 import { SessionDiagnostics } from "./SessionDiagnostics";
 import type { WireClient } from "../../wire/client";
 
@@ -60,11 +60,14 @@ export function RunScreen({
   // The user's explicit backend pick, set only when they override the suggestion.
   const [pinnedBackend, setPinnedBackend] = useState<AgentBackend | undefined>(undefined);
 
+  // The routing snapshot, loaded once through the consumption seam (a fetch-shaped
+  // loader; v1 returns the bundled JSON projection).
+  const snapshot = useMemo(() => loadRoutingSnapshot(), []);
   // The router's suggestion for the current task (app-tier, ADR-0092 D3). Recomputed
-  // as the task text changes; a pure function of the task + the bundled snapshot.
+  // as the task text changes; a pure function of the task + the snapshot.
   const recommendation = useMemo(
-    () => recommendBackend({ task, availableBackends: routableBackends }, BUNDLED_SNAPSHOT),
-    [task, routableBackends]
+    () => recommendBackend({ task, availableBackends: routableBackends }, snapshot),
+    [task, routableBackends, snapshot]
   );
   // The backend a run will launch on: the user's pick once they override, otherwise
   // the live suggestion. Derived (not synced via an effect), so it is never stale at

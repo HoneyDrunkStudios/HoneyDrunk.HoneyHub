@@ -1,9 +1,11 @@
 import { describe, expect, it } from "vitest";
 import type { AgentBackend } from "@honeydrunk/honeyhub-types";
 import { estimateComplexity, recommendBackend } from "./router";
-import { BUNDLED_SNAPSHOT } from "./routingSnapshot";
+import { loadRoutingSnapshot } from "./routingSnapshot";
 
 const ALL: AgentBackend[] = ["claude.local", "codex.local", "copilot.local"];
+// The loaded snapshot (v1: the bundled JSON projection) under test.
+const BUNDLED_SNAPSHOT = loadRoutingSnapshot();
 
 describe("estimateComplexity", () => {
   it("scores keyword-heavy refactors high and light edits low", () => {
