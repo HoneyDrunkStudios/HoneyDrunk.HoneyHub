@@ -71,7 +71,9 @@ export interface RankedBackend {
 export interface RoutingRecommendation {
   backend: AgentBackend;
   rationale: string;
-  /** Every available backend, best first — for transparency / an override UI. */
+  /** The available backends that have a snapshot rate, best first (one entry per
+      backend) — for transparency / an override UI. In the no-rate fallback this holds
+      only the single chosen backend. */
   ranked: RankedBackend[];
   /** The estimated complexity that drove the cost-vs-capability choice. */
   complexity: number;

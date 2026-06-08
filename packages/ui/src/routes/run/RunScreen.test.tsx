@@ -1,8 +1,12 @@
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
-import type { StartRunRequest } from "@honeydrunk/honeyhub-types";
+import type { AgentBackend, StartRunRequest } from "@honeydrunk/honeyhub-types";
 import { RunScreen } from "./RunScreen";
 import { MockWireClient } from "../../wire/mockClient";
+
+// All three backends configured — the realistic state in which routing chooses
+// among options (an unconfigured cockpit offers only the proven-initial backend).
+const ALL_BACKENDS: AgentBackend[] = ["claude.local", "codex.local", "copilot.local"];
 
 /** A mock client that records every StartRunRequest it is asked to launch. */
 function recordingClient(): { client: MockWireClient; started: StartRunRequest[] } {
@@ -64,7 +68,7 @@ describe("RunScreen", () => {
   });
 
   it("suggests a backend from the task and lets the user override it", () => {
-    render(<RunScreen client={new MockWireClient()} />);
+    render(<RunScreen client={new MockWireClient()} availableBackends={ALL_BACKENDS} />);
     const backendSelect = screen.getByLabelText("Backend") as HTMLSelectElement;
 
     // A complex task routes to the most capable backend (Claude).
@@ -104,7 +108,7 @@ describe("RunScreen", () => {
 
   it("launches the run on an overridden backend", async () => {
     const { client, started } = recordingClient();
-    render(<RunScreen client={client} />);
+    render(<RunScreen client={client} availableBackends={ALL_BACKENDS} />);
     fireEvent.change(screen.getByLabelText("Workspace root"), { target: { value: "/work" } });
     fireEvent.change(screen.getByLabelText("Task"), {
       target: { value: "Refactor the concurrency model" }
@@ -139,14 +143,13 @@ describe("RunScreen", () => {
     expect(select.value).toBe("copilot.local");
   });
 
-  it("offers all routable backends when none are configured", () => {
+  it("offers only the proven-initial backend when none are configured", () => {
+    // An unconfigured cockpit must not imply Codex/Copilot are launchable (the user
+    // may not have those CLIs) — only the proven-initial backend (Claude) is offered
+    // until the user adds others in Bridge settings.
     render(<RunScreen client={new MockWireClient()} />);
     const select = screen.getByLabelText("Backend") as HTMLSelectElement;
-    expect(Array.from(select.options).map((option) => option.value)).toEqual([
-      "claude.local",
-      "codex.local",
-      "copilot.local"
-    ]);
+    expect(Array.from(select.options).map((option) => option.value)).toEqual(["claude.local"]);
   });
 
   it("drops a pinned backend once it is no longer offered", () => {

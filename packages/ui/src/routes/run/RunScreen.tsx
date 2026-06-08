@@ -14,9 +14,12 @@ import { BUNDLED_SNAPSHOT } from "../routing/routingSnapshot";
 import { SessionDiagnostics } from "./SessionDiagnostics";
 import type { WireClient } from "../../wire/client";
 
-// The backends the cockpit can offer; the bridge enforces the real backend allowlist
-// on launch, and the router ranks among these.
-const ROUTABLE_BACKENDS: AgentBackend[] = ["claude.local", "codex.local", "copilot.local"];
+// Before the user configures any backends, the picker offers only the proven-initial
+// backend (Claude). Codex/Copilot are offered once the user adds them in Bridge
+// settings, so an empty config never implies an unconfigured/uninstalled CLI is
+// launchable. The full configurable set lives in `settingsModel.allBackends` (the
+// Bridge settings UI), not duplicated here.
+const INITIAL_BACKENDS: AgentBackend[] = ["claude.local"];
 
 export interface RunScreenProps {
   client: WireClient;
@@ -42,8 +45,8 @@ export function RunScreen({
   availableBackends = []
 }: RunScreenProps) {
   // Offer the user's configured backends; before they configure any, fall back to the
-  // full routable set (the bridge still enforces its allowlist on launch).
-  const routableBackends = availableBackends.length > 0 ? availableBackends : ROUTABLE_BACKENDS;
+  // proven-initial backend only (the bridge still enforces its allowlist on launch).
+  const routableBackends = availableBackends.length > 0 ? availableBackends : INITIAL_BACKENDS;
   const [task, setTask] = useState("");
   const [workspaceRoot, setWorkspaceRoot] = useState(workspaceRoots[0] ?? "");
   const [runId, setRunId] = useState<string | undefined>(undefined);
