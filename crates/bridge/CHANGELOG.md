@@ -6,6 +6,7 @@
 - Made the kill path idempotent: a `reaped` flag set by `poll_exit`/`close_and_kill` stops `Drop` from re-signalling an already-reaped (and possibly recycled) pid — closing a latent double-kill in the original `stop` + `Drop` sequence.
 - A spawn failure now names the exact program (`failed to launch backend CLI '<program>'`), actionable when several local adapters coexist.
 - Added `RunSlot` (`Live`/`Done`): a completed run **retires** to a lightweight record that keeps only the captured vendor `backend_session_id`, dropping the child handle, reader thread, and channel. This frees a long-lived host from accumulating finished runs while still letting a follow-up turn resume the session. `claude.local` adopts it; the new adapters use it from the start. `retire()` returns the displaced `ChildRun` so the adapter drops it (which joins the stdout reader) **after** releasing the runs lock — never holding the lock across the join, which would block other runs' `stream`/`reply`/`stop`.
+- Added `ChildRun::drain_remaining(timeout)`: a bounded, timeout-aware (`recv_timeout`) final drain of the stdout the child flushed on its way out. `stream()` calls it after observing exit and **before** retiring, so the closing `result`/usage line (exact tokens + USD) is never lost to the channel being dropped on retirement.
 
 ## [0.10.0] - 2026-06-08
 

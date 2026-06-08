@@ -386,6 +386,17 @@ impl AgentBackendAdapter for ClaudeLocalAdapter {
         // fails. Then retire the run so the child handle/threads/channel are freed
         // while the captured backend session id survives for a follow-up turn.
         let retired = if let Some(success) = run.poll_exit() {
+            // Drain the final lines the CLI flushed on exit (the closing `result`
+            // line carries the exact tokens + USD) before retiring drops the channel.
+            for line in run.drain_remaining(std::time::Duration::from_secs(2)) {
+                events.extend(parse_line(
+                    &self.clock,
+                    &line,
+                    run_id,
+                    &session_id,
+                    &mut run.backend_session_id,
+                ));
+            }
             let now = (self.clock)();
             if success {
                 events.push(terminal_status(

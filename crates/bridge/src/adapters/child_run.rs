@@ -17,9 +17,10 @@
 use crate::adapter::BridgeError;
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, ChildStdin, Command, Stdio};
-use std::sync::mpsc::{channel, Receiver, TryRecvError};
+use std::sync::mpsc::{channel, Receiver, RecvTimeoutError, TryRecvError};
 use std::sync::Arc;
 use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
 
 /// A timestamp source for events an adapter mints while streaming. Injected so the
 /// bridge crate stays free of a wall-clock dependency and tests stay deterministic.
@@ -200,6 +201,31 @@ impl ChildRun {
         lines
     }
 
+    /// Drain the *final* stdout lines after the process has exited, blocking until the
+    /// reader thread finishes (channel disconnects) so nothing the child flushed on its
+    /// way out is lost — e.g. the closing `result`/usage line a backend emits last.
+    /// Bounded by `timeout` (via `recv_timeout`, a timeout-aware receive, not a fixed
+    /// sleep) so a child that wrongly keeps stdout open cannot block the caller forever.
+    /// Call only after [`poll_exit`](Self::poll_exit) has observed exit.
+    pub fn drain_remaining(&mut self, timeout: Duration) -> Vec<String> {
+        let deadline = Instant::now() + timeout;
+        let mut lines = Vec::new();
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                break;
+            }
+            match self.lines.recv_timeout(remaining) {
+                Ok(line) if line.trim().is_empty() => continue,
+                Ok(line) => lines.push(line),
+                // Disconnected = the reader finished (all stdout consumed); Timeout =
+                // bounded give-up. Either way, stop.
+                Err(RecvTimeoutError::Disconnected) | Err(RecvTimeoutError::Timeout) => break,
+            }
+        }
+        lines
+    }
+
     /// Observe process exit exactly once. Returns `Some(true)` on the first poll
     /// after a successful exit, `Some(false)` after a failing exit, and `None`
     /// while the process is still running or once a prior poll already reported it.
@@ -323,6 +349,7 @@ fn kill_process_tree(child: &mut Child) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::{Duration, Instant};
 
     /// A trivial, immediately-exiting command available on each platform.
     fn quick_command() -> Command {
@@ -373,11 +400,12 @@ mod tests {
     fn close_and_kill_is_idempotent_and_drop_does_not_double_kill() {
         let mut run =
             ChildRun::spawn(quick_command(), "session-1", None).expect("spawn quick command");
-        // Bounded poll (no fixed sleep — Grid invariant 51) so the quick process may
-        // be observed/reaped via `poll_exit` before the kills below. The test does
-        // not depend on observing the exit; the point is that repeated kills are safe
-        // whether or not the child was already reaped.
-        for _ in 0..10_000 {
+        // Poll with an explicit time deadline (not a fixed sleep, not an unbounded
+        // iteration count) so the quick process may be observed/reaped via `poll_exit`
+        // before the kills below. The test does not depend on observing the exit; the
+        // point is that repeated kills are safe whether or not the child was reaped.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline {
             if run.poll_exit().is_some() {
                 break;
             }
