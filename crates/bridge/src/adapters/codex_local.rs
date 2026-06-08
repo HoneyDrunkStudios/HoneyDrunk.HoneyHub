@@ -363,24 +363,33 @@ impl AgentBackendAdapter for CodexLocalAdapter {
             ));
         }
 
-        // A Codex `exec` turn runs to completion, so the exit transition is the
-        // normal end of a turn. Emit it exactly once (clean exit finalizes then
-        // completes; a non-zero exit fails), then retire the run so the finished
-        // child does not linger — the captured vendor session survives for a
-        // follow-up turn.
-        let retired = if let Some(success) = run.poll_exit() {
-            // Drain the final lines the CLI flushed on exit (the closing
-            // `turn.completed` usage line) before retiring drops the channel.
-            for line in run.drain_remaining(std::time::Duration::from_secs(2)) {
-                events.extend(parse_line(
-                    &self.clock,
-                    &self.rate_lookup,
-                    &line,
-                    run_id,
-                    &session_id,
-                    &mut run.backend_session_id,
-                ));
+        // A Codex `exec` turn runs to completion, so observing exit ends the turn.
+        // Retire under the lock (the vendor session id was captured early, from
+        // `thread.started`/`session.created`) and take ownership of the child, then
+        // do the bounded tail drain and the child drop (reader-thread join) **off**
+        // the lock so neither blocks another run's `stream`/`reply`/`stop`.
+        let exit = run.poll_exit();
+        let retired = if exit.is_some() { slot.retire() } else { None };
+        drop(guard);
+
+        if let Some(success) = exit {
+            if let Some(mut child) = retired {
+                // Drain the final lines the CLI flushed on exit (the closing
+                // `turn.completed` usage line) before the child is dropped.
+                for line in child.drain_remaining(std::time::Duration::from_secs(2)) {
+                    events.extend(parse_line(
+                        &self.clock,
+                        &self.rate_lookup,
+                        &line,
+                        run_id,
+                        &session_id,
+                        &mut child.backend_session_id,
+                    ));
+                }
             }
+
+            // Terminal transition after the tail usage line (clean exit finalizes
+            // then completes; a non-zero exit fails).
             let now = (self.clock)();
             if success {
                 events.push(terminal_status(
@@ -403,15 +412,7 @@ impl AgentBackendAdapter for CodexLocalAdapter {
                     DispatchRunState::Failed,
                 ));
             }
-            slot.retire()
-        } else {
-            None
-        };
-
-        // Release the runs lock before dropping the retired child: `ChildRun::drop`
-        // joins the stdout reader thread, which must not block other runs.
-        drop(guard);
-        drop(retired);
+        }
 
         Ok(events)
     }
