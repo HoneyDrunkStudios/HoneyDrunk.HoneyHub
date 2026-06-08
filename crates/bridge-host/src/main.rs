@@ -11,11 +11,13 @@
 //! - `HONEYHUB_STATIC_DIR`: directory of the built PWA to serve (default
 //!   `packages/ui/dist` when it exists). When served, open the printed http URL
 //!   and the cockpit auto-connects; otherwise only the WebSocket is exposed.
+//! - `HONEYHUB_NO_BROWSER`: set to skip auto-opening the cockpit in a browser
+//!   (e.g. headless, or reaching the host from another device over a tailnet).
 //!
-//! On start it generates a pairing token and prints the URL (with the token) to
-//! open the cockpit with.
+//! On start it generates a pairing token, prints the URL (with the token), and —
+//! when serving the PWA — opens it in the default browser.
 
-use std::net::SocketAddr;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
 
 use honeyhub_bridge::adapters::{default_event_clock, ClaudeLocalAdapter};
@@ -77,11 +79,30 @@ async fn main() -> std::io::Result<()> {
 
     let listener = bind(addr).await?;
     let bound = listener.local_addr()?;
+    // A wildcard bind (0.0.0.0 / ::) is not a loadable browser host, so the URL we
+    // print/open uses loopback; a device on the tailnet uses the host's tailnet IP.
+    let display_addr = if bound.ip().is_unspecified() {
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), bound.port())
+    } else {
+        bound
+    };
     if static_dir.is_some() {
-        println!("HoneyHub cockpit ready — open: http://{bound}/?token={token}");
+        let cockpit_url = format!("http://{display_addr}/?token={token}");
+        println!("HoneyHub cockpit ready — open: {cockpit_url}");
+        if bound.ip().is_unspecified() {
+            println!(
+                "  (listening on all interfaces; from another device on your tailnet open http://<this-host-tailnet-ip>:{}/?token={token})",
+                bound.port()
+            );
+        }
+        // Open the cockpit in the default browser unless told not to (e.g. when
+        // the host runs headless or behind a tailnet reached from another device).
+        if std::env::var("HONEYHUB_NO_BROWSER").is_err() {
+            let _ = open::that(&cockpit_url);
+        }
     } else {
         println!(
-            "HoneyHub bridge host listening; connect the PWA to ws://{bound}/ws?token={token}"
+            "HoneyHub bridge host listening; connect the PWA to ws://{display_addr}/ws?token={token}"
         );
     }
     if std::env::var("HONEYHUB_WORKSPACE_ROOTS")

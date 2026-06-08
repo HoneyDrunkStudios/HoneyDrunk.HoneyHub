@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.9.0] - 2026-06-08
+
+- The bridge host now opens the cockpit in the browser on launch (skippable), so one command literally opens the app; and the README documents driving HoneyHub from a phone over a Tailscale tailnet from the same one binary (no separate mobile app).
+- Kept package versions aligned across the workspace at 0.9.0.
+
 ## [0.8.0] - 2026-06-08
 
 - Turnkey local cockpit: the bridge host now serves the built PWA and the WebSocket on one origin (axum — static at `/`, socket at `/ws`), and the PWA auto-connects when served that way. One command (`cargo run -p honeyhub-bridge-host`) opens an already-connected cockpit at the printed URL — the local server a Tauri shell will wrap unchanged.
