@@ -311,7 +311,6 @@ fn kill_process_tree(child: &mut Child) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::Duration;
 
     /// A trivial, immediately-exiting command available on each platform.
     fn quick_command() -> Command {
@@ -358,9 +357,16 @@ mod tests {
     fn close_and_kill_is_idempotent_and_drop_does_not_double_kill() {
         let mut run =
             ChildRun::spawn(quick_command(), "session-1", None).expect("spawn quick command");
-        // Let it exit on its own first, so the pid may be reaped here.
-        std::thread::sleep(Duration::from_millis(50));
-        let _ = run.poll_exit();
+        // Bounded poll (no fixed sleep — Grid invariant 51) so the quick process may
+        // be observed/reaped via `poll_exit` before the kills below. The test does
+        // not depend on observing the exit; the point is that repeated kills are safe
+        // whether or not the child was already reaped.
+        for _ in 0..10_000 {
+            if run.poll_exit().is_some() {
+                break;
+            }
+            std::thread::yield_now();
+        }
         // Both of these, plus the implicit Drop, must not re-signal a reaped pid.
         run.close_and_kill();
         run.close_and_kill();
