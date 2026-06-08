@@ -12,6 +12,22 @@ import { formatUsd } from "../../usageFormat";
 // mock's summary, so the formatting honesty (estimated never shown as a measured
 // dollar) lives in one tested place.
 
+// Explicit rank maps so the mock/offline rollup order matches Rust's enum-`Ord`
+// ordering (declaration order), not JS lexicographic order — "exact" < "derived" <
+// "estimated" is NOT alphabetical, so a string sort would render same-backend rows
+// in a different order than the host. Keep these in lockstep with the Rust enums.
+const BACKEND_ORDER: Record<AgentBackend, number> = {
+  "claude.local": 0,
+  "codex.local": 1,
+  "copilot.local": 2
+};
+
+const FIDELITY_ORDER: Record<UsageFidelity, number> = {
+  exact: 0,
+  derived: 1,
+  estimated: 2
+};
+
 const BACKEND_LABELS: Record<AgentBackend, string> = {
   "claude.local": "Claude Code",
   "codex.local": "Codex",
@@ -100,10 +116,9 @@ export function summarizeUsage(signals: UsageSignal[], sessionCount: number): Us
   }
 
   const rollups = [...groups.values()].sort((left, right) => {
-    if (left.backend !== right.backend) {
-      return left.backend < right.backend ? -1 : 1;
-    }
-    return left.fidelity < right.fidelity ? -1 : left.fidelity > right.fidelity ? 1 : 0;
+    const backendDelta = BACKEND_ORDER[left.backend] - BACKEND_ORDER[right.backend];
+    if (backendDelta !== 0) return backendDelta;
+    return FIDELITY_ORDER[left.fidelity] - FIDELITY_ORDER[right.fidelity];
   });
 
   const grounded = rollups.filter(
@@ -113,10 +128,11 @@ export function summarizeUsage(signals: UsageSignal[], sessionCount: number): Us
   const groundedTotalUsd = anyGroundedUsd
     ? grounded.reduce((sum, rollup) => sum + (rollup.totalUsd ?? 0), 0)
     : undefined;
-  const totalPremiumRequests = rollups.reduce(
-    (sum, rollup) => sum + (rollup.premiumRequests ?? 0),
-    0
-  );
+  // Premium requests are an estimated-backend unit; restrict the total to estimated
+  // rollups (mirrors the Rust aggregator) so a stray count can't inflate it.
+  const totalPremiumRequests = rollups
+    .filter((rollup) => rollup.fidelity === "estimated")
+    .reduce((sum, rollup) => sum + (rollup.premiumRequests ?? 0), 0);
 
   return {
     sessionCount,

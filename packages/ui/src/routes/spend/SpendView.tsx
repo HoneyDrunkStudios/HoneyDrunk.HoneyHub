@@ -25,8 +25,11 @@ export function SpendView({ client, active }: SpendViewProps) {
   const refresh = useCallback(() => {
     setLoading(true);
     setError(undefined);
-    client.requestUsageSummary().catch((cause: unknown) => {
-      setError(cause instanceof Error ? cause.message : "could not load spend");
+    client.requestUsageSummary().catch(() => {
+      // Keep the surfaced error generic: a raw host/transport error can carry
+      // local-sensitive detail (paths, command lines), and everything here is
+      // sensitive by default (ADR-0090 D11).
+      setError("could not load spend");
       setLoading(false);
     });
   }, [client]);

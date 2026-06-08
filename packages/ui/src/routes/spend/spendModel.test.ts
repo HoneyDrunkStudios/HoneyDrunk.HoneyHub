@@ -66,6 +66,34 @@ describe("summarizeUsage", () => {
     expect(copilot?.premiumRequests).toBe(1);
   });
 
+  it("orders same-backend rollups by Rust enum order, not lexicographically", () => {
+    // exact < derived < estimated is the Rust enum order — and is NOT alphabetical
+    // ("derived" < "estimated" < "exact"), so a string sort would diverge from the
+    // host. Feed them out of order and assert the contract order.
+    const summary = summarizeUsage(
+      [
+        usage("claude.local", "estimated", 10, undefined, 1),
+        usage("claude.local", "exact", 10, 0.01),
+        usage("claude.local", "derived", 10, 0.01)
+      ],
+      1
+    );
+    expect(summary.rollups.map((r) => r.fidelity)).toEqual(["exact", "derived", "estimated"]);
+  });
+
+  it("counts premium requests only from estimated rollups", () => {
+    // A stray premium-request count on a non-estimated signal must not inflate the
+    // total (mirrors the Rust aggregator).
+    const summary = summarizeUsage(
+      [
+        usage("claude.local", "exact", 10, 0.01, 5),
+        usage("copilot.local", "estimated", 10, undefined, 2)
+      ],
+      1
+    );
+    expect(summary.totalPremiumRequests).toBe(2);
+  });
+
   it("reports no grounded total when only estimated activity exists", () => {
     const summary = summarizeUsage([usage("copilot.local", "estimated", 20, undefined, 2)], 1);
     expect(summary.groundedTotalUsd).toBeUndefined();

@@ -252,8 +252,12 @@ impl UsageSummary {
                 .filter_map(|rollup| rollup.total_usd)
                 .sum()
         });
+        // Premium requests are an estimated-backend billing unit; restrict the total
+        // to estimated rollups so a stray premium-request count on an exact/derived
+        // signal can never inflate it (matches the field's documented meaning).
         let total_premium_requests = rollups
             .iter()
+            .filter(|rollup| matches!(rollup.fidelity, UsageFidelity::Estimated))
             .filter_map(|rollup| rollup.premium_requests)
             .sum();
 
@@ -696,6 +700,32 @@ mod tests {
         assert_eq!(summary.grounded_total_usd, None);
         assert_eq!(summary.total_premium_requests, 2);
         assert_eq!(summary.total_turns, 1);
+    }
+
+    #[test]
+    fn usage_summary_premium_requests_count_estimated_rollups_only() {
+        // A premium-request count on a non-estimated signal must not inflate the
+        // total — only estimated backends bill in premium requests.
+        let signals = vec![
+            usage(
+                AgentBackend::ClaudeLocal,
+                UsageFidelity::Exact,
+                100,
+                Some(0.1),
+                Some(5),
+                0,
+            ),
+            usage(
+                AgentBackend::CopilotLocal,
+                UsageFidelity::Estimated,
+                20,
+                None,
+                Some(2),
+                0,
+            ),
+        ];
+        let summary = UsageSummary::from_signals(&signals, 1);
+        assert_eq!(summary.total_premium_requests, 2);
     }
 
     #[test]
