@@ -40,26 +40,36 @@ npm run dev -w @honeydrunk/honeyhub-ui
 
 ## Driving a real Claude Code session
 
-The run screen talks to the bridge over a WebSocket. Start the bridge host, then
-connect the PWA to it:
+The bridge host serves the cockpit **and** the WebSocket on one local origin, so a
+single command runs the whole thing:
 
 1. Install and authenticate the official **Claude Code CLI** locally (the bridge
    shells out to it under your own session; it never stores your auth).
-2. Start the host, allowlisting the workspace you want to run against:
+2. Build the PWA once so the host has something to serve:
+
+   ```powershell
+   npm run build -w @honeydrunk/honeyhub-ui
+   ```
+
+3. Start the host, allowlisting the workspace you want to run against:
 
    ```powershell
    $env:HONEYHUB_WORKSPACE_ROOTS = "C:\path\to\your\repo"
    cargo run -p honeyhub-bridge-host
    ```
 
-   It prints a cockpit URL, e.g. `ws://127.0.0.1:8765/?token=<token>`.
-3. Run the PWA (`npm run dev -w @honeydrunk/honeyhub-ui`), paste that URL into the
-   **Bridge URL** field in the toolbar, and click **Connect**. The run screen now
-   drives a real `claude.local` session through the host.
+   It prints, e.g., `HoneyHub cockpit ready — open: http://127.0.0.1:8765/?token=<token>`.
+4. Open that URL. The cockpit loads and **auto-connects** to the bridge; start a
+   `claude.local` session and drive it.
 
-The WebSocket transport is `[Provisional]` (ADR-0091 D5): the bundled-desktop Tauri
-shell will host the bridge in-process, and mobile reaches the same host over a
-Tailscale tailnet — both behind the same `WireClient` seam, no UI change.
+For UI development you can instead run the PWA dev server
+(`npm run dev -w @honeydrunk/honeyhub-ui`, served on `:5173`) and paste the host's
+`ws://127.0.0.1:8765/ws?token=…` into the toolbar **Bridge URL** field; without a
+host it stays on the offline mock.
+
+The transport is `[Provisional]` (ADR-0091 D5): a bundled-desktop **Tauri** shell
+can wrap this same local server in a native window, and mobile reaches it over a
+**Tailscale** tailnet — both behind the same `WireClient` seam, no UI change.
 
 ## Architecture Context
 

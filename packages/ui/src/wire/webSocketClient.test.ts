@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { BridgeEvent, WireFrame } from "@honeydrunk/honeyhub-types";
-import { WebSocketWireClient, type WireSocket } from "./webSocketClient";
+import { bridgeWsUrl, WebSocketWireClient, type WireSocket } from "./webSocketClient";
 
 class FakeSocket implements WireSocket {
   sent: string[] = [];
@@ -61,6 +61,17 @@ function startRequest(runId: string) {
     requestedRunId: runId
   };
 }
+
+describe("bridgeWsUrl", () => {
+  it("derives the /ws URL from the page origin", () => {
+    expect(bridgeWsUrl({ protocol: "http:", host: "127.0.0.1:8765" }, "tok")).toBe(
+      "ws://127.0.0.1:8765/ws?token=tok"
+    );
+    expect(bridgeWsUrl({ protocol: "https:", host: "host.ts.net" }, "a b")).toBe(
+      "wss://host.ts.net/ws?token=a%20b"
+    );
+  });
+});
 
 describe("WebSocketWireClient", () => {
   it("queues commands until open, then flushes and resolves on ack", async () => {

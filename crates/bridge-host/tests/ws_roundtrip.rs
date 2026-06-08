@@ -3,6 +3,7 @@
 //! events — proving the transport carries the wire protocol end to end. A bad
 //! token is rejected at the handshake.
 
+use std::path::PathBuf;
 use std::sync::Mutex;
 use std::time::Duration;
 
@@ -15,6 +16,7 @@ use honeyhub_bridge::{
     RunHandle, StartRunRequest, WireFrame,
 };
 use honeyhub_bridge_host::{bind, serve, DEFAULT_POLL_INTERVAL};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio_tungstenite::tungstenite::Message;
 
 struct ScriptedAdapter {
@@ -126,7 +128,7 @@ fn session() -> DispatchSession {
     }
 }
 
-async fn spawn_host() -> (String, String) {
+async fn spawn_host(static_dir: Option<PathBuf>) -> (String, String) {
     let mut registry = PairingRegistry::new(BridgeIdentity::new("test-host"));
     let grant = registry.pair("client", "2026-06-07T12:00:00.000Z");
     let token = grant.token;
@@ -136,15 +138,22 @@ async fn spawn_host() -> (String, String) {
         .expect("bind");
     let addr = listener.local_addr().expect("local addr");
     tokio::spawn(async move {
-        let _ = serve(listener, runtime(), registry, DEFAULT_POLL_INTERVAL).await;
+        let _ = serve(
+            listener,
+            runtime(),
+            registry,
+            DEFAULT_POLL_INTERVAL,
+            static_dir,
+        )
+        .await;
     });
     (addr.to_string(), token)
 }
 
 #[tokio::test]
 async fn streams_events_to_an_authenticated_client() {
-    let (addr, token) = spawn_host().await;
-    let url = format!("ws://{addr}/?token={token}");
+    let (addr, token) = spawn_host(None).await;
+    let url = format!("ws://{addr}/ws?token={token}");
     let (mut ws, _response) = tokio_tungstenite::connect_async(url)
         .await
         .expect("connect");
@@ -203,8 +212,45 @@ async fn streams_events_to_an_authenticated_client() {
 
 #[tokio::test]
 async fn rejects_an_invalid_pairing_token() {
-    let (addr, _token) = spawn_host().await;
-    let url = format!("ws://{addr}/?token=not-a-real-token");
+    let (addr, _token) = spawn_host(None).await;
+    let url = format!("ws://{addr}/ws?token=not-a-real-token");
     let result = tokio_tungstenite::connect_async(url).await;
     assert!(result.is_err(), "handshake must reject an unknown token");
+}
+
+#[tokio::test]
+async fn serves_the_static_pwa() {
+    let dir = std::env::temp_dir().join(format!("honeyhub-static-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).expect("create static dir");
+    std::fs::write(
+        dir.join("index.html"),
+        "<!doctype html><title>HoneyHub</title>",
+    )
+    .expect("write index");
+
+    let (addr, _token) = spawn_host(Some(dir.clone())).await;
+
+    let mut stream = tokio::net::TcpStream::connect(&addr)
+        .await
+        .expect("connect");
+    stream
+        .write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+        .await
+        .expect("write request");
+    let mut response = String::new();
+    stream
+        .read_to_string(&mut response)
+        .await
+        .expect("read response");
+
+    assert!(
+        response.starts_with("HTTP/1.1 200"),
+        "expected 200, got: {response}"
+    );
+    assert!(
+        response.contains("HoneyHub"),
+        "expected the served index body"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
 }

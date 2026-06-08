@@ -1,5 +1,9 @@
 # Changelog
 
+## [0.8.0] - 2026-06-08
+
+- Version alignment for the turnkey-local-cockpit release (no type changes).
+
 ## [0.7.0] - 2026-06-07
 
 - Version alignment for the bridge-host transport release (no type changes).

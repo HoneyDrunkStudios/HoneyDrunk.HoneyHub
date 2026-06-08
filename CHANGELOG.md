@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.8.0] - 2026-06-08
+
+- Turnkey local cockpit: the bridge host now serves the built PWA and the WebSocket on one origin (axum — static at `/`, socket at `/ws`), and the PWA auto-connects when served that way. One command (`cargo run -p honeyhub-bridge-host`) opens an already-connected cockpit at the printed URL — the local server a Tauri shell will wrap unchanged.
+- Kept package versions aligned across the workspace at 0.8.0.
+
 ## [0.7.0] - 2026-06-07
 
 - Added the bridge **transport bringup** (ADR-0091 D2/D5): a new `crates/bridge-host` WebSocket server exposes the `BridgeRuntime` to the PWA over the `honeyhub.bridge.v1` protocol (pairing-token auth, command handling, event streaming), and a `WebSocketWireClient` + a toolbar Connect control let the run screen drive a live bridge instead of the offline mock. The README documents running a real Claude Code session end-to-end. WebSocket transport is `[Provisional]`; the bundled-desktop Tauri-IPC and mobile-Tailscale paths slot behind the same `WireClient` seam.
