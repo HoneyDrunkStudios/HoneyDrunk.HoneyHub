@@ -3,8 +3,9 @@
 ## [0.13.0] - 2026-06-08
 
 - Added the `copilot.local` adapter (`adapters::copilot_local::CopilotLocalAdapter`): drives the official GitHub Copilot CLI under the user's own local `gh` token (ADR-0090 §3b), as a thin strategy over the shared `child_run` driver.
-- Token-level streaming: `assistant.message_delta` deltas surface as partial messages; `assistant.message_completed`/`turn.completed` emit a final message + the usage signal. Resume-based reply (interactive_reply false → follow-up-run path); the CLI-shape surface is isolated to `exec_command`.
+- Token-level streaming: `assistant.message_delta` deltas surface as partial messages; `assistant.message_completed` carries the final assembled message and `turn.completed` carries the usage signal. Resume-based reply (interactive_reply false → follow-up-run path); the CLI-shape surface is isolated to `exec_command`.
 - Usage fidelity `estimated` (ADR-0092 D2): premium-requests + duration are the exact billing units (taken directly); token figures are estimated from a coarse text-size proxy with low confidence, and USD is absent (Copilot bills premium requests, not a token cost). A clean turn that ends without a completion event still synthesizes the estimated signal so a turn never silently drops its premium request.
+- Usage is accounted **exactly once per turn**, on `turn.completed`; `assistant.message_completed` carries no usage, so a CLI that emits both cannot double-count the premium request. The token estimate uses **ceiling** division so any non-empty prompt/response estimates to at least one token (an estimate of 0 would read as "no usage").
 
 ## [0.12.0] - 2026-06-08
 

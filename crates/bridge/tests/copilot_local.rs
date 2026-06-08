@@ -10,7 +10,6 @@ use honeyhub_bridge::{
     AgentBackend, AgentBackendAdapter, DispatchSession, EventClock, StartRunRequest, UsageFidelity,
 };
 use std::sync::Arc;
-use std::time::Duration;
 
 fn fake_program() -> &'static str {
     env!("CARGO_BIN_EXE_fake_copilot")
@@ -49,12 +48,14 @@ where
     F: FnMut(&[BridgeEvent]) -> bool,
 {
     let mut collected = Vec::new();
-    for _ in 0..250 {
+    // Bounded poll with `yield_now` rather than a fixed sleep (Grid invariant 51:
+    // no sleep-based test waiting). The cap is the explicit timeout.
+    for _ in 0..200_000 {
         collected.extend(adapter.stream(run_id).expect("stream succeeds"));
         if done(&collected) {
             return collected;
         }
-        std::thread::sleep(Duration::from_millis(20));
+        std::thread::yield_now();
     }
     panic!(
         "predicate never satisfied; collected {} events",

@@ -151,7 +151,10 @@ fn session_id_from(value: &Value) -> Option<String> {
 }
 
 fn estimated_tokens(chars: usize) -> u64 {
-    (chars / CHARS_PER_TOKEN) as u64
+    // Ceiling division: any non-empty text estimates to at least one token, so a
+    // short prompt/response never reports 0 tok (an estimate of 0 would read as
+    // "no usage"). Empty text stays 0.
+    (chars.div_ceil(CHARS_PER_TOKEN)) as u64
 }
 
 fn agent_message(
@@ -296,11 +299,33 @@ fn parse_line(
                 ));
             }
         }
-        "assistant.message_completed" | "turn.completed" => {
+        // The assistant's message ended — surface the final assembled text (when the
+        // CLI provides it). This carries NO usage: usage is accounted exactly once
+        // per turn, on `turn.completed`, so a CLI that emits both this and
+        // `turn.completed` cannot double-count the premium request.
+        "assistant.message_completed" => {
             if let Some(id) = session_id_from(&value) {
                 *backend_session_id = Some(id);
             }
-            // A final assembled message, when the CLI provides the whole text.
+            if let Some(text) = value.get("text").and_then(Value::as_str) {
+                if !text.is_empty() {
+                    result.events.push(agent_message(
+                        text.to_string(),
+                        false,
+                        session_id,
+                        run_id,
+                        &now,
+                    ));
+                }
+            }
+        }
+        // The turn ended — the single accounting point for the premium request.
+        "turn.completed" | "thread.completed" => {
+            if let Some(id) = session_id_from(&value) {
+                *backend_session_id = Some(id);
+            }
+            // A final assembled message, when this event (rather than a separate
+            // `assistant.message_completed`) carries the whole text.
             if let Some(text) = value.get("text").and_then(Value::as_str) {
                 if !text.is_empty() {
                     result.events.push(agent_message(
@@ -602,6 +627,60 @@ mod tests {
         assert_eq!(usage.total_usd, None);
         assert_eq!(usage.confidence, Some(UsageConfidence::Low));
         assert_eq!(usage.backend, AgentBackend::CopilotLocal);
+    }
+
+    #[test]
+    fn message_completed_and_turn_completed_yield_exactly_one_usage() {
+        // If a turn produces both `assistant.message_completed` and `turn.completed`,
+        // the premium request must be counted exactly once (on turn.completed).
+        let mut backend_session = None;
+        let count_usage = |parsed: &ParseResult| {
+            parsed
+                .events
+                .iter()
+                .filter(|event| {
+                    matches!(event.payload, crate::wire::BridgeEventPayload::Usage { .. })
+                })
+                .count()
+        };
+
+        let completed = parse_line(
+            &test_clock(),
+            r#"{"type":"assistant.message_completed","text":"all done"}"#,
+            "run-1",
+            "session-1",
+            40,
+            400,
+            &mut backend_session,
+        );
+        // The message end carries the final text but NO usage.
+        assert_eq!(count_usage(&completed), 0);
+        assert!(completed
+            .events
+            .iter()
+            .any(|event| matches!(&event.payload,
+                crate::wire::BridgeEventPayload::Message { message } if message.body == "all done")));
+
+        let turn = parse_line(
+            &test_clock(),
+            r#"{"type":"turn.completed","premium_requests":1,"duration_ms":1000}"#,
+            "run-1",
+            "session-1",
+            40,
+            400,
+            &mut backend_session,
+        );
+        // The turn end is the single accounting point: exactly one usage signal.
+        assert_eq!(count_usage(&turn), 1);
+    }
+
+    #[test]
+    fn estimated_tokens_round_up_so_short_text_is_never_zero() {
+        // Ceiling division: 1..=CHARS_PER_TOKEN chars estimate to 1 token, not 0.
+        assert_eq!(estimated_tokens(0), 0);
+        assert_eq!(estimated_tokens(1), 1);
+        assert_eq!(estimated_tokens(CHARS_PER_TOKEN), 1);
+        assert_eq!(estimated_tokens(CHARS_PER_TOKEN + 1), 2);
     }
 
     #[test]
