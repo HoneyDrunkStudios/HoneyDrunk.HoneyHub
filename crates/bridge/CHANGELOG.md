@@ -1,5 +1,9 @@
 # Changelog
 
+## [0.6.0] - 2026-06-07
+
+- Version alignment for the run-screen release (no bridge code change).
+
 ## [0.5.0] - 2026-06-07
 
 - Added `store::LocalStore`, a local-first session store: structured records (sessions/runs/control events/artifacts/usage/policy hints) in an embedded JSON document, transcript bodies in separate per-run JSONL files, with pin/unpin and a `prune(cutoff)` that drops unpinned, terminal, old transcripts while keeping durable records. Engine + retention window are `[Provisional]`; nothing syncs off-device.

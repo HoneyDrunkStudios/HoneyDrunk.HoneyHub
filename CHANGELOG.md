@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.6.0] - 2026-06-07
+
+- Added the minimal chat-shaped run screen for packet 08 — the Phase 2 integration capstone: start a Claude Code session, watch the live stream + run state, reply to `needs_input`, follow up after completion, stop, and see artifact links, with fidelity-aware usage display. Built on a `WireClient` seam with a scripted mock for tests/offline demo (the real WebSocket transport lands with the bridge bringup).
+- Kept package versions aligned across the HoneyHub workspace.
+
 ## [0.5.0] - 2026-06-07
 
 - Added the local-first session store for packet 07: structured records in an embedded JSON document + separable per-run transcript files, with pin/prune retention (engine + window `[Provisional]`, nothing syncs off-device).
