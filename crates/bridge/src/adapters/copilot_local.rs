@@ -459,6 +459,27 @@ impl AgentBackendAdapter for CopilotLocalAdapter {
         // usage signal from what we accumulated so a turn always reports its premium
         // request (the real billing unit) — never silently dropping it.
         let retired = if let Some(success) = run.child.poll_exit() {
+            // First drain the final lines the CLI flushed on exit (e.g. the
+            // `turn.completed` premium-request line) through the same accounting as
+            // the main loop, before retiring drops the channel.
+            for line in run.child.drain_remaining(std::time::Duration::from_secs(2)) {
+                let parsed = parse_line(
+                    &self.clock,
+                    &line,
+                    run_id,
+                    &session_id,
+                    input_chars,
+                    run.output_chars,
+                    &mut run.child.backend_session_id,
+                );
+                run.output_chars += parsed.output_chars;
+                if parsed.events.iter().any(|event| {
+                    matches!(event.payload, crate::wire::BridgeEventPayload::Usage { .. })
+                }) {
+                    run.usage_emitted = true;
+                }
+                events.extend(parsed.events);
+            }
             let now = (self.clock)();
             if success {
                 if !run.usage_emitted {
