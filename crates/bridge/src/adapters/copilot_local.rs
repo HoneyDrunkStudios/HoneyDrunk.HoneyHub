@@ -140,6 +140,13 @@ impl CopilotLocalAdapter {
     /// Build the Copilot CLI command for one turn. A fresh turn passes the prompt; a
     /// resumed turn re-attaches the prior session. This is the single
     /// CLI-shape-dependent surface (packet 09 §3b re-scope point).
+    ///
+    /// The prompt is passed via argv (`--prompt <task>`). For v1 — a local-first,
+    /// single-user cockpit driving the user's own CLI with the user's own prompts on
+    /// their own machine — argv exposure to co-resident process inspection is an
+    /// accepted low-risk tradeoff. Migrating prompt delivery to stdin (as
+    /// `claude.local` does) once the live CLI's stdin path is confirmed is tracked in
+    /// HoneyHub#29.
     fn exec_command(&self, task: &str, resume_session: Option<&str>) -> Command {
         let mut command = Command::new(&self.program);
         command.arg("--json");
