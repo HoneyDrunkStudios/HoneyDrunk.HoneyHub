@@ -524,23 +524,30 @@ where
     /// **must** be allowlisted — discovery never reads outside the allowlist); with
     /// `None` it scans **every** allowlisted root. Best-effort per root (a missing
     /// `.claude/agents`/`.github` folder is simply empty).
+    ///
+    /// Results are filtered to the **backend allowlist**: an agent is only surfaced as
+    /// a runnable dispatch target if its backend is one the bridge is actually allowed
+    /// to launch (the same gate `start` enforces), so the catalog never advertises an
+    /// agent that could not be run.
     pub fn discover_agents(
         &self,
         workspace_root: Option<&str>,
     ) -> Result<Vec<AgentDefinition>, BridgeError> {
-        match workspace_root {
+        let mut discovered = match workspace_root {
             Some(root) => {
                 self.ensure_workspace_allowed(root)?;
-                Ok(discover_agents_in_root(root))
+                discover_agents_in_root(root)
             }
             None => {
                 let mut all = Vec::new();
                 for root in self.workspace_allowlist.roots() {
                     all.extend(discover_agents_in_root(root));
                 }
-                Ok(all)
+                all
             }
-        }
+        };
+        discovered.retain(|agent| self.backend_allowlist.allows(&agent.backend));
+        Ok(discovered)
     }
 
     /// A device-wide "your spend" summary over every run this runtime holds. Usage
@@ -1764,21 +1771,36 @@ mod tests {
             "---\nname: Reviewer\ndescription: Reviews diffs\n---\nbody\n",
         )
         .expect("write agent");
+        // A Copilot agent in the same workspace; the backend allowlist below does NOT
+        // include copilot.local, so discovery must not surface it as runnable.
+        let github_dir = std::path::Path::new(&workspace_root).join(".github");
+        fs::create_dir_all(&github_dir).expect("github dir");
+        fs::write(
+            github_dir.join("release-agent.md"),
+            "---\nname: Release Agent\n---\nbody\n",
+        )
+        .expect("write copilot agent");
 
         let adapter = FakeAdapter::new(CapabilityFlags::claude_local());
         // Allowlist the workspace root itself, so both the scoped and the scan-all
-        // paths look in the folder that holds the agent.
+        // paths look in the folder that holds the agent. Only claude.local is in the
+        // backend allowlist.
         let runtime = BridgeRuntime::new(
             adapter,
             WorkspaceAllowlist::new(vec![workspace_root.clone()]),
             BackendAllowlist::new(vec![AgentBackend::ClaudeLocal]),
         );
 
-        // Scanning the allowlisted root finds the agent.
+        // Scanning the allowlisted root finds the Claude agent — and filters out the
+        // Copilot one, whose backend is not in the allowlist (can't be launched).
         let scoped = runtime
             .discover_agents(Some(&workspace_root))
             .expect("allowlisted root scans");
-        assert_eq!(scoped.len(), 1);
+        assert_eq!(
+            scoped.len(),
+            1,
+            "copilot agent filtered by backend allowlist"
+        );
         assert_eq!(scoped[0].name, "Reviewer");
         assert_eq!(scoped[0].backend, AgentBackend::ClaudeLocal);
 
