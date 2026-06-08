@@ -126,10 +126,23 @@ impl CodexLocalAdapter {
     }
 }
 
-/// Pull a vendor session id out of an init-style event, accepting the field names
-/// Codex may use (`thread_id` / `session_id` / `id`).
+/// Pull a vendor session id out of an **init**-style event (`thread.started` /
+/// `session.created`), accepting the field names Codex may use there
+/// (`thread_id` / `session_id` / `id`).
 fn session_id_from(value: &Value) -> Option<String> {
     ["thread_id", "session_id", "id"]
+        .into_iter()
+        .find_map(|key| value.get(key).and_then(Value::as_str))
+        .map(str::to_string)
+}
+
+/// Pull a vendor session id out of a **completion**-style event
+/// (`turn.completed` / `thread.completed`). Only the explicit `thread_id` /
+/// `session_id` keys are accepted — a generic `id` on a completion event is just as
+/// likely to be a turn/event id, which must not be mistaken for the resumable
+/// session id captured at init.
+fn completion_session_id(value: &Value) -> Option<String> {
+    ["thread_id", "session_id"]
         .into_iter()
         .find_map(|key| value.get(key).and_then(Value::as_str))
         .map(str::to_string)
@@ -278,8 +291,13 @@ fn parse_line(
         }
         // Turn finished — carries the exact token usage for the derived signal.
         "turn.completed" | "thread.completed" => {
-            if let Some(id) = session_id_from(&value) {
-                *backend_session_id = Some(id);
+            // Only adopt a session id from explicit `thread_id`/`session_id` keys, and
+            // never overwrite the one captured at init — a completion event's generic
+            // `id` is likely a turn/event id, not the resumable session id.
+            if backend_session_id.is_none() {
+                if let Some(id) = completion_session_id(&value) {
+                    *backend_session_id = Some(id);
+                }
             }
             let Some(usage) = value.get("usage") else {
                 return Vec::new();
@@ -554,6 +572,34 @@ mod tests {
             }
             other => panic!("expected a message payload, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn completion_event_generic_id_does_not_overwrite_init_session_id() {
+        // A `turn.completed` carrying a generic `id` (a turn/event id) must not
+        // clobber the resumable session id captured from `thread.started`.
+        let mut backend_session = None;
+        let rate = no_rate_lookup();
+        parse_line(
+            &test_clock(),
+            &rate,
+            r#"{"type":"thread.started","thread_id":"codex-thread-7"}"#,
+            "run-1",
+            "session-1",
+            &mut backend_session,
+        );
+        assert_eq!(backend_session.as_deref(), Some("codex-thread-7"));
+
+        parse_line(
+            &test_clock(),
+            &rate,
+            r#"{"type":"turn.completed","id":"turn-99","usage":{"input_tokens":10,"output_tokens":5}}"#,
+            "run-1",
+            "session-1",
+            &mut backend_session,
+        );
+        // Still the thread id, not "turn-99".
+        assert_eq!(backend_session.as_deref(), Some("codex-thread-7"));
     }
 
     #[test]
