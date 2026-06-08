@@ -19,6 +19,7 @@ export interface WireSocket {
   close(): void;
   onMessage(handler: (data: string) => void): void;
   onOpen(handler: () => void): void;
+  onClose(handler: () => void): void;
 }
 
 export function browserSocket(url: string): WireSocket {
@@ -32,9 +33,16 @@ export function browserSocket(url: string): WireSocket {
           handler(event.data);
         }
       }),
-    onOpen: (handler) => ws.addEventListener("open", handler)
+    onOpen: (handler) => ws.addEventListener("open", handler),
+    onClose: (handler) => {
+      ws.addEventListener("close", () => handler());
+      ws.addEventListener("error", () => handler());
+    }
   };
 }
+
+/** Ignore frames larger than this — a guard against a buggy/hostile host. */
+const MAX_FRAME_BYTES = 1_000_000;
 
 function frame(command: ClientCommand): WireFrame {
   return {
@@ -58,6 +66,7 @@ export class WebSocketWireClient implements WireClient {
   private handlers = new Set<WireEventHandler>();
   private queue: string[] = [];
   private open = false;
+  private closed = false;
   private pending = new Map<string, Pending>();
 
   constructor(
@@ -65,27 +74,49 @@ export class WebSocketWireClient implements WireClient {
     private responseTimeoutMs: number = DEFAULT_RESPONSE_TIMEOUT_MS
   ) {
     this.socket.onOpen(() => {
-      this.open = true;
-      for (const pending of this.queue) {
-        this.socket.send(pending);
-      }
+      // Flush queued frames before marking open so ordering is unambiguous.
+      const queued = this.queue;
       this.queue = [];
+      for (const data of queued) {
+        this.socket.send(data);
+      }
+      this.open = true;
     });
     this.socket.onMessage((data) => this.receive(data));
+    this.socket.onClose(() => this.onSocketClosed());
   }
 
   /** Convenience: connect to a full cockpit URL (token already in the query). */
   static connect(url: string): WebSocketWireClient {
+    if (!/^wss?:\/\//.test(url)) {
+      throw new Error("bridge URL must start with ws:// or wss://");
+    }
     return new WebSocketWireClient(browserSocket(url));
   }
 
+  private onSocketClosed(): void {
+    this.closed = true;
+    const error = new Error("bridge connection closed");
+    for (const pending of this.pending.values()) {
+      pending.reject(error);
+    }
+    this.pending.clear();
+  }
+
   private receive(data: string): void {
-    let parsed: WireFrame;
+    if (data.length > MAX_FRAME_BYTES) {
+      return;
+    }
+    let raw: unknown;
     try {
-      parsed = JSON.parse(data) as WireFrame;
+      raw = JSON.parse(data);
     } catch {
       return;
     }
+    if (typeof raw !== "object" || raw === null || typeof (raw as WireFrame).kind !== "string") {
+      return;
+    }
+    const parsed = raw as WireFrame;
     // Resolve/reject the command that this frame answers (host tags acks and
     // command errors with the originating frame id), so launch-gate failures
     // surface to the caller instead of being silently dropped.
@@ -123,6 +154,9 @@ export class WebSocketWireClient implements WireClient {
 
   // Send a command and resolve when the host acks it (or reject on error/timeout).
   private dispatch(command: ClientCommand): Promise<void> {
+    if (this.closed) {
+      return Promise.reject(new Error("bridge connection closed"));
+    }
     const wireFrame = frame(command);
     return new Promise<void>((resolve, reject) => {
       const timer = setTimeout(() => {

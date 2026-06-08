@@ -6,6 +6,7 @@ class FakeSocket implements WireSocket {
   sent: string[] = [];
   private messageHandler?: (data: string) => void;
   private openHandler?: () => void;
+  private closeHandler?: () => void;
 
   send(data: string): void {
     this.sent.push(data);
@@ -17,8 +18,14 @@ class FakeSocket implements WireSocket {
   onOpen(handler: () => void): void {
     this.openHandler = handler;
   }
+  onClose(handler: () => void): void {
+    this.closeHandler = handler;
+  }
   open(): void {
     this.openHandler?.();
+  }
+  triggerClose(): void {
+    this.closeHandler?.();
   }
   deliver(frame: WireFrame): void {
     this.messageHandler?.(JSON.stringify(frame));
@@ -118,6 +125,17 @@ describe("WebSocketWireClient", () => {
 
     expect(received).toHaveLength(1);
     expect(received[0]?.payload.kind).toBe("status");
+  });
+
+  it("rejects pending commands when the socket closes", async () => {
+    const socket = new FakeSocket();
+    const client = new WebSocketWireClient(socket);
+    socket.open();
+
+    const pending = client.reply("run-1", "continue");
+    socket.triggerClose();
+
+    await expect(pending).rejects.toThrow("bridge connection closed");
   });
 
   it("sends reply and stop commands once open", async () => {

@@ -41,17 +41,49 @@ struct Host<A: AgentBackendAdapter> {
     events: broadcast::Sender<BridgeEvent>,
 }
 
-/// Extract the `token` query parameter from a WebSocket upgrade request.
+/// Extract the `token` query parameter from a WebSocket upgrade request,
+/// percent-decoding the value so an encoded token still matches the registry.
 fn token_from_request(request: &Request) -> Option<String> {
     let query = request.uri().query()?;
     query.split('&').find_map(|pair| {
         let (key, value) = pair.split_once('=')?;
         if key == "token" {
-            Some(value.to_string())
+            Some(percent_decode(value))
         } else {
             None
         }
     })
+}
+
+/// Minimal `application/x-www-form-urlencoded` value decode (`%XX` and `+`).
+fn percent_decode(input: &str) -> String {
+    let bytes = input.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'%' if index + 2 < bytes.len() => {
+                let hi = (bytes[index + 1] as char).to_digit(16);
+                let lo = (bytes[index + 2] as char).to_digit(16);
+                if let (Some(hi), Some(lo)) = (hi, lo) {
+                    out.push((hi * 16 + lo) as u8);
+                    index += 3;
+                } else {
+                    out.push(b'%');
+                    index += 1;
+                }
+            }
+            b'+' => {
+                out.push(b' ');
+                index += 1;
+            }
+            byte => {
+                out.push(byte);
+                index += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 /// Bind a listener for the host. Returns the listener so callers (and tests) can
@@ -80,7 +112,7 @@ where
     let registry = Arc::new(registry);
 
     // Polling task: drain each active run's stream and broadcast new events.
-    {
+    let poll_handle = {
         let host = Arc::clone(&host);
         tokio::spawn(async move {
             let mut ticker = tokio::time::interval(poll_interval);
@@ -88,18 +120,26 @@ where
                 ticker.tick().await;
                 poll_active_runs(&host).await;
             }
-        });
-    }
+        })
+    };
 
     loop {
-        let (stream, _peer) = listener.accept().await?;
-        let host = Arc::clone(&host);
-        let registry = Arc::clone(&registry);
-        tokio::spawn(async move {
-            if let Err(error) = handle_connection(stream, host, registry).await {
-                eprintln!("bridge-host: connection ended: {error}");
+        match listener.accept().await {
+            Ok((stream, _peer)) => {
+                let host = Arc::clone(&host);
+                let registry = Arc::clone(&registry);
+                tokio::spawn(async move {
+                    if let Err(error) = handle_connection(stream, host, registry).await {
+                        eprintln!("bridge-host: connection ended: {error}");
+                    }
+                });
             }
-        });
+            Err(error) => {
+                // Stop the polling task before returning so it does not run on.
+                poll_handle.abort();
+                return Err(error);
+            }
+        }
     }
 }
 

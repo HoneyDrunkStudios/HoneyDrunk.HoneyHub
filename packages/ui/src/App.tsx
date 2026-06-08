@@ -24,7 +24,9 @@ export function App({ client }: AppProps = {}) {
   // prints, which swaps in the WebSocket client behind the same seam.
   const [wireClient, setWireClient] = useState<WireClient>(() => client ?? new MockWireClient());
   const [bridgeUrl, setBridgeUrl] = useState("");
-  const [connected, setConnected] = useState(false);
+  // A caller-provided client counts as connected; otherwise we start on the mock.
+  const [connected, setConnected] = useState(client !== undefined);
+  const [connectError, setConnectError] = useState<string | undefined>(undefined);
   // Bridge settings are owned here so the run screen can read the workspace
   // allowlist the operator edits in Bridge settings.
   const [settings, setSettings] = useState<BridgeSettingsState>(emptyBridgeSettings);
@@ -37,8 +39,14 @@ export function App({ client }: AppProps = {}) {
     if (url.length === 0) {
       return;
     }
-    setWireClient(WebSocketWireClient.connect(url));
-    setConnected(true);
+    try {
+      setWireClient(WebSocketWireClient.connect(url));
+      setConnected(true);
+      setConnectError(undefined);
+    } catch (cause) {
+      setConnected(false);
+      setConnectError(cause instanceof Error ? cause.message : "could not connect");
+    }
   };
 
   return (
@@ -59,6 +67,11 @@ export function App({ client }: AppProps = {}) {
             Connect
           </button>
           <span className="connect-state">{connected ? "connected" : "demo (mock)"}</span>
+          {connectError !== undefined && (
+            <span role="alert" className="settings-error">
+              {connectError}
+            </span>
+          )}
         </div>
       </section>
 
