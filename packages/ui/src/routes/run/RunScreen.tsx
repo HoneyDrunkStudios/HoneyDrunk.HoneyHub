@@ -42,9 +42,8 @@ export function RunScreen({ client, workspaceRoots = [] }: RunScreenProps) {
   const [usage, setUsage] = useState<UsageSignal[]>([]);
   const [reply, setReply] = useState("");
   const [error, setError] = useState<string | undefined>(undefined);
-  const [backend, setBackend] = useState<AgentBackend>("claude.local");
-  // Once the user picks a backend by hand, stop following the router's suggestion.
-  const [backendPinned, setBackendPinned] = useState(false);
+  // The user's explicit backend pick, set only when they override the suggestion.
+  const [pinnedBackend, setPinnedBackend] = useState<AgentBackend | undefined>(undefined);
 
   // The router's suggestion for the current task (app-tier, ADR-0092 D3). Recomputed
   // as the task text changes; a pure function of the task + the bundled snapshot.
@@ -52,12 +51,10 @@ export function RunScreen({ client, workspaceRoots = [] }: RunScreenProps) {
     () => recommendBackend({ task, availableBackends: ROUTABLE_BACKENDS }, BUNDLED_SNAPSHOT),
     [task]
   );
-  // Follow the suggestion until the user overrides it.
-  useEffect(() => {
-    if (!backendPinned) {
-      setBackend(recommendation.backend);
-    }
-  }, [recommendation.backend, backendPinned]);
+  // The backend a run will launch on: the user's pick once they override, otherwise
+  // the live suggestion. Derived (not synced via an effect), so it is never stale at
+  // launch and the select reflects it synchronously.
+  const backend = pinnedBackend ?? recommendation.backend;
 
   // Keep the active run id available to the event handler without re-subscribing.
   const runIdRef = useRef<string | undefined>(undefined);
@@ -263,10 +260,7 @@ export function RunScreen({ client, workspaceRoots = [] }: RunScreenProps) {
           <select
             id="backend"
             value={backend}
-            onChange={(event) => {
-              setBackend(event.target.value as AgentBackend);
-              setBackendPinned(true);
-            }}
+            onChange={(event) => setPinnedBackend(event.target.value as AgentBackend)}
           >
             {ROUTABLE_BACKENDS.map((option) => (
               <option key={option} value={option}>

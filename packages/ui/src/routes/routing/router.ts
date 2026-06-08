@@ -9,7 +9,8 @@ import type { ModelRate, RoutingSnapshot } from "./routingSnapshot";
 // heuristics are tunable starting points, not a contract.
 
 // Keywords that pull a task toward "complex" (prefer capability) or "light" (prefer
-// cost). Matched as whole-ish words, case-insensitively.
+// cost). Matched as case-insensitive **substrings** — a coarse signal, so a partial
+// match (e.g. "format" in "reformat") counts; precise word boundaries are not needed.
 const COMPLEX_HINTS = [
   "refactor",
   "architect",
@@ -74,7 +75,8 @@ export interface RoutingRecommendation {
   ranked: RankedBackend[];
   /** The estimated complexity that drove the cost-vs-capability choice. */
   complexity: number;
-  /** True when the snapshot's source is not a live projection (e.g. bundled). */
+  /** The snapshot's provenance string (e.g. `bundled-default`), so a derived/stale
+      source is legible to the caller. */
   snapshotSource: string;
 }
 
@@ -110,29 +112,49 @@ export function recommendBackend(
     };
   }
 
-  const usagePenalty = (rate: ModelRate): number => {
-    const turns = input.recentTurnsByBackend?.[rate.backend] ?? 0;
-    // Capped + small: only breaks near-ties (tier weights are 10×/100×).
-    return Math.min(turns, 10) * 0.5;
-  };
-
-  const score = (rate: ModelRate): number => {
-    const base = preferCapability
+  const baseScore = (rate: ModelRate): number =>
+    preferCapability
       ? rate.capabilityTier * 100 - rate.costTier * 10
       : -rate.costTier * 100 + rate.capabilityTier * 10;
-    return base - usagePenalty(rate);
+
+  const usagePenalty = (backend: AgentBackend): number => {
+    // Clamp to [0, 10]: a negative count must never become a score *boost*, and the
+    // cap keeps the penalty small (tier weights are 10×/100×), so it only breaks
+    // near-ties.
+    const turns = Math.min(Math.max(input.recentTurnsByBackend?.[backend] ?? 0, 0), 10);
+    return turns * 0.5;
   };
 
-  const ranked: RankedBackend[] = available
-    .map((rate) => ({ backend: rate.backend, score: score(rate) }))
-    // Deterministic: by score desc, then backend id for a stable tiebreak.
-    .sort((left, right) => right.score - left.score || (left.backend < right.backend ? -1 : 1));
+  // Reduce to the best rate **per backend** (a snapshot could carry several models
+  // for one backend), so `ranked` has exactly one entry per backend and no duplicate
+  // can distort the winner. The usage penalty is per-backend, so it does not change
+  // which rate within a backend is best — pick by base score.
+  const bestByBackend = new Map<AgentBackend, ModelRate>();
+  for (const rate of available) {
+    const existing = bestByBackend.get(rate.backend);
+    if (existing === undefined || baseScore(rate) > baseScore(existing)) {
+      bestByBackend.set(rate.backend, rate);
+    }
+  }
+  const candidates = [...bestByBackend.values()];
+
+  // Deterministic ordering: by final score desc, then backend id for a stable tiebreak.
+  const order = (scoreOf: (rate: ModelRate) => number) => (left: ModelRate, right: ModelRate) =>
+    scoreOf(right) - scoreOf(left) || (left.backend < right.backend ? -1 : 1);
+  const finalScore = (rate: ModelRate): number => baseScore(rate) - usagePenalty(rate.backend);
+
+  const ranked: RankedBackend[] = [...candidates]
+    .sort(order(finalScore))
+    .map((rate) => ({ backend: rate.backend, score: finalScore(rate) }));
 
   const winner = ranked[0]!.backend;
+  // The nudge note is shown only when the usage penalty actually **changed** the
+  // winner — i.e. without it a different backend would have won — so the rationale
+  // never claims an influence that did not happen.
+  const winnerWithoutUsage = [...candidates].sort(order(baseScore))[0]!.backend;
+  const nudged = winner !== winnerWithoutUsage;
+
   const driver = preferCapability ? "most capable" : "lowest-cost";
-  const nudged =
-    (input.recentTurnsByBackend?.[winner] ?? 0) === 0 &&
-    available.some((rate) => (input.recentTurnsByBackend?.[rate.backend] ?? 0) > 0);
   const rationale =
     `${preferCapability ? "Complex" : "Light"} task (complexity ${complexity.toFixed(2)})` +
     ` → ${driver} backend: ${backendLabel(winner)}` +

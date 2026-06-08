@@ -86,6 +86,30 @@ describe("recommendBackend", () => {
     expect(tie.rationale).toMatch(/less-used subscription/);
   });
 
+  it("never lets a negative recent-usage count become a scoring advantage", () => {
+    // Two equal-tier backends; a NEGATIVE count for codex must not boost it past
+    // copilot (which would happen if the penalty weren't clamped at 0). With both
+    // clamped to 0 the tiebreak is the stable backend-id order (codex < copilot).
+    const tieSnapshot = {
+      ...BUNDLED_SNAPSHOT,
+      rates: [
+        { backend: "codex.local" as AgentBackend, modelLabel: "a", costTier: 1, capabilityTier: 2 },
+        { backend: "copilot.local" as AgentBackend, modelLabel: "b", costTier: 1, capabilityTier: 2 }
+      ]
+    };
+    const rec = recommendBackend(
+      {
+        task: "rename a variable",
+        availableBackends: ["codex.local", "copilot.local"],
+        recentTurnsByBackend: { "codex.local": -100 }
+      },
+      tieSnapshot
+    );
+    expect(rec.backend).toBe("codex.local");
+    // No usage actually influenced the order, so no nudge note.
+    expect(rec.rationale).not.toMatch(/less-used subscription/);
+  });
+
   it("falls back to the default when no snapshot rate matches", () => {
     const emptyRates = { ...BUNDLED_SNAPSHOT, rates: [] };
     const rec = recommendBackend({ task: "anything", availableBackends: ALL }, emptyRates);
