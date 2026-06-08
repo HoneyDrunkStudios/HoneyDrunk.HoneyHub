@@ -53,32 +53,20 @@ pub struct ChildRun {
     /// `poll_exit` returns `None` instead of re-reporting it. (`ChildRun` does not
     /// itself emit status events — the adapter does.)
     finished: bool,
-    /// Set once the direct child has been reaped — by `poll_exit` observing a natural
-    /// exit, or by `close_and_kill` killing it. Used to keep the process-tree kill
-    /// **recycle-safe**: signalling the group by pid (`killpg`) is only safe while the
-    /// child is still alive; after the pid is reaped the OS may recycle it, so the
-    /// kill is skipped once reaped.
-    reaped: bool,
+    /// Set once the process tree has been signalled, so it is signalled exactly once
+    /// (no double kill) across `close_and_kill` + `Drop`.
+    killed: bool,
 }
 
 impl Drop for ChildRun {
     fn drop(&mut self) {
-        // Closing stdin signals EOF on the child's input.
+        // Closing stdin signals EOF on the child's input, then kill the whole process
+        // tree once and join the reader.
         self.stdin.take();
-        // Kill the process tree only while the child is still alive: `killpg` targets
-        // a group by pid, and once the child is reaped that pid (group) may have been
-        // recycled, so signalling it could hit an unrelated process. If the child
-        // already exited on its own, its stdout is closing anyway.
-        if !self.reaped {
-            kill_process_tree(&mut self.child);
-            self.reaped = true;
+        self.kill_tree_once();
+        if let Some(reader) = self.reader.take() {
+            let _ = reader.join();
         }
-        // **Detach** the reader rather than join it. A join could block forever if a
-        // descendant that inherited stdout kept the pipe open after the direct child
-        // exited, and Drop must never block. The reader self-terminates when stdout
-        // reaches EOF (the child's exit / our kill triggers it) or when its next send
-        // fails because this `Receiver` (`self.lines`) is being dropped now.
-        self.reader.take();
     }
 }
 
@@ -165,8 +153,26 @@ impl ChildRun {
             reader: Some(reader),
             backend_session_id,
             finished: false,
-            reaped: false,
+            killed: false,
         })
+    }
+
+    /// Kill the whole process tree exactly once. This both **cleans up any descendant**
+    /// that outlived the direct CLI and forces stdout to EOF so the reader thread ends
+    /// (keeping the join in `Drop` bounded).
+    ///
+    /// Tradeoff (HoneyHub#26): the unix path signals the group by pid (`killpg`), which
+    /// is done even after the direct child is reaped so a lingering descendant is not
+    /// leaked. That leaves a *small* recycle window — a group signal only hits a
+    /// process that became a group *leader* with the recycled pid, far less likely than
+    /// a bare `kill(pid)` — accepted for v1 (the official CLIs we drive do not orphan
+    /// stdout-holding descendants). The recycle-immune fix (Linux `pidfd`, Windows job
+    /// objects) is tracked in HoneyHub#26.
+    fn kill_tree_once(&mut self) {
+        if !self.killed {
+            kill_process_tree(&mut self.child);
+            self.killed = true;
+        }
     }
 
     /// The OS process id, captured at spawn so it survives `try_wait`/reaping.
@@ -247,25 +253,20 @@ impl ChildRun {
         match self.child.try_wait() {
             Ok(Some(status)) => {
                 self.finished = true;
-                // The direct child has been reaped, so `Drop`/`close_and_kill` must not
-                // `killpg` its (now possibly recycled) pid. The reader still reaches EOF
-                // because the exiting child closes its stdout.
-                self.reaped = true;
+                // Observing the direct child's exit does not kill the tree — a
+                // descendant may still be alive holding stdout, so the one-time
+                // `kill_tree_once` in `Drop` still cleans it up and forces EOF.
                 Some(status.success())
             }
             _ => None,
         }
     }
 
-    /// Close stdin and kill the whole process tree. Used by `stop`, while the child is
-    /// still alive — so the `killpg` is recycle-safe. Marks the child reaped so the
-    /// later `Drop` does not signal the pid again.
+    /// Close stdin and kill the whole process tree (once). Idempotent with the later
+    /// `Drop`, which will not re-signal. Used by `stop`.
     pub fn close_and_kill(&mut self) {
         self.stdin.take();
-        if !self.reaped {
-            kill_process_tree(&mut self.child);
-            self.reaped = true;
-        }
+        self.kill_tree_once();
     }
 }
 
