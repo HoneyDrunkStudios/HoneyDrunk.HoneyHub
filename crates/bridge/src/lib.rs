@@ -14,7 +14,9 @@ pub mod wire;
 pub use adapter::{
     AgentBackend, AgentBackendAdapter, BridgeError, CapabilityFlags, RunHandle, StartRunRequest,
 };
-pub use adapters::{default_event_clock, ClaudeLocalAdapter, CodexLocalAdapter, EventClock};
+pub use adapters::{
+    default_event_clock, ClaudeLocalAdapter, CodexLocalAdapter, CopilotLocalAdapter, EventClock,
+};
 pub use artifact::{ArtifactKind, DispatchArtifact};
 pub use coaching::{coach, CoachingSnapshot};
 pub use core::{BridgeRuntime, ManagedRun, ReplyOutcome};

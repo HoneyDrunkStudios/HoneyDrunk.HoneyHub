@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.17.0] - 2026-06-08
+
+- Added the `copilot.local` adapter (`adapters::copilot_local::CopilotLocalAdapter`): drives the official GitHub Copilot CLI under the user's own local `gh` token (ADR-0090 §3b), as a thin strategy over the shared `child_run` driver — completing the three v1 backends.
+- Token-level streaming: `assistant.message_delta` deltas → partial messages; `assistant.message_completed` carries the final assembled message; `turn.completed` carries the usage signal. Resume-based reply (the core's follow-up-run path). CLI shape isolated to `exec_command`. Tail drain + child drop off the runs lock; a session id seen only in the drained tail is written back to the retired slot.
+- Usage fidelity `estimated` (ADR-0092 D2): premium-requests + duration are the exact billing units; token figures are estimated from a coarse text-size proxy (ceiling division so any non-empty text is ≥ 1 token; a **final-text-only** response — no streamed deltas — still estimates non-zero output tokens). USD absent (Copilot bills premium requests, not a token cost).
+- Usage is accounted **exactly once per turn**: a second terminal line in the same drain (`usage_already_emitted`) cannot double-count the premium request; `assistant.message_completed` carries no usage. Completion events adopt a session id only from explicit `session_id`/`thread_id` (never a generic `id`) and never overwrite the id captured at init.
+
 ## [0.16.0] - 2026-06-08
 
 - Added the `codex.local` adapter (`adapters::codex_local::CodexLocalAdapter`): drives the official Codex CLI's non-interactive `codex exec --json` mode under the user's own local session (ADR-0090 §3a), as a thin strategy over the shared `child_run` driver. Resume-based (`interactive_reply` false → the core's follow-up-run path); parses `thread.started`/`session.created`, `item.completed` (agent-message items only), and `turn.completed`.

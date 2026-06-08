@@ -11,7 +11,9 @@
 pub mod child_run;
 pub mod claude_local;
 pub mod codex_local;
+pub mod copilot_local;
 
 pub use child_run::{default_event_clock, ChildRun, EventClock, RunSlot};
 pub use claude_local::ClaudeLocalAdapter;
 pub use codex_local::CodexLocalAdapter;
+pub use copilot_local::CopilotLocalAdapter;
