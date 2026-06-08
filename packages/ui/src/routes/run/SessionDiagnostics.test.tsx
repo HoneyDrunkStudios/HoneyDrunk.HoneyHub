@@ -36,7 +36,9 @@ describe("SessionDiagnostics", () => {
     render(<SessionDiagnostics backend="claude.local" messages={messages} usage={usage} />);
     const panel = screen.getByLabelText("Session diagnostics");
     expect(panel.textContent).toContain("claude.local · claude");
-    expect(panel.textContent).toContain("1,540 tok");
+    // Assert against the same locale-aware formatter the component uses rather
+    // than a hard-coded "1,540" — the thousands separator varies by CI locale.
+    expect(panel.textContent).toContain(`${(1540).toLocaleString()} tok`);
     expect(panel.textContent).toContain("$0.0182");
     expect(within(panel).getByText("healthy")).toBeTruthy();
   });
