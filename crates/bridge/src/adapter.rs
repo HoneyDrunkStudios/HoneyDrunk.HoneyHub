@@ -19,7 +19,16 @@ pub struct CapabilityFlags {
     pub resume_session: bool,
     pub stop_signal: bool,
     pub structured_events: bool,
+    /// The backend reports an **exact** cost figure (tokens + USD), taken directly.
     pub usage_exact: bool,
+    /// The backend reports **exact token counts** but no USD, so the dollar value is
+    /// **derived** from the operator-configurable rate table (ADR-0092 D2 / ADR-0052
+    /// D2). The three usage flags mirror the spike's three usage shapes; at most one
+    /// is set. The signal's own `fidelity` tag remains the load-bearing honesty
+    /// mechanism — these flags are the coarse capability hint in the handshake.
+    pub usage_derived: bool,
+    /// The backend exposes neither exact USD nor exact tokens (e.g. premium-request
+    /// counts only), so token/USD figures are **estimated** from proxies.
     pub usage_estimated: bool,
 }
 
@@ -32,7 +41,40 @@ impl CapabilityFlags {
             stop_signal: true,
             structured_events: true,
             usage_exact: true,
+            usage_derived: false,
             usage_estimated: false,
+        }
+    }
+
+    /// `codex.local` profile (ADR-0090 spike): message-level streaming, **resume-based**
+    /// reply (the core uses the follow-up-run path, not same-process), stop + resume,
+    /// structured events, and **exact tokens with a derived USD** (rate-table cost).
+    pub fn codex_local() -> Self {
+        Self {
+            streaming_output: true,
+            interactive_reply: false,
+            resume_session: true,
+            stop_signal: true,
+            structured_events: true,
+            usage_exact: false,
+            usage_derived: true,
+            usage_estimated: false,
+        }
+    }
+
+    /// `copilot.local` profile (ADR-0090 spike): token-level streaming, resume-based
+    /// reply, stop + resume, and **premium-requests + duration only** — so token/USD
+    /// figures are estimated from proxies (the premium-request count is the real unit).
+    pub fn copilot_local() -> Self {
+        Self {
+            streaming_output: true,
+            interactive_reply: false,
+            resume_session: true,
+            stop_signal: true,
+            structured_events: true,
+            usage_exact: false,
+            usage_derived: false,
+            usage_estimated: true,
         }
     }
 
@@ -44,6 +86,7 @@ impl CapabilityFlags {
             stop_signal: false,
             structured_events: false,
             usage_exact: false,
+            usage_derived: false,
             usage_estimated: true,
         }
     }

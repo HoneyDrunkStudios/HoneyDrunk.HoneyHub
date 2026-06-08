@@ -13,7 +13,7 @@ pub mod wire;
 pub use adapter::{
     AgentBackend, AgentBackendAdapter, BridgeError, CapabilityFlags, RunHandle, StartRunRequest,
 };
-pub use adapters::{default_event_clock, ClaudeLocalAdapter, EventClock};
+pub use adapters::{default_event_clock, ClaudeLocalAdapter, CodexLocalAdapter, EventClock};
 pub use artifact::{ArtifactKind, DispatchArtifact};
 pub use core::{BridgeRuntime, ManagedRun, ReplyOutcome};
 pub use notify::{

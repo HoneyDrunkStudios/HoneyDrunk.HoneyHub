@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.12.0] - 2026-06-08
+
+- Added the `codex.local` adapter (`adapters::codex_local::CodexLocalAdapter`): drives the official Codex CLI's non-interactive `codex exec --json` mode under the user's own local session (ADR-0090 §3a). Built as a thin strategy over the shared `child_run` driver.
+- Resume-based, not same-process: `interactive_reply` is `false`, so the core routes a reply through the follow-up-run path; the adapter resumes the prior run's captured vendor session (`codex exec resume <session>`). The single CLI-shape-dependent surface is isolated to `exec_command` for live-CLI dogfood validation (packet 09 §3a re-scope note).
+- Parses `thread.started`/`session.created` (capture vendor session id), `item.completed` (surface `agent_message` items, ignore reasoning/tool items), and `turn.completed` (exact token usage).
+- Usage fidelity `derived` (ADR-0092 D2): exact token counts taken directly, USD computed via an **injected** `UsdRateLookup` (the operator-configurable rate table, ADR-0052 D2). With no rate wired, tokens stay exact and USD is absent — never fabricated.
+- Added a third usage capability flag `usage_derived` to `CapabilityFlags` (honestly representing the spike's three usage shapes) plus `CapabilityFlags::codex_local()` / `copilot_local()` presets.
+
 ## [0.11.0] - 2026-06-08
 
 - Extracted the shared child-process driver into `adapters::child_run` (`ChildRun`): spawn-with-piped-stdio, stderr drain, stdout reader thread, process-tree kill, reap, and one-time exit detection now live in one place. `claude.local` is now a thin strategy over it (command + capability flags + `stream-json` parsing + same-process reply framing), so the upcoming `codex.local` / `copilot.local` adapters reuse the mechanics rather than copying them. `EventClock` / `default_event_clock` moved to `child_run` and are re-exported unchanged. The full `fake_claude` lifecycle integration test still passes.

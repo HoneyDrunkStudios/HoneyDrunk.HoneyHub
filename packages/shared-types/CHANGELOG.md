@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.11.0] - 2026-06-08
+
+- Added `usage_derived` to `CapabilityFlags` so the three usage shapes from the ADR-0090 spike (exact / derived / estimated) are each representable; at most one usage flag is set per backend (ADR-0092 D2).
+- Added `defaultCodexCapabilities` (resume-based, derived USD) and `defaultCopilotCapabilities` (resume-based, estimated usage) presets mirroring the Rust adapter capability presets.
+
 ## [0.10.0] - 2026-06-08
 
 - Version alignment for the session-diagnostics release (no type changes).
