@@ -1,5 +1,9 @@
 # Changelog
 
+## [0.14.0] - 2026-06-08
+
+- Version alignment for the rules-based coaching module (no host code change).
+
 ## [0.10.0] - 2026-06-08
 
 - Version alignment for the session-diagnostics release (no host code change).

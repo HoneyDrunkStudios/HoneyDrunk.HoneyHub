@@ -1,5 +1,9 @@
 # Changelog
 
+## [0.14.0] - 2026-06-08
+
+- Added `coaching` (ADR-0092 D4 / packet 09 §3e): a rules-based session coach that emits advisory `PolicyHint`s from a pure `coach(&CoachingSnapshot)` over session/usage state — `stale_session` (large token context / many messages / long runtime → start fresh), `high_cost_session` (grounded exact/derived spend over a threshold), and `estimate_only_spend` (premium-request backends; figures are approximate). Advisory only — never emits a `Block` severity (ADR-0092 D2/D4 warning-only posture); the grounded-spend rule excludes estimated USD so a guess can't drive a warning. No learned model (the per-user learned coach stays a gated v2 decision). The routing-dependent rules (`routing_hint`/`mode_fit`/`subscription_optimization`) are deferred to land with the routing engine (§3d).
+
 ## [0.10.0] - 2026-06-08
 
 - Version alignment for the session-diagnostics release (no bridge code change).
