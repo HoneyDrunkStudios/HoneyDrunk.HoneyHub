@@ -214,24 +214,24 @@ export class MockWireClient implements WireClient {
     // The real host scans the filesystem; the mock returns a small *scripted demo*
     // catalog (one Claude subagent, one Copilot agent) so the Agents surface is
     // exercised offline.
-    const root = workspaceRoot ?? "/work/demo";
+    const label = (workspaceRoot ?? "/work/demo").split(/[\\/]/).filter(Boolean).pop() ?? "demo";
     const agents: AgentDefinition[] = [
       {
-        id: `${root}::.claude/agents/code-reviewer.md`,
+        id: `demo:.claude/agents/code-reviewer.md`,
         name: "Code Reviewer",
         description: "Reviews a diff against the Grid invariants before a PR.",
         backend: "claude.local",
         model: "claude-opus",
         sourcePath: ".claude/agents/code-reviewer.md",
-        workspaceRoot: root
+        workspaceLabel: label
       },
       {
-        id: `${root}::.github/release-agent.md`,
+        id: `demo:.github/release-agent.md`,
         name: "release agent",
         description: "Drafts release notes from merged PRs.",
         backend: "copilot.local",
         sourcePath: ".github/release-agent.md",
-        workspaceRoot: root
+        workspaceLabel: label
       }
     ];
     const event: BridgeEvent = {

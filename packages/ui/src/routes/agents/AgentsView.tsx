@@ -99,8 +99,9 @@ export function AgentsView({ client, active }: AgentsViewProps) {
                   {agent.description !== "" && (
                     <p className="agent-description">{agent.description}</p>
                   )}
-                  <p className="agent-source" title={agent.workspaceRoot}>
-                    {agent.sourcePath}
+                  <p className="agent-source">
+                    <span className="agent-workspace">{agent.workspaceLabel}</span>
+                    <span className="agent-path">{agent.sourcePath}</span>
                   </p>
                 </li>
               ))}

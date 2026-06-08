@@ -1785,7 +1785,7 @@ mod tests {
         // Scanning every allowlisted root finds it too.
         assert_eq!(runtime.discover_agents(None).expect("scans all").len(), 1);
 
-        // A root outside the allowlist is refused before any filesystem read.
+        // A root outside the allowlist is refused before any agent folder is scanned.
         let error = runtime
             .discover_agents(Some("/etc"))
             .expect_err("non-allowlisted root is refused");

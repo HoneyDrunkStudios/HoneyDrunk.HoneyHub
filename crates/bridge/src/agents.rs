@@ -20,21 +20,26 @@ use std::fs;
 use std::path::Path;
 
 /// A discovered, runnable agent definition. Carries metadata only — the prompt body
-/// stays on disk (it is sensitive by default, ADR-0090 D11). `source_path` is
-/// **relative** to `workspace_root` so no absolute local path leaks.
+/// stays on disk (it is sensitive by default, ADR-0090 D11). **No absolute local
+/// path crosses the wire:** `source_path` is workspace-relative, `workspace_label`
+/// is the root's final component (for disambiguation), and `id` hashes the root
+/// rather than embedding it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentDefinition {
-    /// Stable across discoveries: workspace root + relative source path.
+    /// Stable across discoveries: a hash of the workspace root + the relative source
+    /// path. Opaque — it does not reveal the absolute path.
     pub id: String,
     pub name: String,
     pub description: String,
     pub backend: AgentBackend,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
-    /// Path relative to `workspace_root` (e.g. `.claude/agents/reviewer.md`).
+    /// Path relative to the workspace root (e.g. `.claude/agents/reviewer.md`).
     pub source_path: String,
-    pub workspace_root: String,
+    /// The workspace root's final path component (e.g. `HoneyDrunk.HoneyHub`), to tell
+    /// apart same-named agents from different workspaces — **not** the absolute path.
+    pub workspace_label: String,
 }
 
 /// How a source decides which files in its folder are agent definitions.
@@ -88,6 +93,13 @@ pub fn discover_agents_in_root(workspace_root: &str) -> Vec<AgentDefinition> {
             if !path.is_file() {
                 continue;
             }
+            // Stay inside the allowlisted workspace: a symlinked agent file could
+            // resolve to a target *outside* the root, so require the canonical path to
+            // remain within the canonical root. An in-workspace symlink still resolves
+            // within the root and is fine; only an escaping one is dropped.
+            if !is_within_root(&path, workspace_root) {
+                continue;
+            }
             let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
                 continue;
             };
@@ -109,6 +121,20 @@ pub fn discover_agents_in_root(workspace_root: &str) -> Vec<AgentDefinition> {
         (&left.backend, &left.name, &left.id).cmp(&(&right.backend, &right.name, &right.id))
     });
     found
+}
+
+/// True when `path` resolves (canonically) to a location inside `workspace_root`.
+/// Resolving both sides defeats a symlink that would otherwise surface a file from
+/// outside the allowlisted workspace. A path that cannot be canonicalized is treated
+/// as outside (excluded) rather than risk surfacing it.
+fn is_within_root(path: &Path, workspace_root: &str) -> bool {
+    match (
+        path.canonicalize(),
+        Path::new(workspace_root).canonicalize(),
+    ) {
+        (Ok(real_path), Ok(real_root)) => real_path.starts_with(real_root),
+        _ => false,
+    }
 }
 
 fn build_definition(
@@ -135,14 +161,39 @@ fn build_definition(
     let description = description.unwrap_or_default();
 
     Some(AgentDefinition {
-        id: format!("{workspace_root}::{relative}"),
+        // Hash the root into the id so it stays unique per (workspace, file) without
+        // embedding the absolute path.
+        id: format!("{}:{}", workspace_hash(workspace_root), relative),
         name,
         description,
         backend: source.backend.clone(),
         model,
         source_path: relative,
-        workspace_root: workspace_root.to_string(),
+        workspace_label: workspace_label(workspace_root),
     })
+}
+
+/// The workspace root's final path component, for disambiguating same-named agents
+/// across workspaces without exposing the absolute path. Falls back to the whole
+/// root only when it has no final component (e.g. a bare drive/`/`).
+fn workspace_label(workspace_root: &str) -> String {
+    Path::new(workspace_root)
+        .file_name()
+        .and_then(|component| component.to_str())
+        .unwrap_or(workspace_root)
+        .to_string()
+}
+
+/// A stable, opaque id for a workspace root (FNV-1a 64-bit, dependency-free and
+/// deterministic) so the agent id can be unique per workspace without revealing the
+/// absolute path.
+fn workspace_hash(workspace_root: &str) -> String {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in workspace_root.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    format!("{hash:016x}")
 }
 
 /// A filename stem turned into a human label: drop the extension, swap `-`/`_` for
@@ -233,8 +284,15 @@ mod tests {
         assert_eq!(reviewer.description, "Reviews diffs against the Grid");
         assert_eq!(reviewer.model.as_deref(), Some("claude-opus"));
         assert_eq!(reviewer.source_path, ".claude/agents/code-reviewer.md");
-        // No absolute path leaks into the source path.
-        assert!(!reviewer.source_path.contains(root.to_str().unwrap()));
+        // No absolute path leaks anywhere on the wire shape: not the source path, not
+        // the id (it hashes the root), and the label is just the root's basename.
+        let root_str = root.to_str().unwrap();
+        assert!(!reviewer.source_path.contains(root_str));
+        assert!(!reviewer.id.contains(root_str));
+        assert_eq!(
+            reviewer.workspace_label,
+            root.file_name().unwrap().to_str().unwrap()
+        );
 
         let scratch = agents.iter().find(|a| a.name == "scratch helper").unwrap();
         assert_eq!(scratch.description, "");

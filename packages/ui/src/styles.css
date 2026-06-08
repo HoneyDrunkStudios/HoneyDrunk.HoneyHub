@@ -826,10 +826,20 @@ h2 {
 }
 
 .agent-source {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
   margin: 0;
   color: #8b97a3;
   font-size: 0.76rem;
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.agent-workspace {
+  color: #b8c3cf;
+  background: #1a2530;
+  padding: 1px 6px;
+  border-radius: 4px;
 }
 
 @media (max-width: 720px) {

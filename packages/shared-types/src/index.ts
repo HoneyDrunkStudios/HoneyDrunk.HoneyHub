@@ -167,7 +167,9 @@ export interface UsageSummary {
 
 /**
  * A discovered, runnable agent definition (packet 09 §3f-bis). Metadata only — the
- * prompt body stays on disk. `sourcePath` is relative to `workspaceRoot`.
+ * prompt body stays on disk. No absolute local path crosses the wire: `sourcePath`
+ * is workspace-relative, `workspaceLabel` is the root's final component (for
+ * disambiguation), and `id` hashes the root rather than embedding it.
  */
 export interface AgentDefinition {
   id: string;
@@ -176,7 +178,7 @@ export interface AgentDefinition {
   backend: AgentBackend;
   model?: string;
   sourcePath: string;
-  workspaceRoot: string;
+  workspaceLabel: string;
 }
 
 export type PolicyHintSeverity = "info" | "warning" | "block";

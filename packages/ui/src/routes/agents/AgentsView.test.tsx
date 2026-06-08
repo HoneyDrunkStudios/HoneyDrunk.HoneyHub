@@ -13,9 +13,13 @@ describe("AgentsView", () => {
     expect(screen.getByText("release agent")).toBeTruthy();
     expect(screen.getByText("Claude Code")).toBeTruthy();
     expect(screen.getByText("Copilot")).toBeTruthy();
-    // Metadata is surfaced: model + relative source path (no absolute prefix).
+    // Metadata is surfaced: model + relative source path (no absolute prefix) +
+    // the workspace label (basename, not an absolute path).
     expect(screen.getByText("claude-opus")).toBeTruthy();
     expect(screen.getByText(".claude/agents/code-reviewer.md")).toBeTruthy();
+    expect(screen.getAllByText("demo").length).toBeGreaterThan(0);
+    // No absolute filesystem path is rendered anywhere.
+    expect(document.body.textContent).not.toContain("/work/demo");
     // The local-only/read-only posture is stated.
     expect(screen.getByText(/Read-only/i)).toBeTruthy();
   });

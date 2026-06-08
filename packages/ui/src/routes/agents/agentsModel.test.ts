@@ -9,7 +9,7 @@ function agent(id: string, name: string, backend: AgentBackend): AgentDefinition
     description: "",
     backend,
     sourcePath: `.x/${id}.md`,
-    workspaceRoot: "/work"
+    workspaceLabel: "work"
   };
 }
 
