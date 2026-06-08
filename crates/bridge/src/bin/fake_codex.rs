@@ -1,7 +1,7 @@
 //! Test fixture: a stand-in for the Codex CLI's `exec --json` mode, used by
 //! `tests/codex_local.rs`. Unlike `fake_claude` (a live duplex process), Codex is
 //! **non-interactive**: each turn is a `codex exec` process that emits a JSONL
-//! stream and exits. A follow-up turn is a separate `codex exec resume <session>`
+//! stream and exits. A follow-up turn is a separate `codex exec --json resume <session>`
 //! process. This fixture models exactly that — emit a thread id, one agent message
 //! reflecting the run, the turn's exact token usage, then exit.
 //!
@@ -35,7 +35,7 @@ fn json_escape(input: &str) -> String {
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    // `codex exec resume <session> --json [task]`
+    // `codex exec --json resume <session> [task]` (--json before the resume subcommand)
     let resumed = args.iter().any(|arg| arg == "resume");
     // The task is the last non-flag arg after `exec`/`resume`/`--json`, if any.
     let task = args
