@@ -1,3 +1,4 @@
+#![cfg(feature = "test-fixtures")]
 //! Integration test for the `codex.local` adapter against a fake `codex` binary
 //! (`src/bin/fake_codex.rs`). Codex is **non-interactive** — each turn is a
 //! `codex exec` process that streams JSONL and exits — so this drives the real

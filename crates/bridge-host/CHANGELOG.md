@@ -1,5 +1,9 @@
 # Changelog
 
+## [0.17.0] - 2026-06-08
+
+- Version alignment for the `copilot.local` adapter (no host code change).
+
 ## [0.16.0] - 2026-06-08
 
 - Version alignment for the `codex.local` adapter (no host code change).
