@@ -5,12 +5,16 @@ import type {
   UsageSignal,
   UsageSummary
 } from "@honeydrunk/honeyhub-types";
+import { backendLabel } from "../../backends";
 import { formatUsd } from "../../usageFormat";
 
 // Pure helpers for the "your spend" view (ADR-0092 D2 cost view). The host
 // computes the real summary; these only derive display strings and the offline
 // mock's summary, so the formatting honesty (estimated never shown as a measured
 // dollar) lives in one tested place.
+
+// Re-export so existing importers (the view, the tests) keep their import path.
+export { backendLabel };
 
 // Explicit rank maps so the mock/offline rollup order matches Rust's enum-`Ord`
 // ordering (declaration order), not JS lexicographic order — "exact" < "derived" <
@@ -27,16 +31,6 @@ const FIDELITY_ORDER: Record<UsageFidelity, number> = {
   derived: 1,
   estimated: 2
 };
-
-const BACKEND_LABELS: Record<AgentBackend, string> = {
-  "claude.local": "Claude Code",
-  "codex.local": "Codex",
-  "copilot.local": "Copilot"
-};
-
-export function backendLabel(backend: AgentBackend): string {
-  return BACKEND_LABELS[backend] ?? backend;
-}
 
 const FIDELITY_NOTES: Record<UsageFidelity, string> = {
   exact: "measured",

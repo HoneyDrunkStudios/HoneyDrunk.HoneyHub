@@ -34,4 +34,12 @@ describe("App", () => {
 
     expect(await screen.findByRole("heading", { name: "Coaching" })).toBeTruthy();
   });
+
+  it("switches to the agents view", async () => {
+    render(<App />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Agents" }));
+
+    expect(await screen.findByRole("heading", { name: "Agents" })).toBeTruthy();
+  });
 });

@@ -727,6 +727,111 @@ h2 {
   font-size: 0.9rem;
 }
 
+.agents {
+  display: grid;
+  gap: 14px;
+  padding: 16px 18px;
+  border: 1px solid #2b3541;
+  border-radius: 8px;
+  background: #101820;
+}
+
+.agents-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.agents-header h2 {
+  margin: 0;
+  font-size: 1.05rem;
+}
+
+.agents-scope {
+  margin: 0;
+  color: #b8c3cf;
+  font-size: 0.8rem;
+}
+
+.agents-scope code {
+  color: #d4dce4;
+  background: #0c141b;
+  padding: 1px 5px;
+  border-radius: 4px;
+}
+
+.agents-empty {
+  margin: 8px 0;
+  color: #b8c3cf;
+}
+
+.agents-error {
+  margin: 0;
+  color: #f8857a;
+}
+
+.agents-group {
+  display: grid;
+  gap: 8px;
+}
+
+.agents-group-label {
+  margin: 0;
+  color: #b8c3cf;
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+}
+
+.agents-list {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.agent-card {
+  display: grid;
+  gap: 4px;
+  padding: 12px 14px;
+  border: 1px solid #2b3541;
+  border-radius: 6px;
+  background: #0c141b;
+}
+
+.agent-card-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.agent-name {
+  font-weight: 600;
+  font-size: 0.95rem;
+}
+
+.agent-model {
+  color: #78d5d7;
+  font-size: 0.74rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.agent-description {
+  margin: 0;
+  color: #d4dce4;
+  font-size: 0.88rem;
+}
+
+.agent-source {
+  margin: 0;
+  color: #8b97a3;
+  font-size: 0.76rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
 @media (max-width: 720px) {
   .toolbar {
     align-items: flex-start;

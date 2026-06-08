@@ -1,5 +1,9 @@
 # Changelog
 
+## [0.14.0] - 2026-06-08
+
+- Added the `AgentDefinition` type and the `discover_agents` `ClientCommand` (with an optional `workspaceRoot`) + the `agent_catalog` `BridgeEventPayload`, mirroring the bridge's agent-discovery surface.
+
 ## [0.13.0] - 2026-06-08
 
 - Added the `coaching_hints` `ClientCommand` (a fieldless query) and the `coaching_hints` `BridgeEventPayload` (a device-scoped event carrying `PolicyHint[]`), mirroring the bridge's cross-session coaching surface.

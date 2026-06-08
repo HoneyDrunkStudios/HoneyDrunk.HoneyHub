@@ -1,5 +1,6 @@
 pub mod adapter;
 pub mod adapters;
+pub mod agents;
 pub mod artifact;
 pub mod clock;
 pub mod coaching;
@@ -17,6 +18,7 @@ pub use adapter::{
 pub use adapters::{
     default_event_clock, ClaudeLocalAdapter, CodexLocalAdapter, CopilotLocalAdapter, EventClock,
 };
+pub use agents::{discover_agents_in_root, AgentDefinition};
 pub use artifact::{ArtifactKind, DispatchArtifact};
 pub use coaching::{coach, CoachingSnapshot};
 pub use core::{BridgeRuntime, ManagedRun, ReplyOutcome};

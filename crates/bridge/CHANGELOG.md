@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.20.0] - 2026-06-08
+
+- Added local **agent-definition discovery** (`agents` module / packet 09 §3f-bis): `discover_agents_in_root` reads the user's own agent definitions out of a workspace root and returns `AgentDefinition`s (metadata only — name/description/model/source, never the prompt body). Two operator-decided sources, table-driven: `.claude/agents/*.md` (every markdown file → `claude.local`) and `.github/` files whose name contains "agent" (→ `copilot.local`). Codex has no folder-of-agents convention and is not scanned. Best-effort (a missing folder/unreadable file is skipped); frontmatter parsing is a tiny dependency-free `key: value` reader; results are deterministically ordered; a large file is listed by name without parsing.
+- `BridgeRuntime::discover_agents(workspace_root)` gates discovery on the **workspace allowlist** — `Some(root)` must be allowlisted (refused with `workspace_not_allowed` before any filesystem read), `None` scans every allowlisted root. `source_path` is workspace-relative so no absolute local path leaks (ADR-0090 D11).
+- Wire (`honeyhub.bridge.v1`): a `ClientCommand::DiscoverAgents { workspace_root? }` query and a device-scoped `BridgeEventPayload::AgentCatalog` server event (`BridgeEvent::agent_catalog`). The host answers the query and acks; an `AgentCatalog` payload seen in an adapter's run stream is rejected (`event_unexpected_agent_catalog`).
+
 ## [0.19.0] - 2026-06-08
 
 - Wired the rules-based session coach (`coaching::coach`, added in 0.14.0) into a device-wide surface (ADR-0092 D4 / packet 09 §3e): `BridgeRuntime::coaching_hints(now)` runs the coach over **every** session the runtime holds and returns all advisory `PolicyHint`s. Each session's snapshot is built from its runs' transcripts (settled, non-partial message count) and recorded usage; `elapsed_minutes` is `None` (the crate stays clock-free and idle wall-time is a weak staleness signal — the token/message thresholds carry the `stale_session` rule). Advisory only — never a `Block` severity.

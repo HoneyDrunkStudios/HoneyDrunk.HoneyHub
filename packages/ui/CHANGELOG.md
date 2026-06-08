@@ -1,5 +1,9 @@
 # Changelog
 
+## [0.13.0] - 2026-06-08
+
+- Added an **Agents** tab: the user's own agent definitions, auto-discovered from `.claude/agents/` (Claude) and `.github/` files named `*agent*` (Copilot) within the allowlisted workspaces, listed grouped by backend with name, description, model, and the workspace-relative source path. Read-only and local; an empty state guides adding one; a generic error never leaks raw host text; queries the host only while active. Added `discoverAgents` to the `WireClient` seam (WebSocket + offline mock). Extracted the shared `backendLabel` helper so the spend/agents surfaces share one backend-naming source.
+
 ## [0.12.0] - 2026-06-08
 
 - Added a **Coaching** tab: the cross-session coaching surface (ADR-0092 D4 / packet 09 §3e). It asks the host for the rules-based advisories (start a fresh session, watch a high-cost session, estimated figures are approximate) across every session on the device and renders them severity-first (warnings before info), each with a short title and the full guidance. States the advisory-only, local posture up front; shows an empty state when sessions look healthy; queries the host only while active. Added `requestCoachingHints` to the `WireClient` seam (WebSocket + offline mock).

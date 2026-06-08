@@ -226,4 +226,12 @@ export class WebSocketWireClient implements WireClient {
   async requestCoachingHints(): Promise<void> {
     await this.dispatch({ kind: "coaching_hints" });
   }
+
+  async discoverAgents(workspaceRoot?: string): Promise<void> {
+    await this.dispatch(
+      workspaceRoot === undefined
+        ? { kind: "discover_agents" }
+        : { kind: "discover_agents", workspaceRoot }
+    );
+  }
 }
