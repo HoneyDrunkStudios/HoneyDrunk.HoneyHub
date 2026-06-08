@@ -1,5 +1,9 @@
 # Changelog
 
+## [0.7.0] - 2026-06-07
+
+- Updated workspace package version alignment for the bridge-host transport release.
+
 ## [0.6.0] - 2026-06-07
 
 - Updated workspace package version alignment for the run-screen release.

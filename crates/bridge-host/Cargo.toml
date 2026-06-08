@@ -1,0 +1,30 @@
+[package]
+name = "honeyhub-bridge-host"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+name = "honeyhub_bridge_host"
+path = "src/lib.rs"
+
+[[bin]]
+name = "honeyhub-bridge-host"
+path = "src/main.rs"
+
+[dependencies]
+honeyhub-bridge = { path = "../bridge" }
+tokio = { version = "1", features = [
+    "rt-multi-thread",
+    "macros",
+    "sync",
+    "time",
+    "net",
+    "io-util",
+    "signal",
+] }
+tokio-tungstenite = "0.24"
+futures-util = "0.3"
+serde_json = "1"
+uuid = { version = "1.10", features = ["v4"] }

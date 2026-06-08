@@ -99,6 +99,38 @@ h2 {
   font-size: 1.15rem;
 }
 
+.bridge-connect {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1 1 360px;
+  justify-content: flex-end;
+}
+
+.bridge-connect input {
+  flex: 1 1 auto;
+  max-width: 420px;
+  padding: 8px 10px;
+  border: 1px solid #38434f;
+  border-radius: 6px;
+  background: #101820;
+  color: #eef2f6;
+}
+
+.bridge-connect button {
+  padding: 8px 14px;
+  border: 1px solid #38434f;
+  border-radius: 6px;
+  background: #18212a;
+  color: #eef2f6;
+  cursor: pointer;
+}
+
+.connect-state {
+  font-size: 0.8rem;
+  color: #b8c3cf;
+}
+
 .view-tabs {
   display: flex;
   gap: 8px;
