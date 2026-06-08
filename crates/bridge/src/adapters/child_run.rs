@@ -49,29 +49,36 @@ pub struct ChildRun {
     /// The backend's own session id, captured from the CLI's events so a later
     /// `resume` can re-attach to the same vendor session.
     pub backend_session_id: Option<String>,
-    /// Set once the process exit has been observed and its terminal status events
-    /// emitted, so a later poll does not emit them again.
+    /// Set once `poll_exit` has observed the direct child's exit, so a later
+    /// `poll_exit` returns `None` instead of re-reporting it. (`ChildRun` does not
+    /// itself emit status events — the adapter does.)
     finished: bool,
-    /// Set once the process tree has been signalled (by `close_and_kill` or `Drop`).
-    /// Guards against a *second* signal — re-killing could hit a recycled pid/group —
-    /// while still guaranteeing the tree is killed exactly once before the reader is
-    /// joined.
-    killed: bool,
+    /// Set once the direct child has been reaped — by `poll_exit` observing a natural
+    /// exit, or by `close_and_kill` killing it. Used to keep the process-tree kill
+    /// **recycle-safe**: signalling the group by pid (`killpg`) is only safe while the
+    /// child is still alive; after the pid is reaped the OS may recycle it, so the
+    /// kill is skipped once reaped.
+    reaped: bool,
 }
 
 impl Drop for ChildRun {
     fn drop(&mut self) {
-        // Closing stdin signals EOF on the child's input. Then kill the process tree
-        // once: this is what makes the reader-thread join below *bounded* — even if
-        // the direct CLI has already exited, a descendant that inherited stdout could
-        // still hold the pipe open and leave the reader blocked on `read` forever;
-        // killing the group forces stdout to EOF so the reader ends. `kill_tree_once`
-        // is idempotent, so a prior `close_and_kill` is not double-signalled.
+        // Closing stdin signals EOF on the child's input.
         self.stdin.take();
-        self.kill_tree_once();
-        if let Some(reader) = self.reader.take() {
-            let _ = reader.join();
+        // Kill the process tree only while the child is still alive: `killpg` targets
+        // a group by pid, and once the child is reaped that pid (group) may have been
+        // recycled, so signalling it could hit an unrelated process. If the child
+        // already exited on its own, its stdout is closing anyway.
+        if !self.reaped {
+            kill_process_tree(&mut self.child);
+            self.reaped = true;
         }
+        // **Detach** the reader rather than join it. A join could block forever if a
+        // descendant that inherited stdout kept the pipe open after the direct child
+        // exited, and Drop must never block. The reader self-terminates when stdout
+        // reaches EOF (the child's exit / our kill triggers it) or when its next send
+        // fails because this `Receiver` (`self.lines`) is being dropped now.
+        self.reader.take();
     }
 }
 
@@ -158,18 +165,8 @@ impl ChildRun {
             reader: Some(reader),
             backend_session_id,
             finished: false,
-            killed: false,
+            reaped: false,
         })
-    }
-
-    /// Kill the process tree exactly once (idempotent). Forces any stdout the child
-    /// or its descendants hold open to close, so the reader thread reaches EOF and a
-    /// later `join` is bounded.
-    fn kill_tree_once(&mut self) {
-        if !self.killed {
-            kill_process_tree(&mut self.child);
-            self.killed = true;
-        }
     }
 
     /// The OS process id, captured at spawn so it survives `try_wait`/reaping.
@@ -218,7 +215,11 @@ impl ChildRun {
     /// sleep) so a child that wrongly keeps stdout open cannot block the caller forever.
     /// Call only after [`poll_exit`](Self::poll_exit) has observed exit.
     pub fn drain_remaining(&mut self, timeout: Duration) -> Vec<String> {
-        let deadline = Instant::now() + timeout;
+        // `checked_add` guards against overflow panic for a pathologically large
+        // timeout on this public API; an un-representable deadline means "don't wait".
+        let Some(deadline) = Instant::now().checked_add(timeout) else {
+            return Vec::new();
+        };
         let mut lines = Vec::new();
         loop {
             let remaining = deadline.saturating_duration_since(Instant::now());
@@ -246,20 +247,25 @@ impl ChildRun {
         match self.child.try_wait() {
             Ok(Some(status)) => {
                 self.finished = true;
-                // Note: observing the *direct* child's exit does not mark the tree as
-                // killed — a descendant could still hold stdout open, so `Drop` still
-                // kills the group once to guarantee the reader reaches EOF.
+                // The direct child has been reaped, so `Drop`/`close_and_kill` must not
+                // `killpg` its (now possibly recycled) pid. The reader still reaches EOF
+                // because the exiting child closes its stdout.
+                self.reaped = true;
                 Some(status.success())
             }
             _ => None,
         }
     }
 
-    /// Close stdin and kill the whole process tree (once). Idempotent — a subsequent
-    /// `Drop` will not re-signal. Used by `stop`.
+    /// Close stdin and kill the whole process tree. Used by `stop`, while the child is
+    /// still alive — so the `killpg` is recycle-safe. Marks the child reaped so the
+    /// later `Drop` does not signal the pid again.
     pub fn close_and_kill(&mut self) {
         self.stdin.take();
-        self.kill_tree_once();
+        if !self.reaped {
+            kill_process_tree(&mut self.child);
+            self.reaped = true;
+        }
     }
 }
 
