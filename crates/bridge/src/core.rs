@@ -570,14 +570,19 @@ where
                 }
             }
             // Anchor a hint to the session's **latest** run, chosen deterministically:
-            // the run with the greatest `(started_at, run_id)` (RFC3339 timestamps sort
-            // chronologically; the id breaks ties). `self.runs` is a `HashMap` whose
-            // order is unspecified, so a "last one wins" pick would attach persisted
-            // hints to different runs between identical calls. The message count is read
-            // from **only** that latest run: `reply()` carries the prior transcript into
-            // each follow-up run, so the latest run already holds the full cumulative
-            // history — summing every run's transcript would double-count the carried
-            // messages and trip `stale_session` too early on resume-based backends.
+            // the run with the greatest `(started_at, run_id)`. This relies on the
+            // system-wide invariant that timestamps are normalized RFC3339 **UTC**
+            // strings (`...Z`, fixed `now_rfc3339` format), which then sort
+            // lexicographically in chronological order — the same invariant
+            // `store::prune` and `replay_events` already depend on. The `run_id` breaks
+            // ties, so the order is total and the pick is stable for a given runtime
+            // state. (`self.runs` is a `HashMap` whose order is unspecified, so a "last
+            // one wins" pick would instead attach persisted hints to different runs
+            // between identical calls.) The message count is read from **only** that
+            // latest run: `reply()` carries the prior transcript into each follow-up
+            // run, so the latest run already holds the full cumulative history — summing
+            // every run's transcript would double-count the carried messages and trip
+            // `stale_session` too early on resume-based backends.
             let candidate = (
                 managed.record.run.started_at.clone(),
                 managed.record.run.id.clone(),
