@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.18.0] - 2026-06-08
+
+- Added the device-wide **usage summary** ("your spend") aggregator (ADR-0092 D2 cost view): `UsageSummary::from_signals(signals, session_count)` rolls raw `UsageSignal`s up per `(backend, fidelity)`, keeping the three fidelities (`exact`/`derived`/`estimated`) in **separate** rollups so a measured cost is never summed with an estimate. The headline `grounded_total_usd` sums **exact + derived USD only** — estimated backends (Copilot bills premium requests, not a token cost) are excluded so a guess can't inflate it — and is `None` (not `0.00`) when no grounded signal carried a cost. Pure over its inputs, so the live runtime and a future persistent store share one summarization path.
+- `BridgeRuntime::usage_summary()` reads each run's recorded usage events back out of its event log and rolls them up via the aggregator — a cross-session, host-lifetime summary with no new persistence wiring.
+- Wire (`honeyhub.bridge.v1`): a fieldless `ClientCommand::UsageSummary` query and a device-scoped `BridgeEventPayload::UsageSummary` server event (`BridgeEvent::usage_summary`, empty session/run ids, sequence 0). The host answers the query by computing `usage_summary()` and emitting the event, then acks. A `UsageSummary` payload seen in an adapter's run stream is rejected (`event_unexpected_usage_summary`) — it is host-synthesized, never streamed.
+- `AgentBackend` and `UsageFidelity` now derive `Hash`/`Ord` for deterministic `(backend, fidelity)` grouping and stable rollup ordering.
+
 ## [0.17.0] - 2026-06-08
 
 - The fake CLI fixtures (`fake_claude`/`fake_codex`/`fake_copilot`) are now gated behind a `test-fixtures` cargo feature (`required-features`), so they are **not** built as product binary targets in a normal/release build (Grid invariant 16); the live-process integration tests are gated to match. CI's test/clippy steps pass `--features test-fixtures`; the product `build` step does not.

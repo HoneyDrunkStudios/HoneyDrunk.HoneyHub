@@ -218,4 +218,8 @@ export class WebSocketWireClient implements WireClient {
   async stop(runId: string): Promise<void> {
     await this.dispatch({ kind: "stop", runId });
   }
+
+  async requestUsageSummary(): Promise<void> {
+    await this.dispatch({ kind: "usage_summary" });
+  }
 }

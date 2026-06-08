@@ -124,6 +124,47 @@ export interface UsageSignal {
   recordedAt: string;
 }
 
+/**
+ * A per-(backend, fidelity) rollup of usage across many turns. Backends with
+ * different fidelity (exact / derived / estimated) stay in separate rollups so the
+ * spend view never sums a measured cost together with an estimate (ADR-0092 D2).
+ */
+export interface UsageRollup {
+  backend: AgentBackend;
+  fidelity: UsageFidelity;
+  /** Number of usage signals (billed turns) folded into this rollup. */
+  turnCount: number;
+  inputTokens: number;
+  outputTokens: number;
+  totalTokens: number;
+  /** Summed USD for signals that carried a cost; absent when none did. */
+  totalUsd?: number;
+  /** Summed premium requests (the real billing unit for estimated backends). */
+  premiumRequests?: number;
+  durationMs: number;
+}
+
+/**
+ * Device-wide "your spend" summary: usage rolled up per (backend, fidelity), plus
+ * a grounded USD total that deliberately excludes estimated spend. Cross-session
+ * and local-only (ADR-0092 D1/D2) — nothing here syncs off-device.
+ */
+export interface UsageSummary {
+  /** Distinct sessions that contributed at least one run. */
+  sessionCount: number;
+  /** Total billed turns across every rollup. */
+  totalTurns: number;
+  rollups: UsageRollup[];
+  /**
+   * Sum of USD across exact + derived rollups only — a real dollar figure.
+   * Estimated backends (premium requests, not a token cost) are excluded so a
+   * guess can never inflate the headline. Absent when no grounded signal had USD.
+   */
+  groundedTotalUsd?: number;
+  /** Total premium requests across estimated backends, surfaced separately. */
+  totalPremiumRequests: number;
+}
+
 export type PolicyHintSeverity = "info" | "warning" | "block";
 
 export interface PolicyHint {
@@ -162,7 +203,8 @@ export type ClientCommand =
   | { kind: "reply"; runId: string; text: string }
   | { kind: "stop"; runId: string }
   | { kind: "resume"; sessionIdOrTranscript: string }
-  | { kind: "reconnect"; request: ReconnectRequest };
+  | { kind: "reconnect"; request: ReconnectRequest }
+  | { kind: "usage_summary" };
 
 export interface ReconnectRequest {
   sessionId: string;
@@ -199,7 +241,8 @@ export type BridgeEventPayload =
   | { kind: "usage"; signal: UsageSignal }
   | { kind: "policy_hint"; hint: PolicyHint }
   | { kind: "status"; status: BridgeStatusEvent }
-  | { kind: "artifact"; artifact: DispatchArtifact };
+  | { kind: "artifact"; artifact: DispatchArtifact }
+  | { kind: "usage_summary"; summary: UsageSummary };
 
 export interface BridgeStatusEvent {
   state: DispatchRunState;

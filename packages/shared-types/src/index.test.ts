@@ -10,6 +10,7 @@ import {
   type PairedDeviceView,
   type PairingGrant,
   type RunHandle,
+  type UsageSummary,
   type WireFrame
 } from "./index.js";
 
@@ -134,4 +135,76 @@ test("run handles may carry adapter process metadata", () => {
   };
 
   assert.equal(handle.processId, 4321);
+});
+
+test("usage summary keeps fidelities separate and grounds only measured spend", () => {
+  const summary: UsageSummary = {
+    sessionCount: 2,
+    totalTurns: 3,
+    rollups: [
+      {
+        backend: "claude.local",
+        fidelity: "exact",
+        turnCount: 2,
+        inputTokens: 100,
+        outputTokens: 60,
+        totalTokens: 160,
+        totalUsd: 0.15,
+        durationMs: 1500
+      },
+      {
+        backend: "copilot.local",
+        fidelity: "estimated",
+        turnCount: 1,
+        inputTokens: 10,
+        outputTokens: 10,
+        totalTokens: 20,
+        premiumRequests: 1,
+        durationMs: 1800
+      }
+    ],
+    // Grounded headline counts the exact rollup only; the estimated rollup carries
+    // premium requests and no USD, so it stays out of the dollar figure.
+    groundedTotalUsd: 0.15,
+    totalPremiumRequests: 1
+  };
+
+  assert.equal(summary.groundedTotalUsd, 0.15);
+  assert.equal(summary.rollups[1]?.totalUsd, undefined);
+  assert.equal(summary.totalPremiumRequests, 1);
+});
+
+test("usage_summary is a fieldless client command and a payload-bearing event", () => {
+  const query: WireFrame = {
+    protocol: wireProtocolVersion,
+    frameId: "frame-q",
+    kind: "client_command",
+    createdAt: "2026-06-07T12:00:00Z",
+    command: { kind: "usage_summary" }
+  };
+  assert.equal(query.command?.kind, "usage_summary");
+
+  const event: WireFrame = {
+    protocol: wireProtocolVersion,
+    frameId: "frame-s",
+    kind: "server_event",
+    createdAt: "2026-06-07T12:00:00Z",
+    event: {
+      id: "e1",
+      sessionId: "",
+      runId: "",
+      sequence: 0,
+      createdAt: "2026-06-07T12:00:00Z",
+      payload: {
+        kind: "usage_summary",
+        summary: {
+          sessionCount: 0,
+          totalTurns: 0,
+          rollups: [],
+          totalPremiumRequests: 0
+        }
+      }
+    }
+  };
+  assert.equal(event.event?.payload.kind, "usage_summary");
 });

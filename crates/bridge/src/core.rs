@@ -4,7 +4,7 @@ use crate::pairing::{BackendAllowlist, WorkspaceAllowlist};
 use crate::process::{ProcessExitStatus, ProcessHandle};
 use crate::session::{
     DispatchControlEvent, DispatchControlEventKind, DispatchMessage, DispatchRun,
-    DispatchRunRecord, DispatchRunState, DispatchSession,
+    DispatchRunRecord, DispatchRunState, DispatchSession, UsageSignal, UsageSummary,
 };
 use crate::wire::{BridgeEvent, BridgeEventPayload, ReconnectRequest};
 use std::collections::HashMap;
@@ -483,6 +483,15 @@ where
                     ));
                 }
             }
+            BridgeEventPayload::UsageSummary { .. } => {
+                // A usage summary is a device-wide, host-synthesized response to a
+                // client query — never an event an adapter streams from a run. Seeing
+                // one here means a backend emitted a frame it must not.
+                return Err(BridgeError::new(
+                    "event_unexpected_usage_summary",
+                    "a backend stream must not emit a device-wide usage summary",
+                ));
+            }
         }
 
         Ok(())
@@ -492,6 +501,25 @@ where
         self.runs
             .get(run_id)
             .ok_or_else(|| BridgeError::new("run_not_found", format!("run {run_id} not found")))
+    }
+
+    /// A device-wide "your spend" summary over every run this runtime holds. Usage
+    /// signals are read back out of each run's event log (where `stream_events`
+    /// already records them), grouped per `(backend, fidelity)`, and rolled up by the
+    /// pure [`UsageSummary::from_signals`] aggregator — so the live runtime and a
+    /// future persistent store share one summarization path (ADR-0092 D2).
+    pub fn usage_summary(&self) -> UsageSummary {
+        let mut signals: Vec<UsageSignal> = Vec::new();
+        let mut sessions: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        for managed in self.runs.values() {
+            sessions.insert(managed.session.id.as_str());
+            for event in &managed.event_log {
+                if let BridgeEventPayload::Usage { signal } = &event.payload {
+                    signals.push(signal.clone());
+                }
+            }
+        }
+        UsageSummary::from_signals(&signals, sessions.len() as u64)
     }
 
     pub fn replay_events(
@@ -1351,5 +1379,68 @@ mod tests {
         assert_eq!(error.code, "terminal_run_reply");
         // No follow-up run was started.
         assert_eq!(runtime.adapter.start_requests.borrow().len(), 1);
+    }
+
+    #[test]
+    fn usage_summary_rolls_up_streamed_usage_across_runs() {
+        // A streamed usage signal is recorded into the run's event log, so the
+        // device-wide summary reads it back out and rolls it up — exact USD here
+        // lands in the grounded headline.
+        let (allowlist_root, workspace_root) = workspace_paths();
+        let usage = UsageSignal {
+            id: "usage-1".to_string(),
+            session_id: "session-1".to_string(),
+            run_id: "run-fixed".to_string(),
+            backend: AgentBackend::ClaudeLocal,
+            fidelity: crate::session::UsageFidelity::Exact,
+            model_label: None,
+            input_tokens: Some(30),
+            output_tokens: Some(20),
+            total_tokens: Some(50),
+            total_usd: Some(0.25),
+            premium_requests: None,
+            duration_ms: Some(1200),
+            confidence: None,
+            recorded_at: "2026-06-07T12:01:00Z".to_string(),
+        };
+        let adapter = FakeAdapter::new(CapabilityFlags::claude_local()).with_stream_events(vec![
+            BridgeEvent::usage(
+                "event-usage",
+                "session-1",
+                "run-fixed",
+                1,
+                "2026-06-07T12:01:00Z",
+                usage,
+            ),
+        ]);
+        let mut runtime = BridgeRuntime::new(
+            adapter,
+            WorkspaceAllowlist::new(vec![allowlist_root]),
+            BackendAllowlist::new(vec![AgentBackend::ClaudeLocal]),
+        );
+
+        // No runs yet → an empty, honest summary (not an error).
+        let empty = runtime.usage_summary();
+        assert!(empty.rollups.is_empty());
+        assert_eq!(empty.session_count, 0);
+        assert_eq!(empty.grounded_total_usd, None);
+
+        let mut start = request(&workspace_root);
+        start.requested_run_id = Some("run-fixed".to_string());
+        let handle = runtime
+            .start(start, "2026-06-07T12:00:00Z")
+            .expect("run starts");
+        runtime
+            .stream_events(&handle.run_id)
+            .expect("usage event applies");
+
+        let summary = runtime.usage_summary();
+        assert_eq!(summary.session_count, 1);
+        assert_eq!(summary.total_turns, 1);
+        assert_eq!(summary.rollups.len(), 1);
+        assert_eq!(summary.rollups[0].backend, AgentBackend::ClaudeLocal);
+        assert_eq!(summary.rollups[0].total_tokens, 50);
+        let grounded = summary.grounded_total_usd.expect("grounded usd present");
+        assert!((grounded - 0.25).abs() < 1e-9, "grounded was {grounded}");
     }
 }

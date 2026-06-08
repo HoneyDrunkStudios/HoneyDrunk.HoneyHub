@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.12.0] - 2026-06-08
+
+- Added `UsageRollup` and `UsageSummary` (the device-wide "your spend" summary), mirroring the bridge's serde shapes: per-`(backend, fidelity)` rollups with a grounded USD total that excludes estimated spend, plus a separate premium-request total.
+- Added the `usage_summary` `ClientCommand` (a fieldless query) and the `usage_summary` `BridgeEventPayload` (the device-scoped summary event).
+
 ## [0.11.0] - 2026-06-08
 
 - Added `usage_derived` to `CapabilityFlags` (the third usage shape from the ADR-0090 spike; at most one usage flag set per backend) plus `defaultCodexCapabilities` (resume-based, derived USD) and `defaultCopilotCapabilities` (resume-based, estimated usage) presets, mirroring the Rust adapter capability presets.

@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.11.0] - 2026-06-08
+
+- Added the **cost / "your spend" view** (ADR-0092 D2): a device-wide, local-only rollup of usage per backend. The bridge aggregates each run's usage into a `UsageSummary` (per-`(backend, fidelity)` rollups; grounded USD = exact + derived only, so an estimate can never inflate the headline; Copilot's premium requests shown separately), answers a new `usage_summary` wire query, and the PWA renders it in a new **Spend** tab. Nothing leaves the device.
+- Bumped the bridge crate to 0.18.0 and the TS packages (types 0.12.0; ui/shell/root 0.11.0).
+
 ## [0.10.0] - 2026-06-08
 
 - Added a per-session diagnostics panel to the run screen — routed provider/model, session + last-turn token/cost usage (with fidelity), message count + elapsed time, and rules-based session-health recommendations (when to start a fresh session). The cross-session suggestions surface is separate and later (Phase 3).
