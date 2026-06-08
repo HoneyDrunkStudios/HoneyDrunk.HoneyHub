@@ -222,4 +222,8 @@ export class WebSocketWireClient implements WireClient {
   async requestUsageSummary(): Promise<void> {
     await this.dispatch({ kind: "usage_summary" });
   }
+
+  async requestCoachingHints(): Promise<void> {
+    await this.dispatch({ kind: "coaching_hints" });
+  }
 }

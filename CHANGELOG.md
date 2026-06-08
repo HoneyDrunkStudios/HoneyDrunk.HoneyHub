@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.12.0] - 2026-06-08
+
+- Added the **coaching surface** (ADR-0092 D4 / packet 09 §3e): the rules-based session coach (shipped as a pure engine in 0.x) is now wired into a device-wide query. The bridge runs it over every session (`BridgeRuntime::coaching_hints`), answers a new `coaching_hints` wire query, and the PWA renders the advisories in a new **Coaching** tab — severity-first, advisory-only, local-only. No learned model (that stays a gated v2 decision).
+- Bumped the bridge crate to 0.19.0 and the TS packages (types 0.13.0; ui/shell/root 0.12.0).
+
 ## [0.11.0] - 2026-06-08
 
 - Added the **cost / "your spend" view** (ADR-0092 D2): a device-wide, local-only rollup of usage per backend. The bridge aggregates each run's usage into a `UsageSummary` (per-`(backend, fidelity)` rollups; grounded USD = exact + derived only, so an estimate can never inflate the headline; Copilot's premium requests shown separately), answers a new `usage_summary` wire query, and the PWA renders it in a new **Spend** tab. Nothing leaves the device.

@@ -619,6 +619,114 @@ h2 {
   font-size: 0.78rem;
 }
 
+.coaching {
+  display: grid;
+  gap: 12px;
+  padding: 16px 18px;
+  border: 1px solid #2b3541;
+  border-radius: 8px;
+  background: #101820;
+}
+
+.coaching-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.coaching-header h2 {
+  margin: 0;
+  font-size: 1.05rem;
+}
+
+.coaching-scope {
+  margin: 0;
+  color: #b8c3cf;
+  font-size: 0.8rem;
+}
+
+.coaching-empty {
+  margin: 8px 0;
+  color: #b8c3cf;
+}
+
+.coaching-error {
+  margin: 0;
+  color: #f8857a;
+}
+
+.coaching-list {
+  display: grid;
+  gap: 10px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.coaching-hint {
+  display: grid;
+  gap: 6px;
+  padding: 12px 14px;
+  border: 1px solid #2b3541;
+  border-left-width: 3px;
+  border-radius: 6px;
+  background: #0c141b;
+}
+
+.coaching-hint.severity-warning {
+  border-left-color: #f8d86a;
+}
+
+.coaching-hint.severity-info {
+  border-left-color: #78d5d7;
+}
+
+.coaching-hint.severity-block {
+  border-left-color: #f8857a;
+}
+
+.coaching-hint-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.coaching-badge {
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid #38434f;
+  font-size: 0.68rem;
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+}
+
+.coaching-badge.severity-warning {
+  color: #f8d86a;
+  border-color: #f8d86a;
+}
+
+.coaching-badge.severity-info {
+  color: #78d5d7;
+  border-color: #78d5d7;
+}
+
+.coaching-badge.severity-block {
+  color: #f8857a;
+  border-color: #f8857a;
+}
+
+.coaching-hint-title {
+  font-weight: 600;
+  font-size: 0.92rem;
+}
+
+.coaching-hint-message {
+  margin: 0;
+  color: #d4dce4;
+  font-size: 0.9rem;
+}
+
 @media (max-width: 720px) {
   .toolbar {
     align-items: flex-start;

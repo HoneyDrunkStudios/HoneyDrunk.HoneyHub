@@ -1,5 +1,9 @@
 # Changelog
 
+## [0.13.0] - 2026-06-08
+
+- Added the `coaching_hints` `ClientCommand` (a fieldless query) and the `coaching_hints` `BridgeEventPayload` (a device-scoped event carrying `PolicyHint[]`), mirroring the bridge's cross-session coaching surface.
+
 ## [0.12.0] - 2026-06-08
 
 - Added `UsageRollup` and `UsageSummary` (the device-wide "your spend" summary), mirroring the bridge's serde shapes: per-`(backend, fidelity)` rollups with a grounded USD total that excludes estimated spend, plus a separate premium-request total.

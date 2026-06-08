@@ -3,6 +3,7 @@ import type {
   BridgeEvent,
   BridgeEventPayload,
   DispatchRunState,
+  PolicyHint,
   StartRunRequest,
   UsageSignal
 } from "@honeydrunk/honeyhub-types";
@@ -161,6 +162,49 @@ export class MockWireClient implements WireClient {
       sequence: 0,
       createdAt: this.createdAt,
       payload: { kind: "usage_summary", summary }
+    };
+    this.sequence += 1;
+    for (const handler of this.handlers) {
+      handler(event);
+    }
+  }
+
+  async requestCoachingHints(): Promise<void> {
+    // The real host runs the Rust coaching engine; the offline mock can't, so it
+    // surfaces a small set of *scripted demo* advisories for any session it has
+    // seen — enough to exercise the Coaching surface without re-implementing the
+    // engine. With no session yet, it returns none (honest empty state).
+    const sessionId = [...this.sessionIds][0];
+    const hints: PolicyHint[] =
+      sessionId === undefined
+        ? []
+        : [
+            {
+              id: `coach:${sessionId}:stale_session`,
+              sessionId,
+              code: "stale_session",
+              severity: "warning",
+              message:
+                "This session has grown large. Starting a fresh session keeps the agent focused and can respond faster and cost less.",
+              createdAt: this.createdAt
+            },
+            {
+              id: `coach:${sessionId}:estimate_only_spend`,
+              sessionId,
+              code: "estimate_only_spend",
+              severity: "info",
+              message:
+                "Some usage for this session is estimated, so the spend figures shown are approximate rather than exact.",
+              createdAt: this.createdAt
+            }
+          ];
+    const event: BridgeEvent = {
+      id: `event-${this.sequence}`,
+      sessionId: "",
+      runId: "",
+      sequence: 0,
+      createdAt: this.createdAt,
+      payload: { kind: "coaching_hints", hints }
     };
     this.sequence += 1;
     for (const handler of this.handlers) {
