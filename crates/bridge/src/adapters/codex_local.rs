@@ -312,11 +312,19 @@ impl AgentBackendAdapter for CodexLocalAdapter {
             .unwrap_or_else(|| Uuid::new_v4().to_string());
 
         // A follow-up turn (the core's resume-based reply path) resumes the prior
-        // run's vendor session; a fresh turn starts a new Codex thread.
-        let resume_session = request
-            .follow_up_to_run_id
-            .as_deref()
-            .and_then(|prior| self.backend_session_of(prior));
+        // run's vendor session; a fresh turn starts a new Codex thread. A requested
+        // follow-up whose prior run has no captured vendor session id fails
+        // explicitly rather than silently degrading into a fresh, context-losing
+        // `codex exec`.
+        let resume_session = match request.follow_up_to_run_id.as_deref() {
+            Some(prior) => Some(self.backend_session_of(prior).ok_or_else(|| {
+                BridgeError::new(
+                    "follow_up_session_missing",
+                    format!("no vendor session captured for prior run {prior}; cannot resume"),
+                )
+            })?),
+            None => None,
+        };
 
         let mut command = self.exec_command(&request.task, resume_session.as_deref());
         command.current_dir(&request.workspace_root);
@@ -584,6 +592,34 @@ mod tests {
             .reply("run-1", "continue")
             .expect_err("codex reply is resume-based");
         assert_eq!(error.code, "reply_unavailable");
+    }
+
+    #[test]
+    fn follow_up_to_unknown_run_fails_instead_of_starting_fresh() {
+        // A follow-up whose prior run has no captured vendor session must error,
+        // never silently degrade into a context-losing fresh `codex exec`.
+        let adapter = CodexLocalAdapter::new("codex", test_clock());
+        let request = StartRunRequest {
+            session: crate::session::DispatchSession {
+                id: "s1".to_string(),
+                backend: AgentBackend::CodexLocal,
+                title: "t".to_string(),
+                workspace_root: ".".to_string(),
+                created_at: "2026-06-08T12:00:00Z".to_string(),
+                updated_at: "2026-06-08T12:00:00Z".to_string(),
+                current_run_id: None,
+            },
+            workspace_root: ".".to_string(),
+            task: "continue".to_string(),
+            requested_run_id: Some("run-2".to_string()),
+            follow_up_to_run_id: Some("does-not-exist".to_string()),
+            transcript: Vec::new(),
+            launch_command: None,
+        };
+        let error = adapter
+            .start(request)
+            .expect_err("follow-up with no captured session fails");
+        assert_eq!(error.code, "follow_up_session_missing");
     }
 
     #[test]

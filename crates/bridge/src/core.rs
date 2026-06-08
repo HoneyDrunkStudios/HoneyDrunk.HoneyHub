@@ -164,13 +164,20 @@ where
     ) -> Result<ReplyOutcome, BridgeError> {
         let created_at = created_at.into();
         let current = self.run(run_id)?.record.run.state.clone();
-        if current.is_terminal() {
-            return Err(BridgeError::new(
-                "terminal_run_reply",
-                format!("cannot reply to terminal run {run_id} in state {current:?}"),
-            ));
-        }
         let capabilities = self.adapter.capabilities();
+        if current.is_terminal() {
+            // An interactive backend cannot reply into a process that has already
+            // exited. A resume-based backend (interactive_reply = false +
+            // resume_session) instead continues a completed turn by starting a
+            // follow-up run that resumes the vendor session, so a terminal run is a
+            // valid reply target there — fall through to the follow-up-run path.
+            if capabilities.interactive_reply || !capabilities.resume_session {
+                return Err(BridgeError::new(
+                    "terminal_run_reply",
+                    format!("cannot reply to terminal run {run_id} in state {current:?}"),
+                ));
+            }
+        }
         if capabilities.interactive_reply {
             self.adapter.reply(run_id, text)?;
             let managed = self.run_mut(run_id)?;
@@ -1241,5 +1248,56 @@ mod tests {
         assert_eq!(managed.record.run.state, DispatchRunState::Completed);
         assert_eq!(error.code, "terminal_run_reply");
         assert!(runtime.adapter.replies.borrow().is_empty());
+    }
+
+    #[test]
+    fn terminal_resume_based_run_replies_via_follow_up() {
+        // A resume-based backend (codex.local / copilot.local: interactive_reply
+        // false + resume_session) ends each turn as a completed `exec` process, so a
+        // reply to a *terminal* run must start a follow-up run that resumes the
+        // session — not be rejected as `terminal_run_reply` (which only applies to
+        // interactive backends that cannot write into an exited process).
+        let (allowlist_root, workspace_root) = workspace_paths();
+        let mut capabilities = CapabilityFlags::claude_local();
+        capabilities.interactive_reply = false; // resume_session stays true
+        let adapter = FakeAdapter::new(capabilities);
+        let mut runtime = BridgeRuntime::new(
+            adapter,
+            WorkspaceAllowlist::new(vec![allowlist_root]),
+            BackendAllowlist::new(vec![AgentBackend::ClaudeLocal]),
+        );
+        let handle = runtime
+            .start(request(&workspace_root), "2026-06-07T12:00:00Z")
+            .expect("run starts");
+        runtime
+            .handle_process_exit(
+                &handle.run_id,
+                ProcessExitStatus {
+                    run_id: handle.run_id.clone(),
+                    code: Some(0),
+                    signal: None,
+                    success: true,
+                    exited_at: "2026-06-07T12:01:00Z".to_string(),
+                },
+            )
+            .expect("exit completes the turn");
+        assert!(runtime
+            .run(&handle.run_id)
+            .expect("run exists")
+            .record
+            .run
+            .state
+            .is_terminal());
+
+        let outcome = runtime
+            .reply(&handle.run_id, "continue", "2026-06-07T12:02:00Z")
+            .expect("terminal resume-based run replies via a follow-up run");
+        assert!(matches!(outcome, ReplyOutcome::FollowUpRunStarted(_)));
+        let start_requests = runtime.adapter.start_requests.borrow();
+        assert_eq!(start_requests.len(), 2);
+        assert_eq!(
+            start_requests[1].follow_up_to_run_id,
+            Some(handle.run_id.clone())
+        );
     }
 }

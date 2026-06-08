@@ -7,6 +7,8 @@
 - Parses `thread.started`/`session.created` (capture vendor session id), `item.completed` (surface `agent_message` items, ignore reasoning/tool items), and `turn.completed` (exact token usage).
 - Usage fidelity `derived` (ADR-0092 D2): exact token counts taken directly, USD computed via an **injected** `UsdRateLookup` (the operator-configurable rate table, ADR-0052 D2). With no rate wired, tokens stay exact and USD is absent — never fabricated.
 - Added a third usage capability flag `usage_derived` to `CapabilityFlags` (honestly representing the spike's three usage shapes) plus `CapabilityFlags::codex_local()` / `copilot_local()` presets.
+- **Core fix:** `BridgeRuntime::reply` now lets a **terminal** run start a follow-up run when the backend is resume-based (`interactive_reply = false` + `resume_session`) — a completed `codex exec` turn is a valid reply target, continued by resuming the vendor session. The `terminal_run_reply` rejection now applies only to interactive backends (which cannot write into an exited process). Added a runtime regression test.
+- A requested follow-up whose prior run has no captured vendor session id now fails explicitly (`follow_up_session_missing`) instead of silently degrading into a fresh, context-losing `codex exec`.
 
 ## [0.11.0] - 2026-06-08
 
