@@ -14,7 +14,9 @@ export interface StartedRun {
 export interface WireClient {
   /** Begin a run; the bridge streams events for it via `subscribe`. */
   start(request: StartRunRequest): Promise<StartedRun>;
-  /** Send a live reply (or a follow-up after completion) into a run. */
+  /** Send a live, same-process reply into an active run (e.g. answering
+      `needs_input`). A follow-up after completion is a new run via `start`
+      (`StartRunRequest.followUpToRunId` + `transcript`), not a reply here. */
   reply(runId: string, text: string): Promise<void>;
   /** Request graceful cancellation of a run. */
   stop(runId: string): Promise<void>;

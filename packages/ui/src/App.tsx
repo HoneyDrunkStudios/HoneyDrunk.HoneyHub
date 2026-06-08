@@ -3,6 +3,7 @@ import type { Notification } from "@honeydrunk/honeyhub-types";
 import { BridgeSettings } from "./BridgeSettings";
 import { NotificationList } from "./NotificationList";
 import { RunScreen } from "./routes/run/RunScreen";
+import { emptyBridgeSettings, type BridgeSettingsState } from "./settingsModel";
 import { MockWireClient } from "./wire/mockClient";
 import type { WireClient } from "./wire/client";
 import "./styles.css";
@@ -18,6 +19,9 @@ export interface AppProps {
 export function App({ client }: AppProps = {}) {
   const [view, setView] = useState<View>("run");
   const wireClient = useMemo(() => client ?? new MockWireClient(), [client]);
+  // Bridge settings are owned here so the run screen can read the workspace
+  // allowlist the operator edits in Bridge settings.
+  const [settings, setSettings] = useState<BridgeSettingsState>(emptyBridgeSettings);
   // Notifications arrive from the bridge once the transport surfaces them; the
   // surface itself is ready now.
   const [notifications] = useState<Notification[]>([]);
@@ -54,11 +58,11 @@ export function App({ client }: AppProps = {}) {
       {/* Both panels stay mounted; visibility is toggled so in-progress state
           survives a tab switch. */}
       <div hidden={view !== "run"}>
-        <RunScreen client={wireClient} />
+        <RunScreen client={wireClient} workspaceRoots={settings.workspaceRoots} />
       </div>
 
       <div hidden={view !== "settings"}>
-        <BridgeSettings />
+        <BridgeSettings state={settings} onChange={setSettings} />
       </div>
 
       <div hidden={view !== "notifications"}>

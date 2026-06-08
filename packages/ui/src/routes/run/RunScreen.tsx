@@ -71,42 +71,68 @@ export function RunScreen({ client, workspaceRoots = [] }: RunScreenProps) {
 
   const active = runId !== undefined && !isTerminal(runState);
 
-  const onStart = async () => {
-    const trimmed = task.trim();
-    if (trimmed.length === 0) {
-      setError("Enter a task to start a run.");
-      return;
-    }
-    setError(undefined);
-    setMessages([
-      {
-        id: "user-0",
-        sessionId: "session-1",
-        runId: "pending",
-        role: "user",
-        body: trimmed,
-        createdAt: new Date().toISOString()
-      }
-    ]);
-    setArtifacts([]);
-    setUsage([]);
+  const userMessage = (id: string, forRunId: string, body: string): DispatchMessage => ({
+    id,
+    sessionId: "session-1",
+    runId: forRunId,
+    role: "user",
+    body,
+    createdAt: new Date().toISOString()
+  });
+
+  // Begin a run under a client-preallocated id. Binding `runIdRef` (and the
+  // request's `requestedRunId`) before `start` means the event handler filters to
+  // this run from the first event, rather than briefly accepting all events.
+  const beginRun = async (
+    taskText: string,
+    options?: { followUpToRunId?: string; transcript?: DispatchMessage[] }
+  ): Promise<string> => {
+    const newRunId = crypto.randomUUID();
+    runIdRef.current = newRunId;
+    setRunId(newRunId);
+    setRunState(undefined);
     setStreaming("");
 
     const request: StartRunRequest = {
       session: {
         id: "session-1",
         backend: "claude.local",
-        title: trimmed,
+        title: taskText,
         workspaceRoot,
         createdAt: new Date().toISOString(),
         updatedAt: new Date().toISOString()
       },
       workspaceRoot,
-      task: trimmed
+      task: taskText,
+      requestedRunId: newRunId
     };
+    // Set the optional follow-up fields only when present (exactOptionalPropertyTypes).
+    if (options?.followUpToRunId !== undefined) {
+      request.followUpToRunId = options.followUpToRunId;
+    }
+    if (options?.transcript !== undefined) {
+      request.transcript = options.transcript;
+    }
+    await client.start(request);
+    return newRunId;
+  };
+
+  const onStart = async () => {
+    const trimmed = task.trim();
+    if (trimmed.length === 0) {
+      setError("Enter a task to start a run.");
+      return;
+    }
+    if (workspaceRoot.trim().length === 0) {
+      setError("Pick a workspace root to start a run.");
+      return;
+    }
+    setError(undefined);
+    setArtifacts([]);
+    setUsage([]);
     try {
-      const started = await client.start(request);
-      setRunId(started.runId);
+      const newRunId = await beginRun(trimmed);
+      setMessages([userMessage("user-0", newRunId, trimmed)]);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "failed to start run");
     }
@@ -117,20 +143,24 @@ export function RunScreen({ client, workspaceRoots = [] }: RunScreenProps) {
     if (trimmed.length === 0 || runId === undefined) {
       return;
     }
-    setMessages((prev) => [
-      ...prev,
-      {
-        id: `user-${prev.length}`,
-        sessionId: "session-1",
-        runId,
-        role: "user",
-        body: trimmed,
-        createdAt: new Date().toISOString()
-      }
-    ]);
     setReply("");
     try {
-      await client.reply(runId, trimmed);
+      if (needsInput) {
+        // Live, same-process reply into the active run.
+        setMessages((prev) => [...prev, userMessage(`user-${prev.length}`, runId, trimmed)]);
+        await client.reply(runId, trimmed);
+      } else if (canFollowUp) {
+        // A follow-up after completion is a NEW run carrying the prior transcript
+        // (ADR-0090 D4 / StartRunRequest.followUpToRunId), not a reply into the
+        // completed run.
+        const priorTranscript = messages;
+        const previousRunId = runId;
+        const newRunId = await beginRun(trimmed, {
+          followUpToRunId: previousRunId,
+          transcript: priorTranscript
+        });
+        setMessages((prev) => [...prev, userMessage(`user-${prev.length}`, newRunId, trimmed)]);
+      }
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "failed to send");
     }
@@ -232,7 +262,7 @@ export function RunScreen({ client, workspaceRoots = [] }: RunScreenProps) {
                 <li key={artifact.id} className={`artifact kind-${artifact.kind}`}>
                   <span className="artifact-kind">{artifact.kind}</span>
                   {artifact.href !== undefined ? (
-                    <a href={artifact.href} target="_blank" rel="noreferrer">
+                    <a href={artifact.href} target="_blank" rel="noopener noreferrer">
                       {artifact.label}
                     </a>
                   ) : (

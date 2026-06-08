@@ -5,6 +5,9 @@ import { MockWireClient } from "../../wire/mockClient";
 
 function startRun(task = "Add a feature") {
   render(<RunScreen client={new MockWireClient()} />);
+  fireEvent.change(screen.getByLabelText("Workspace root"), {
+    target: { value: "/work/honeyhub" }
+  });
   fireEvent.change(screen.getByLabelText("Task"), { target: { value: task } });
   fireEvent.click(screen.getByRole("button", { name: "Start session" }));
 }
@@ -38,6 +41,13 @@ describe("RunScreen", () => {
     // Usage renders with exact fidelity.
     expect(screen.getByLabelText("Usage (exact)")).toBeTruthy();
     expect(screen.getByText("$0.0182")).toBeTruthy();
+
+    // A follow-up after completion starts a NEW run (it goes active again).
+    fireEvent.change(screen.getByLabelText("Follow up"), { target: { value: "add tests too" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    await waitFor(() =>
+      expect(screen.getByLabelText("Run state").textContent).toBe("needs_input")
+    );
   });
 
   it("stops an active run", async () => {
