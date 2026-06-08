@@ -429,6 +429,70 @@ h2 {
   color: #ff9b9b;
 }
 
+.diagnostics {
+  display: grid;
+  gap: 12px;
+  padding: 14px 16px;
+  border: 1px solid #2b3541;
+  border-radius: 8px;
+  background: #101820;
+}
+
+.diagnostics-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.diagnostics-header h3 {
+  margin: 0;
+  font-size: 0.95rem;
+}
+
+.health-pill {
+  padding: 2px 10px;
+  border-radius: 999px;
+  border: 1px solid #38434f;
+  font-size: 0.72rem;
+  text-transform: uppercase;
+}
+
+.health-good {
+  color: #7ee787;
+}
+
+.health-watch {
+  color: #f8d86a;
+  border-color: #f8d86a;
+}
+
+.diagnostics-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px 24px;
+  margin: 0;
+}
+
+.diagnostics-grid dt {
+  color: #b8c3cf;
+  font-size: 0.72rem;
+  text-transform: uppercase;
+}
+
+.diagnostics-grid dd {
+  margin: 2px 0 0;
+}
+
+.diagnostics-recs {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  padding-left: 18px;
+  color: #f8d86a;
+  font-size: 0.9rem;
+}
+
 .usage-badge {
   display: inline-flex;
   align-items: center;

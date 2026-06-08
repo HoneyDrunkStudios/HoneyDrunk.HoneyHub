@@ -1,32 +1,24 @@
-import type { UsageFidelity, UsageSignal } from "@honeydrunk/honeyhub-types";
+import type { UsageSignal } from "@honeydrunk/honeyhub-types";
+import { formatUsd } from "../usageFormat";
 
 // ADR-0092 D2 [Firm]: the UI must visually distinguish exact / derived / estimated
-// and never render an estimate as an exact number. Each fidelity gets its own
-// prefix and an always-visible qualifier tag, so no figure can be read as exact
-// when it is not.
-const FIDELITY: Record<UsageFidelity, { prefix: string; label: string }> = {
-  exact: { prefix: "$", label: "exact" },
-  derived: { prefix: "≈$", label: "derived" },
-  estimated: { prefix: "~$", label: "estimated" }
-};
-
+// and never render an estimate as an exact number. The fidelity-aware USD prefix
+// lives in `usageFormat` (shared with the diagnostics panel); the always-visible
+// fidelity tag below makes the band explicit.
 export function UsageBadge({ usage }: { usage: UsageSignal }) {
-  const fidelity = FIDELITY[usage.fidelity];
   const usd =
-    usage.totalUsd !== undefined
-      ? `${fidelity.prefix}${usage.totalUsd.toFixed(4)}`
-      : undefined;
+    usage.totalUsd !== undefined ? formatUsd(usage.totalUsd, usage.fidelity) : undefined;
 
   return (
     <span
       className={`usage-badge fidelity-${usage.fidelity}`}
-      aria-label={`Usage (${fidelity.label})`}
+      aria-label={`Usage (${usage.fidelity})`}
     >
       {usd !== undefined && <strong className="usage-usd">{usd}</strong>}
       {usage.totalTokens !== undefined && (
         <span className="usage-tokens">{usage.totalTokens} tok</span>
       )}
-      <span className="fidelity-tag">{fidelity.label}</span>
+      <span className="fidelity-tag">{usage.fidelity}</span>
     </span>
   );
 }

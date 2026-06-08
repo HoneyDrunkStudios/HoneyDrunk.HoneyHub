@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.10.0] - 2026-06-08
+
+- Added a per-session diagnostics panel to the run screen — routed provider/model, session + last-turn token/cost usage (with fidelity), message count + elapsed time, and rules-based session-health recommendations (when to start a fresh session). The cross-session suggestions surface is separate and later (Phase 3).
+- Kept package versions aligned across the workspace at 0.10.0.
+
 ## [0.9.0] - 2026-06-08
 
 - The bridge host now opens the cockpit in the browser on launch (skippable), so one command literally opens the app; and the README documents driving HoneyHub from a phone over a Tailscale tailnet from the same one binary (no separate mobile app).

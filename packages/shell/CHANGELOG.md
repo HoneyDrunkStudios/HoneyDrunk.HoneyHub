@@ -1,5 +1,9 @@
 # Changelog
 
+## [0.10.0] - 2026-06-08
+
+- Updated workspace package version alignment for the session-diagnostics release.
+
 ## [0.9.0] - 2026-06-08
 
 - Updated workspace package version alignment for the host auto-open + mobile release.

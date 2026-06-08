@@ -1,5 +1,9 @@
 # Changelog
 
+## [0.10.0] - 2026-06-08
+
+- Version alignment for the session-diagnostics release (no host code change).
+
 ## [0.9.0] - 2026-06-08
 
 - On start, when serving the PWA, open the cockpit in the default browser (skippable with `HONEYHUB_NO_BROWSER`) — so `cargo run -p honeyhub-bridge-host` opens an already-connected cockpit. Documented the mobile-over-Tailscale flow (bind `0.0.0.0`, open from the phone over the tailnet).
