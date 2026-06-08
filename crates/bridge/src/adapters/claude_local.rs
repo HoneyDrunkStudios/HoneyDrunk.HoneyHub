@@ -385,7 +385,7 @@ impl AgentBackendAdapter for ClaudeLocalAdapter {
         // the CLI finishes. A clean exit finalizes then completes; a non-zero exit
         // fails. Then retire the run so the child handle/threads/channel are freed
         // while the captured backend session id survives for a follow-up turn.
-        if let Some(success) = run.poll_exit() {
+        let retired = if let Some(success) = run.poll_exit() {
             let now = (self.clock)();
             if success {
                 events.push(terminal_status(
@@ -408,8 +408,16 @@ impl AgentBackendAdapter for ClaudeLocalAdapter {
                     DispatchRunState::Failed,
                 ));
             }
-            slot.retire();
-        }
+            slot.retire()
+        } else {
+            None
+        };
+
+        // Release the runs lock before dropping the retired child: `ChildRun::drop`
+        // joins the stdout reader thread, which must not block other runs' access to
+        // the lock.
+        drop(guard);
+        drop(retired);
 
         Ok(events)
     }

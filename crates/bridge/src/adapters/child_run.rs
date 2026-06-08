@@ -265,13 +265,25 @@ impl RunSlot {
         }
     }
 
-    /// Retire a live run to a `Done` record, dropping the heavy child resources while
-    /// keeping the vendor session id. No-op if already retired.
-    pub fn retire(&mut self) {
-        if let RunSlot::Live(run) = self {
-            *self = RunSlot::Done {
-                backend_session_id: run.backend_session_id.clone(),
-            };
+    /// Retire a live run to a `Done` record, **returning** the displaced live run so
+    /// the caller can drop it (which kills the tree and joins the stdout reader
+    /// thread) *after* releasing the runs lock. `ChildRun::drop` joins the reader, so
+    /// dropping it under the lock could block every other run's `stream`/`reply`/`stop`
+    /// if the reader is slow to end — keep that join off the lock. Returns `None` if
+    /// the slot was already retired.
+    #[must_use = "drop the returned ChildRun after releasing the runs lock"]
+    pub fn retire(&mut self) -> Option<Box<ChildRun>> {
+        match self {
+            RunSlot::Live(run) => {
+                let backend_session_id = run.backend_session_id.clone();
+                match std::mem::replace(self, RunSlot::Done { backend_session_id }) {
+                    RunSlot::Live(run) => Some(run),
+                    // `self` was `Live` in the outer match, so the replaced value is
+                    // always `Live`; this arm is unreachable.
+                    RunSlot::Done { .. } => None,
+                }
+            }
+            RunSlot::Done { .. } => None,
         }
     }
 }
@@ -341,15 +353,19 @@ mod tests {
         let mut slot = RunSlot::live(run);
         assert!(slot.as_live_mut().is_some());
 
-        slot.retire();
+        let retired = slot.retire();
+        assert!(
+            retired.is_some(),
+            "retire returns the displaced live run to drop off-lock"
+        );
         assert!(
             slot.as_live_mut().is_none(),
             "retired run is no longer live"
         );
         assert_eq!(slot.backend_session_id(), Some("vendor-7"));
 
-        // Retire is idempotent.
-        slot.retire();
+        // Retire is idempotent and returns None once already retired.
+        assert!(slot.retire().is_none());
         assert_eq!(slot.backend_session_id(), Some("vendor-7"));
     }
 
