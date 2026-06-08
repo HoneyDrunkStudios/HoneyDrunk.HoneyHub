@@ -57,7 +57,18 @@ async fn main() -> std::io::Result<()> {
     // Serve the built PWA from HONEYHUB_STATIC_DIR, or packages/ui/dist if it
     // exists, so the whole cockpit runs from one command on one origin.
     let static_dir: Option<PathBuf> = match std::env::var("HONEYHUB_STATIC_DIR") {
-        Ok(dir) if !dir.trim().is_empty() => Some(PathBuf::from(dir)),
+        Ok(dir) if !dir.trim().is_empty() => {
+            let path = PathBuf::from(dir.trim());
+            if path.is_dir() {
+                Some(path)
+            } else {
+                eprintln!(
+                    "warning: HONEYHUB_STATIC_DIR '{}' is not a directory; serving the WebSocket only",
+                    path.display()
+                );
+                None
+            }
+        }
         _ => {
             let default_dir = PathBuf::from("packages/ui/dist");
             default_dir.is_dir().then_some(default_dir)
