@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type {
+  AgentBackend,
   DispatchArtifact,
   DispatchMessage,
   DispatchRunState,
@@ -7,8 +8,15 @@ import type {
   UsageSignal
 } from "@honeydrunk/honeyhub-types";
 import { UsageBadge } from "../../components/UsageBadge";
+import { backendLabel } from "../../backends";
+import { recommendBackend } from "../routing/router";
+import { BUNDLED_SNAPSHOT } from "../routing/routingSnapshot";
 import { SessionDiagnostics } from "./SessionDiagnostics";
 import type { WireClient } from "../../wire/client";
+
+// The backends the cockpit can offer; the bridge enforces the real backend allowlist
+// on launch, and the router ranks among these.
+const ROUTABLE_BACKENDS: AgentBackend[] = ["claude.local", "codex.local", "copilot.local"];
 
 export interface RunScreenProps {
   client: WireClient;
@@ -34,6 +42,22 @@ export function RunScreen({ client, workspaceRoots = [] }: RunScreenProps) {
   const [usage, setUsage] = useState<UsageSignal[]>([]);
   const [reply, setReply] = useState("");
   const [error, setError] = useState<string | undefined>(undefined);
+  const [backend, setBackend] = useState<AgentBackend>("claude.local");
+  // Once the user picks a backend by hand, stop following the router's suggestion.
+  const [backendPinned, setBackendPinned] = useState(false);
+
+  // The router's suggestion for the current task (app-tier, ADR-0092 D3). Recomputed
+  // as the task text changes; a pure function of the task + the bundled snapshot.
+  const recommendation = useMemo(
+    () => recommendBackend({ task, availableBackends: ROUTABLE_BACKENDS }, BUNDLED_SNAPSHOT),
+    [task]
+  );
+  // Follow the suggestion until the user overrides it.
+  useEffect(() => {
+    if (!backendPinned) {
+      setBackend(recommendation.backend);
+    }
+  }, [recommendation.backend, backendPinned]);
 
   // Keep the active run id available to the event handler without re-subscribing.
   const runIdRef = useRef<string | undefined>(undefined);
@@ -97,7 +121,7 @@ export function RunScreen({ client, workspaceRoots = [] }: RunScreenProps) {
     const request: StartRunRequest = {
       session: {
         id: "session-1",
-        backend: "claude.local",
+        backend,
         title: taskText,
         workspaceRoot,
         createdAt: new Date().toISOString(),
@@ -228,7 +252,6 @@ export function RunScreen({ client, workspaceRoots = [] }: RunScreenProps) {
               placeholder="/path/to/allowlisted/workspace"
             />
           )}
-          <span className="run-backend">Backend: claude.local</span>
           <label htmlFor="task">Task</label>
           <textarea
             id="task"
@@ -236,13 +259,35 @@ export function RunScreen({ client, workspaceRoots = [] }: RunScreenProps) {
             onChange={(event) => setTask(event.target.value)}
             rows={3}
           />
+          <label htmlFor="backend">Backend</label>
+          <select
+            id="backend"
+            value={backend}
+            onChange={(event) => {
+              setBackend(event.target.value as AgentBackend);
+              setBackendPinned(true);
+            }}
+          >
+            {ROUTABLE_BACKENDS.map((option) => (
+              <option key={option} value={option}>
+                {backendLabel(option)}
+                {option === recommendation.backend ? " (suggested)" : ""}
+              </option>
+            ))}
+          </select>
+          <p className="routing-rationale">
+            {recommendation.rationale}
+            {recommendation.snapshotSource === "bundled-default" && (
+              <span className="routing-source"> · rates: bundled</span>
+            )}
+          </p>
           <button type="button" onClick={onStart}>
             Start session
           </button>
         </div>
       ) : (
         <>
-          <SessionDiagnostics backend="claude.local" messages={messages} usage={usage} />
+          <SessionDiagnostics backend={backend} messages={messages} usage={usage} />
 
           <ol className="transcript" aria-label="Transcript">
             {messages.map((message) => (

@@ -50,6 +50,32 @@ describe("RunScreen", () => {
     );
   });
 
+  it("suggests a backend from the task and lets the user override it", () => {
+    render(<RunScreen client={new MockWireClient()} />);
+    const backendSelect = screen.getByLabelText("Backend") as HTMLSelectElement;
+
+    // A complex task routes to the most capable backend (Claude).
+    fireEvent.change(screen.getByLabelText("Task"), {
+      target: { value: "Refactor the concurrency model and debug the race condition" }
+    });
+    expect(backendSelect.value).toBe("claude.local");
+    expect(screen.getByText(/Complex task/)).toBeTruthy();
+
+    // A light task routes to the lowest-cost backend (Copilot).
+    fireEvent.change(screen.getByLabelText("Task"), {
+      target: { value: "Fix a typo in the readme" }
+    });
+    expect(backendSelect.value).toBe("copilot.local");
+
+    // Manual override pins the choice — a new task no longer moves it.
+    fireEvent.change(backendSelect, { target: { value: "codex.local" } });
+    expect(backendSelect.value).toBe("codex.local");
+    fireEvent.change(screen.getByLabelText("Task"), {
+      target: { value: "Redesign the whole architecture" }
+    });
+    expect(backendSelect.value).toBe("codex.local");
+  });
+
   it("stops an active run", async () => {
     startRun();
     await waitFor(() =>

@@ -842,6 +842,16 @@ h2 {
   border-radius: 4px;
 }
 
+.routing-rationale {
+  margin: 4px 0 0;
+  color: #b8c3cf;
+  font-size: 0.8rem;
+}
+
+.routing-source {
+  color: #8b97a3;
+}
+
 @media (max-width: 720px) {
   .toolbar {
     align-items: flex-start;

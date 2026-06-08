@@ -1,5 +1,9 @@
 # Changelog
 
+## [0.15.0] - 2026-06-13
+
+- Added the **app-tier routing engine** (ADR-0092 D3 / packet 09 §3d): as you type a task, the run screen suggests a backend — capability-first for complex tasks (estimated from keywords + length), cost-first for light ones — reading a **bundled** routing snapshot (permitted for local-first apps under the invariant-45 local-first carve-out; cost rates move only a few times a year, so a bundled default stays current; fetch-and-cache + a HoneyDrunk.AI producer are follow-ups). The suggestion is shown with a one-line rationale and a "(suggested)" marker in the backend picker; the user can override and the pick then stays pinned — an invalid pin is cleared when the offered backends change, so a removed-then-re-added backend can't silently resume overriding the suggestion. A small "optimize your own subscriptions" tiebreak nudges away from a heavily-used backend without ever overriding a clear capability/cost winner. Backend selection replaces the old Claude-only hardcode; diagnostics follow the chosen backend.
+
 ## [0.14.0] - 2026-06-09
 
 - Reworked the **Agents** tab for the new one-entry-per-name model: instead of grouping by backend, each discovered agent is now **one row** showing a **badge per backend** it can run on, with that backend's own metadata (model, description, scope, workspace label, relative source path). The scope copy now names both `.claude/agents/` and `.copilot/agents/` and explains that discovery spans both allowlisted workspaces and the user-global config. Replaced `groupAgents` with `sortAgents`/`sortBackends` (pure ordering, cockpit backend order, unknown backends last). Updated for the `AgentDefinition { id, name, backends }` shape (types 0.15.0). Read-only, no absolute path rendered, host queried only while active — unchanged.

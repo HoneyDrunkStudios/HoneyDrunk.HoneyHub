@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.15.0] - 2026-06-13
+
+- Added the **routing engine** (ADR-0092 D3 / packet 09 §3d): an app-tier router suggests which backend to run a task on — capability-first for complex tasks, cost-first for light ones, with a soft "optimize your own subscriptions" tiebreak — reading a **bundled** cost-rate/policy snapshot (permitted for local-first apps under the invariant-45 local-first carve-out; HoneyHub owns the consumer schema; a HoneyDrunk.AI producer and fetch-and-cache delivery are follow-ups, since published model rates move only a few times a year). The run screen shows the suggestion + rationale and lets the user override. App-tier only — no new bridge/wire plumbing.
+- Bumped the TS app packages (ui/shell/root 0.15.0); the bridge crate (0.21.0) and shared-types (0.15.0) are unchanged.
+
 ## [0.14.0] - 2026-06-09
 
 - Agent discovery (§3f-bis) rework (operator-decided): Copilot agents now come from **`.copilot/agents/*.md`** (its real convention, replacing the `.github/*agent*` guess); the cockpit can also scan the **user-global** folders `~/.claude/agents` and `~/.copilot/agents` — **opt-in, off by default** (set `HONEYHUB_GLOBAL_AGENTS`), since that reads the user's own home config outside the workspace allowlist (ADR-0090); when enabled it is read once, metadata-only, with symlink containment. Definitions dedupe by **name** into **one entry runnable on the set of backends** that define it (a project definition shadows a global one within a backend). The Agents tab now shows one row per agent name with a badge per backend. Everything stays read-only and local; no prompt body or absolute path leaves the device. Discovery is filtered to the backends the runtime can actually launch (its adapter's backend, and only when allowlisted), so it never advertises an agent that `start` would reject.
