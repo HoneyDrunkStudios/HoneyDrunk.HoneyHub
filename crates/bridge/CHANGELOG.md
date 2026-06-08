@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.15.0] - 2026-06-08
+
+- Extracted the shared child-process driver into `adapters::child_run` (`ChildRun`): spawn-with-piped-stdio, stderr drain, stdout reader thread, process-tree kill, reap, and one-time exit detection now live in one place. `claude.local` is now a thin strategy over it (command + capability flags + `stream-json` parsing + same-process reply framing), so the `codex.local` / `copilot.local` adapters reuse the mechanics rather than copying them. `EventClock` / `default_event_clock` moved to `child_run` and are re-exported unchanged.
+- Made the kill path idempotent: a `reaped` flag set by `poll_exit`/`close_and_kill` stops `Drop` from re-signalling an already-reaped (and possibly recycled) pid.
+- A spawn failure now names the exact program (`failed to launch backend CLI '<program>'`).
+- Added `RunSlot` (`Live`/`Done`): a completed run **retires** to a lightweight record that keeps only the captured vendor `backend_session_id`, dropping the child handle, reader thread, and channel — freeing a long-lived host from accumulating finished runs while still letting a follow-up turn resume the session.
+- Added `ChildRun::drain_remaining(timeout)`: a bounded, timeout-aware (`recv_timeout`) final drain of the stdout the child flushed on exit, so the closing `result`/usage line (exact tokens + USD) is never lost when the channel is dropped on retirement. `stream()` retires under the runs lock (capturing the early-set vendor session id), then performs the tail drain and the child drop (which joins the reader thread) **off** the lock, so neither the bounded drain nor the join blocks another run's `stream`/`reply`/`stop`.
+
 ## [0.14.0] - 2026-06-08
 
 - Added `coaching` (ADR-0092 D4 / packet 09 §3e): a rules-based session coach that emits advisory `PolicyHint`s from a pure `coach(&CoachingSnapshot)` over session/usage state — `stale_session` (large token context / many messages / long runtime → start fresh), `high_cost_session` (grounded exact/derived spend over a threshold), and `estimate_only_spend` (premium-request backends; figures are approximate). Advisory only — never emits a `Block` severity (ADR-0092 D2/D4 warning-only posture); the grounded-spend rule excludes estimated USD so a guess can't drive a warning. No learned model (the per-user learned coach stays a gated v2 decision). The routing-dependent rules (`routing_hint`/`mode_fit`/`subscription_optimization`) are deferred to land with the routing engine (§3d).
