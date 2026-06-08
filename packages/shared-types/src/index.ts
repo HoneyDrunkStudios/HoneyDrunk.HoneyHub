@@ -20,7 +20,16 @@ export interface CapabilityFlags {
   resume_session: boolean;
   stop_signal: boolean;
   structured_events: boolean;
+  /** Backend reports an exact cost (tokens + USD), taken directly. */
   usage_exact: boolean;
+  /**
+   * Backend reports exact token counts but no USD, so the dollar value is derived
+   * from the operator-configurable rate table (ADR-0092 D2). At most one of the
+   * three usage flags is set; the signal's own `fidelity` tag remains the
+   * load-bearing honesty mechanism, these flags are the coarse handshake hint.
+   */
+  usage_derived: boolean;
+  /** Backend exposes neither exact USD nor exact tokens, so figures are estimated. */
   usage_estimated: boolean;
 }
 
@@ -251,7 +260,38 @@ export const defaultClaudeCapabilities: CapabilityFlags = {
   stop_signal: true,
   structured_events: true,
   usage_exact: true,
+  usage_derived: false,
   usage_estimated: false
+};
+
+/**
+ * `codex.local`: message-level streaming, resume-based reply (follow-up-run path),
+ * stop + resume, exact tokens with a derived (rate-table) USD.
+ */
+export const defaultCodexCapabilities: CapabilityFlags = {
+  streaming_output: true,
+  interactive_reply: false,
+  resume_session: true,
+  stop_signal: true,
+  structured_events: true,
+  usage_exact: false,
+  usage_derived: true,
+  usage_estimated: false
+};
+
+/**
+ * `copilot.local`: token-level streaming, resume-based reply, stop + resume, and
+ * premium-requests + duration only, so token/USD figures are estimated.
+ */
+export const defaultCopilotCapabilities: CapabilityFlags = {
+  streaming_output: true,
+  interactive_reply: false,
+  resume_session: true,
+  stop_signal: true,
+  structured_events: true,
+  usage_exact: false,
+  usage_derived: false,
+  usage_estimated: true
 };
 
 export const oneShotCapabilities: CapabilityFlags = {
@@ -261,5 +301,6 @@ export const oneShotCapabilities: CapabilityFlags = {
   stop_signal: false,
   structured_events: false,
   usage_exact: false,
+  usage_derived: false,
   usage_estimated: true
 };

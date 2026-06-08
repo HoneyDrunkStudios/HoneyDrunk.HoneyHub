@@ -164,13 +164,25 @@ where
     ) -> Result<ReplyOutcome, BridgeError> {
         let created_at = created_at.into();
         let current = self.run(run_id)?.record.run.state.clone();
-        if current.is_terminal() {
-            return Err(BridgeError::new(
-                "terminal_run_reply",
-                format!("cannot reply to terminal run {run_id} in state {current:?}"),
-            ));
-        }
         let capabilities = self.adapter.capabilities();
+        if current.is_terminal() {
+            // A resume-based backend (interactive_reply = false + resume_session) can
+            // continue a **cleanly completed** turn by starting a follow-up run that
+            // resumes the vendor session, so a `Completed` run is a valid reply target
+            // there. Every other case is rejected: an interactive backend cannot write
+            // into an exited process, and a run that ended in `Failed`/`Cancelled`/
+            // `Stopped` is not a sound base to resume from (the session may be broken
+            // or was intentionally torn down).
+            let resumable_completed = current == DispatchRunState::Completed
+                && !capabilities.interactive_reply
+                && capabilities.resume_session;
+            if !resumable_completed {
+                return Err(BridgeError::new(
+                    "terminal_run_reply",
+                    format!("cannot reply to terminal run {run_id} in state {current:?}"),
+                ));
+            }
+        }
         if capabilities.interactive_reply {
             self.adapter.reply(run_id, text)?;
             let managed = self.run_mut(run_id)?;
@@ -1241,5 +1253,103 @@ mod tests {
         assert_eq!(managed.record.run.state, DispatchRunState::Completed);
         assert_eq!(error.code, "terminal_run_reply");
         assert!(runtime.adapter.replies.borrow().is_empty());
+    }
+
+    #[test]
+    fn terminal_resume_based_run_replies_via_follow_up() {
+        // A resume-based backend (codex.local / copilot.local: interactive_reply
+        // false + resume_session) ends each turn as a completed `exec` process, so a
+        // reply to a *terminal* run must start a follow-up run that resumes the
+        // session — not be rejected as `terminal_run_reply` (which only applies to
+        // interactive backends that cannot write into an exited process).
+        let (allowlist_root, workspace_root) = workspace_paths();
+        let mut capabilities = CapabilityFlags::claude_local();
+        capabilities.interactive_reply = false; // resume_session stays true
+        let adapter = FakeAdapter::new(capabilities);
+        let mut runtime = BridgeRuntime::new(
+            adapter,
+            WorkspaceAllowlist::new(vec![allowlist_root]),
+            BackendAllowlist::new(vec![AgentBackend::ClaudeLocal]),
+        );
+        let handle = runtime
+            .start(request(&workspace_root), "2026-06-07T12:00:00Z")
+            .expect("run starts");
+        runtime
+            .handle_process_exit(
+                &handle.run_id,
+                ProcessExitStatus {
+                    run_id: handle.run_id.clone(),
+                    code: Some(0),
+                    signal: None,
+                    success: true,
+                    exited_at: "2026-06-07T12:01:00Z".to_string(),
+                },
+            )
+            .expect("exit completes the turn");
+        assert!(runtime
+            .run(&handle.run_id)
+            .expect("run exists")
+            .record
+            .run
+            .state
+            .is_terminal());
+
+        let outcome = runtime
+            .reply(&handle.run_id, "continue", "2026-06-07T12:02:00Z")
+            .expect("terminal resume-based run replies via a follow-up run");
+        assert!(matches!(outcome, ReplyOutcome::FollowUpRunStarted(_)));
+        let start_requests = runtime.adapter.start_requests.borrow();
+        assert_eq!(start_requests.len(), 2);
+        assert_eq!(
+            start_requests[1].follow_up_to_run_id,
+            Some(handle.run_id.clone())
+        );
+    }
+
+    #[test]
+    fn failed_terminal_run_rejects_reply_even_on_resume_based_backend() {
+        // The resume-based follow-up path is only valid for a cleanly `Completed`
+        // run; a run that ended in a non-success terminal state (here `Failed`) is not
+        // a sound base to resume from, so the reply is still rejected.
+        let (allowlist_root, workspace_root) = workspace_paths();
+        let mut capabilities = CapabilityFlags::claude_local();
+        capabilities.interactive_reply = false; // resume_session stays true
+        let adapter = FakeAdapter::new(capabilities);
+        let mut runtime = BridgeRuntime::new(
+            adapter,
+            WorkspaceAllowlist::new(vec![allowlist_root]),
+            BackendAllowlist::new(vec![AgentBackend::ClaudeLocal]),
+        );
+        let handle = runtime
+            .start(request(&workspace_root), "2026-06-07T12:00:00Z")
+            .expect("run starts");
+        runtime
+            .handle_process_exit(
+                &handle.run_id,
+                ProcessExitStatus {
+                    run_id: handle.run_id.clone(),
+                    code: Some(1),
+                    signal: None,
+                    success: false,
+                    exited_at: "2026-06-07T12:01:00Z".to_string(),
+                },
+            )
+            .expect("non-zero exit fails the run");
+        assert_eq!(
+            runtime
+                .run(&handle.run_id)
+                .expect("run exists")
+                .record
+                .run
+                .state,
+            DispatchRunState::Failed
+        );
+
+        let error = runtime
+            .reply(&handle.run_id, "continue", "2026-06-07T12:02:00Z")
+            .expect_err("a failed terminal run is not a valid reply target");
+        assert_eq!(error.code, "terminal_run_reply");
+        // No follow-up run was started.
+        assert_eq!(runtime.adapter.start_requests.borrow().len(), 1);
     }
 }
