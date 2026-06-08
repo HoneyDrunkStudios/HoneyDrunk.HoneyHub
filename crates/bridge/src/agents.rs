@@ -174,14 +174,16 @@ fn build_definition(
 }
 
 /// The workspace root's final path component, for disambiguating same-named agents
-/// across workspaces without exposing the absolute path. Falls back to the whole
-/// root only when it has no final component (e.g. a bare drive/`/`).
+/// across workspaces without exposing the absolute path. When the root has no final
+/// component (a bare `/` or drive root), fall back to an **opaque hash-derived**
+/// label rather than the raw absolute root — so the no-absolute-path posture holds
+/// even for those roots.
 fn workspace_label(workspace_root: &str) -> String {
     Path::new(workspace_root)
         .file_name()
         .and_then(|component| component.to_str())
-        .unwrap_or(workspace_root)
-        .to_string()
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("workspace-{}", &workspace_hash(workspace_root)[..8]))
 }
 
 /// A stable, opaque id for a workspace root (FNV-1a 64-bit, dependency-free and
@@ -338,6 +340,26 @@ mod tests {
         let agents = discover_agents_in_root(root.to_str().unwrap());
         assert!(agents.is_empty());
         let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn workspace_label_never_returns_a_rootless_absolute_path() {
+        // A normal root → its basename.
+        assert_eq!(
+            workspace_label("/home/user/HoneyDrunk.HoneyHub"),
+            "HoneyDrunk.HoneyHub"
+        );
+        // A root with no final component must NOT serialize the raw absolute root —
+        // it falls back to an opaque, hash-derived label. (`/` and `""` are rootless
+        // on every platform; a backslash is not a separator off Windows.)
+        for rootless in ["/", ""] {
+            let label = workspace_label(rootless);
+            assert_ne!(label, rootless, "must not echo the raw root {rootless:?}");
+            assert!(
+                label.starts_with("workspace-"),
+                "rootless root {rootless:?} should fall back to a hash label, got {label}"
+            );
+        }
     }
 
     #[test]
