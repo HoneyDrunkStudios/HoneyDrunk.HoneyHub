@@ -427,7 +427,8 @@ mod tests {
     #[test]
     fn serializes_usage_summary_query_as_fieldless_tagged_command() {
         // The query carries no payload; it must serialize as just the tag so the
-        // client can send a bare `{"kind":"usageSummary"}`.
+        // client can send a bare `{"kind":"usage_summary"}` (snake_case, per the
+        // enum's `rename_all`).
         let command = ClientCommand::UsageSummary;
         assert_eq!(
             serde_json::to_value(command).expect("command serializes"),

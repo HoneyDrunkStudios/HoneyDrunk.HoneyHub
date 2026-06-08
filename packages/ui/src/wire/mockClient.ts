@@ -155,7 +155,10 @@ export class MockWireClient implements WireClient {
       id: `event-${this.sequence}`,
       sessionId: "",
       runId: "",
-      sequence: this.sequence,
+      // Device-scoped event: sequence is 0 to match the bridge's
+      // `BridgeEvent::usage_summary` contract (it is not part of any run's ordered
+      // stream). The id still uses the counter so it stays unique.
+      sequence: 0,
       createdAt: this.createdAt,
       payload: { kind: "usage_summary", summary }
     };
