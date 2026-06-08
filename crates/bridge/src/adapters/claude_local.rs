@@ -11,14 +11,16 @@
 //! `fidelity: exact` `UsageSignal`, taken directly with no rate-table computation
 //! (ADR-0092 D2).
 //!
-//! The crate stays clock-free (timestamps come from the caller everywhere else),
-//! so the adapter takes an injected [`EventClock`] for stamping the events it
-//! mints as the process streams. [`default_event_clock`] is a convenience for
-//! production; tests inject a deterministic clock.
+//! All the child-process mechanics (spawn, stderr drain, stdout reader thread,
+//! process-tree kill, exit detection) live in the shared [`super::child_run`]
+//! driver; this module is just the Claude-specific strategy: the command, the
+//! capability flags, the `stream-json` line parsing, and the same-process reply
+//! framing.
 
 use crate::adapter::{
     AgentBackend, AgentBackendAdapter, BridgeError, CapabilityFlags, RunHandle, StartRunRequest,
 };
+use crate::adapters::child_run::{ChildRun, EventClock, RunSlot};
 use crate::artifact::{ArtifactKind, DispatchArtifact};
 use crate::session::{
     DispatchMessage, DispatchMessageRole, DispatchRunState, UsageConfidence, UsageFidelity,
@@ -27,51 +29,9 @@ use crate::session::{
 use crate::wire::{BridgeEvent, BridgeStatusEvent};
 use serde_json::Value;
 use std::collections::HashMap;
-use std::io::{BufRead, BufReader, Write};
-use std::process::{Child, ChildStdin, Command, Stdio};
-use std::sync::mpsc::{channel, Receiver, TryRecvError};
-use std::sync::{Arc, Mutex, MutexGuard};
-use std::thread::JoinHandle;
+use std::process::Command;
+use std::sync::{Mutex, MutexGuard};
 use uuid::Uuid;
-
-/// A timestamp source for events the adapter mints while streaming. Injected so
-/// the bridge crate stays free of a wall-clock dependency and tests stay
-/// deterministic.
-pub type EventClock = Arc<dyn Fn() -> String + Send + Sync>;
-
-/// A production clock that emits RFC3339 UTC timestamps (e.g.
-/// `2026-06-07T12:00:00.000Z`) via the shared [`crate::clock`] helper, so
-/// adapter-minted events sort correctly against caller-supplied timestamps during
-/// reconnect replay. A host may still inject its own clock.
-pub fn default_event_clock() -> EventClock {
-    Arc::new(crate::clock::now_rfc3339)
-}
-
-struct RunProcess {
-    session_id: String,
-    child: Child,
-    stdin: Option<ChildStdin>,
-    lines: Receiver<String>,
-    reader: Option<JoinHandle<()>>,
-    /// The backend's own session id, captured from `system`/`result` events so a
-    /// later `resume` can re-attach to the same Claude Code session.
-    backend_session_id: Option<String>,
-    /// Set once the process exit has been observed and its terminal status events
-    /// emitted, so a later `stream` poll does not emit them again.
-    finished: bool,
-}
-
-impl Drop for RunProcess {
-    fn drop(&mut self) {
-        // Closing stdin signals EOF; tearing down the process tree + reaping
-        // prevents a zombie, and the reader thread ends once stdout closes.
-        self.stdin.take();
-        kill_process_tree(&mut self.child);
-        if let Some(reader) = self.reader.take() {
-            let _ = reader.join();
-        }
-    }
-}
 
 /// The `claude.local` backend adapter. Methods take `&self` (the trait contract),
 /// so the live child processes live behind a `Mutex` for interior mutability.
@@ -79,7 +39,7 @@ pub struct ClaudeLocalAdapter {
     program: String,
     model: Option<String>,
     clock: EventClock,
-    runs: Mutex<HashMap<String, RunProcess>>,
+    runs: Mutex<HashMap<String, RunSlot>>,
 }
 
 impl ClaudeLocalAdapter {
@@ -94,7 +54,7 @@ impl ClaudeLocalAdapter {
         }
     }
 
-    fn lock_runs(&self) -> Result<MutexGuard<'_, HashMap<String, RunProcess>>, BridgeError> {
+    fn lock_runs(&self) -> Result<MutexGuard<'_, HashMap<String, RunSlot>>, BridgeError> {
         self.runs
             .lock()
             .map_err(|_| BridgeError::new("lock_poisoned", "claude adapter lock was poisoned"))
@@ -115,123 +75,19 @@ impl ClaudeLocalAdapter {
         }
         command
     }
-
-    fn spawn(
-        mut command: Command,
-    ) -> Result<(Child, ChildStdin, Receiver<String>, JoinHandle<()>), BridgeError> {
-        command
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-
-        // Put the child in its own process group so `stop` can signal the whole
-        // tree (the CLI may spawn tool/MCP subprocesses), matching the Windows
-        // `taskkill /T` behaviour.
-        #[cfg(unix)]
-        {
-            use std::os::unix::process::CommandExt;
-            // SAFETY: `setpgid(0, 0)` runs in the forked child before exec; it only
-            // sets the child's process group and is async-signal-safe.
-            unsafe {
-                command.pre_exec(|| {
-                    if libc::setpgid(0, 0) == -1 {
-                        return Err(std::io::Error::last_os_error());
-                    }
-                    Ok(())
-                });
-            }
-        }
-
-        let mut child = command.spawn().map_err(|error| {
-            BridgeError::new(
-                "backend_unavailable",
-                format!("failed to launch the claude CLI: {error}"),
-            )
-        })?;
-        let stdin = child.stdin.take().ok_or_else(|| {
-            BridgeError::new("backend_unavailable", "claude CLI exposed no stdin")
-        })?;
-        let stdout = child.stdout.take().ok_or_else(|| {
-            BridgeError::new("backend_unavailable", "claude CLI exposed no stdout")
-        })?;
-
-        // Drain stderr on its own thread so a chatty CLI cannot fill the stderr
-        // pipe buffer and block the child while we are reading stdout.
-        if let Some(stderr) = child.stderr.take() {
-            std::thread::spawn(move || {
-                let mut reader = BufReader::new(stderr);
-                let mut sink = std::io::sink();
-                let _ = std::io::copy(&mut reader, &mut sink);
-            });
-        }
-
-        let (sender, receiver) = channel();
-        let reader = std::thread::spawn(move || {
-            let buffered = BufReader::new(stdout);
-            for line in buffered.lines() {
-                match line {
-                    Ok(line) => {
-                        if sender.send(line).is_err() {
-                            break;
-                        }
-                    }
-                    Err(_) => break,
-                }
-            }
-        });
-        Ok((child, stdin, receiver, reader))
-    }
 }
 
-fn write_user_line(stdin: &mut ChildStdin, text: &str) -> Result<(), BridgeError> {
+/// Write a Claude `user` turn frame to the run's stdin, keeping the same process
+/// alive (the live-reply mechanism that distinguishes Claude from the resume-based
+/// backends).
+fn write_user_line(run: &mut ChildRun, text: &str) -> Result<(), BridgeError> {
     let frame = serde_json::json!({
         "type": "user",
         "message": { "role": "user", "content": text }
     });
     let line = serde_json::to_string(&frame)
         .map_err(|error| BridgeError::new("encode_error", error.to_string()))?;
-    stdin
-        .write_all(line.as_bytes())
-        .and_then(|_| stdin.write_all(b"\n"))
-        .and_then(|_| stdin.flush())
-        .map_err(|error| {
-            BridgeError::new(
-                "io_error",
-                format!("failed to write to claude stdin: {error}"),
-            )
-        })
-}
-
-#[cfg(windows)]
-fn kill_process_tree(child: &mut Child) {
-    // `Child::kill` only kills the immediate process on Windows; `taskkill /T`
-    // takes the whole tree the CLI may have spawned. Both are best-effort: an
-    // already-exited process simply returns an error we ignore.
-    let _ = Command::new("taskkill")
-        .args(["/PID", &child.id().to_string(), "/T", "/F"])
-        .output();
-    let _ = child.kill();
-    let _ = child.wait();
-}
-
-#[cfg(unix)]
-fn kill_process_tree(child: &mut Child) {
-    // The child leads its own process group (set via `pre_exec`), so signalling
-    // the group id (equal to the child pid) tears down the whole tree rather than
-    // just the direct child. Best-effort: an already-dead group yields ESRCH.
-    let pid = child.id() as libc::pid_t;
-    // SAFETY: `killpg` only sends a signal to a process group; it touches no memory.
-    unsafe {
-        libc::killpg(pid, libc::SIGKILL);
-    }
-    let _ = child.kill();
-    let _ = child.wait();
-}
-
-#[cfg(not(any(windows, unix)))]
-fn kill_process_tree(child: &mut Child) {
-    let _ = child.kill();
-    let _ = child.wait();
+    run.write_stdin_line(&line)
 }
 
 fn assistant_text(value: &Value) -> String {
@@ -485,27 +341,15 @@ impl AgentBackendAdapter for ClaudeLocalAdapter {
 
         let mut command = self.base_command();
         command.current_dir(&request.workspace_root);
-        let (child, stdin, lines, reader) = Self::spawn(command)?;
-        let process_id = child.id();
-
-        let mut run = RunProcess {
-            session_id: request.session.id.clone(),
-            child,
-            stdin: Some(stdin),
-            lines,
-            reader: Some(reader),
-            backend_session_id: None,
-            finished: false,
-        };
+        let mut run = ChildRun::spawn(command, request.session.id.clone(), None)?;
+        let process_id = run.process_id();
 
         // Seed the first turn with the task, keeping stdin OPEN so later replies
         // are same-process live input rather than a resume. If the seed write
         // fails, dropping `run` here kills and reaps the child (no orphan).
-        if let Some(stdin) = run.stdin.as_mut() {
-            write_user_line(stdin, &request.task)?;
-        }
+        write_user_line(&mut run, &request.task)?;
 
-        self.lock_runs()?.insert(run_id.clone(), run);
+        self.lock_runs()?.insert(run_id.clone(), RunSlot::live(run));
 
         Ok(RunHandle {
             run_id,
@@ -515,19 +359,15 @@ impl AgentBackendAdapter for ClaudeLocalAdapter {
 
     fn stream(&self, run_id: &str) -> Result<Vec<BridgeEvent>, BridgeError> {
         let mut guard = self.lock_runs()?;
-        let run = guard
+        let slot = guard
             .get_mut(run_id)
             .ok_or_else(|| BridgeError::new("run_not_found", format!("run {run_id} not found")))?;
+        // A retired (completed) run has nothing left to stream.
+        let Some(run) = slot.as_live_mut() else {
+            return Ok(Vec::new());
+        };
 
-        let mut lines = Vec::new();
-        loop {
-            match run.lines.try_recv() {
-                Ok(line) if line.trim().is_empty() => continue,
-                Ok(line) => lines.push(line),
-                Err(TryRecvError::Empty) | Err(TryRecvError::Disconnected) => break,
-            }
-        }
-
+        let lines = run.drain_lines();
         let session_id = run.session_id.clone();
         let mut events = Vec::new();
         for line in lines {
@@ -540,35 +380,70 @@ impl AgentBackendAdapter for ClaudeLocalAdapter {
             ));
         }
 
-        // Once the process has exited, emit a terminal status transition (exactly
-        // once) so the run does not sit in `running`/`needs_input` forever after
-        // the CLI finishes. A clean exit finalizes then completes; a non-zero exit
-        // fails.
-        if !run.finished {
-            if let Ok(Some(status)) = run.child.try_wait() {
-                run.finished = true;
-                let now = (self.clock)();
-                if status.success() {
-                    events.push(terminal_status(
-                        &session_id,
+        // If the process has exited, retire the run (capturing the vendor session id,
+        // which was set early from the `system`/`result` events) and take ownership of
+        // the child. The remaining work — the bounded final-line drain and the child
+        // drop, which joins the stdout reader thread — then happens **off** the runs
+        // lock, so it never blocks another run's `stream`/`reply`/`stop`.
+        let exit = run.poll_exit();
+        let retired = if exit.is_some() { slot.retire() } else { None };
+        drop(guard);
+
+        if let Some(success) = exit {
+            let mut tail_session_id = None;
+            if let Some(mut child) = retired {
+                // Drain the final lines the CLI flushed on exit (the closing `result`
+                // line carries the exact tokens + USD) before the child is dropped.
+                for line in child.drain_remaining(std::time::Duration::from_secs(2)) {
+                    events.extend(parse_line(
+                        &self.clock,
+                        &line,
                         run_id,
-                        &now,
-                        DispatchRunState::Finalizing,
-                    ));
-                    events.push(terminal_status(
                         &session_id,
-                        run_id,
-                        &now,
-                        DispatchRunState::Completed,
-                    ));
-                } else {
-                    events.push(terminal_status(
-                        &session_id,
-                        run_id,
-                        &now,
-                        DispatchRunState::Failed,
+                        &mut child.backend_session_id,
                     ));
                 }
+                // The vendor session id is normally captured early (the `system`
+                // event), but if it only arrived in this drained tail, carry it back
+                // to the retired slot below so a later resume still sees it.
+                tail_session_id = child.backend_session_id.clone();
+                // `child` drops here, off-lock: reader-thread join (and the one-time
+                // tree kill that forces stdout EOF) happen without the lock held.
+            }
+
+            // Sync any tail-discovered vendor session id into the retired `Done` slot.
+            if tail_session_id.is_some() {
+                if let Ok(mut guard) = self.lock_runs() {
+                    if let Some(slot) = guard.get_mut(run_id) {
+                        slot.set_done_backend_session_id(tail_session_id);
+                    }
+                }
+            }
+
+            // Emit the terminal transition (exactly once) after the tail usage line,
+            // so ordering is [..usage, finalizing, completed]. A clean exit finalizes
+            // then completes; a non-zero exit fails.
+            let now = (self.clock)();
+            if success {
+                events.push(terminal_status(
+                    &session_id,
+                    run_id,
+                    &now,
+                    DispatchRunState::Finalizing,
+                ));
+                events.push(terminal_status(
+                    &session_id,
+                    run_id,
+                    &now,
+                    DispatchRunState::Completed,
+                ));
+            } else {
+                events.push(terminal_status(
+                    &session_id,
+                    run_id,
+                    &now,
+                    DispatchRunState::Failed,
+                ));
             }
         }
 
@@ -577,26 +452,27 @@ impl AgentBackendAdapter for ClaudeLocalAdapter {
 
     fn reply(&self, run_id: &str, text: &str) -> Result<(), BridgeError> {
         let mut guard = self.lock_runs()?;
-        let run = guard
+        let slot = guard
             .get_mut(run_id)
             .ok_or_else(|| BridgeError::new("run_not_found", format!("run {run_id} not found")))?;
-        let stdin = run.stdin.as_mut().ok_or_else(|| {
-            BridgeError::new("reply_unavailable", "claude stdin is closed for this run")
+        let run = slot.as_live_mut().ok_or_else(|| {
+            BridgeError::new("reply_unavailable", format!("run {run_id} has completed"))
         })?;
-        write_user_line(stdin, text)
+        write_user_line(run, text)
     }
 
     fn stop(&self, run_id: &str) -> Result<(), BridgeError> {
-        // Remove the run so its `Child`, reader thread, and channel are released
-        // (no per-stopped-run leak). Killing the tree before drop covers the
-        // Windows case where `Child::kill` alone would miss child processes; the
-        // `RunProcess` drop then reaps and joins.
-        let mut run = self
+        // Remove the run so its child, reader thread, and channel are released (no
+        // per-stopped-run leak). Killing the tree (idempotently) covers the Windows
+        // case where `Child::kill` alone would miss child processes; the `ChildRun`
+        // drop then joins the reader. A retired run has no live child to kill.
+        let mut slot = self
             .lock_runs()?
             .remove(run_id)
             .ok_or_else(|| BridgeError::new("run_not_found", format!("run {run_id} not found")))?;
-        run.stdin.take();
-        kill_process_tree(&mut run.child);
+        if let Some(run) = slot.as_live_mut() {
+            run.close_and_kill();
+        }
         Ok(())
     }
 
@@ -604,21 +480,14 @@ impl AgentBackendAdapter for ClaudeLocalAdapter {
         let run_id = Uuid::new_v4().to_string();
         let mut command = self.base_command();
         command.arg("-r").arg(session_id_or_transcript);
-        let (child, stdin, lines, reader) = Self::spawn(command)?;
-        let process_id = child.id();
+        let run = ChildRun::spawn(
+            command,
+            session_id_or_transcript.to_string(),
+            Some(session_id_or_transcript.to_string()),
+        )?;
+        let process_id = run.process_id();
 
-        self.lock_runs()?.insert(
-            run_id.clone(),
-            RunProcess {
-                session_id: session_id_or_transcript.to_string(),
-                child,
-                stdin: Some(stdin),
-                lines,
-                reader: Some(reader),
-                backend_session_id: Some(session_id_or_transcript.to_string()),
-                finished: false,
-            },
-        );
+        self.lock_runs()?.insert(run_id.clone(), RunSlot::live(run));
 
         Ok(RunHandle {
             run_id,
@@ -630,6 +499,7 @@ impl AgentBackendAdapter for ClaudeLocalAdapter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
 
     fn test_clock() -> EventClock {
         Arc::new(|| "2026-06-07T12:00:00Z".to_string())
