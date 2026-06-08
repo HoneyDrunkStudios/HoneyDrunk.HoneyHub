@@ -19,7 +19,6 @@
 
 use crate::adapter::AgentBackend;
 use crate::session::{PolicyHint, PolicyHintSeverity, UsageFidelity, UsageSignal};
-use uuid::Uuid;
 
 /// A session's context is "large" past any of these (tunable). Mirrors the UI
 /// diagnostics thresholds; crossing one yields a `stale_session` hint.
@@ -35,8 +34,10 @@ pub const HIGH_COST_USD: f64 = 5.0;
 /// crate stays clock-free and the rules stay deterministic and testable.
 pub struct CoachingSnapshot<'a> {
     pub session_id: &'a str,
-    /// The current run, if any — stamped onto hints so the store (which requires a
-    /// run id) can persist them.
+    /// The current run, if any. Stamped onto each hint. Note the local store only
+    /// persists a hint that carries a `run_id` (`put_policy_hint` rejects a hint with
+    /// none); a session-level hint with no run is still valid to surface in the UI but
+    /// is not persisted by that path until a run is attached.
     pub run_id: Option<&'a str>,
     pub backend: AgentBackend,
     pub message_count: usize,
@@ -92,7 +93,11 @@ fn hint(
     message: String,
 ) -> PolicyHint {
     PolicyHint {
-        id: Uuid::new_v4().to_string(),
+        // Deterministic id: one active hint per (session, code). Recomputing the same
+        // snapshot yields the same id, so re-emitting a hint updates rather than
+        // duplicates it (idempotent persistence/replay). Keeps `coach` fully pure — no
+        // randomness or clock — as the module contract claims.
+        id: format!("coach:{}:{}", snapshot.session_id, code),
         session_id: snapshot.session_id.to_string(),
         run_id: snapshot.run_id.map(str::to_string),
         code: code.to_string(),
@@ -155,8 +160,11 @@ pub fn coach(snapshot: &CoachingSnapshot) -> Vec<PolicyHint> {
             snapshot,
             "estimate_only_spend",
             PolicyHintSeverity::Info,
-            "Usage for this session is estimated (this backend reports premium \
-             requests, not exact tokens), so spend figures are approximate."
+            // Backend-agnostic: `all_estimated()` only tells us the fidelity is
+            // estimated, not which proxy produced it, so the wording does not claim a
+            // specific unit (e.g. premium requests).
+            "Usage for this session is estimated, so the spend figures shown are \
+             approximate rather than exact."
                 .to_string(),
         ));
     }
@@ -264,6 +272,21 @@ mod tests {
         assert!(!codes(&hints).contains(&"high_cost_session"));
         assert_eq!(codes(&hints), ["estimate_only_spend"]);
         assert_eq!(hints[0].severity, PolicyHintSeverity::Info);
+    }
+
+    #[test]
+    fn hints_are_deterministic_across_calls() {
+        // Same snapshot in → identical hints out (ids included), so re-running is
+        // idempotent for persistence/replay. One active hint per (session, code).
+        let usage = [usage(
+            UsageFidelity::Exact,
+            STALE_SESSION_TOKENS + 1,
+            Some(0.5),
+        )];
+        let first = coach(&snapshot(2, Some(1.0), &usage));
+        let second = coach(&snapshot(2, Some(1.0), &usage));
+        assert_eq!(first, second);
+        assert_eq!(first[0].id, "coach:s1:stale_session");
     }
 
     #[test]
