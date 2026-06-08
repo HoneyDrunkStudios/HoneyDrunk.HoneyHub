@@ -15,6 +15,24 @@ fn emit(out: &mut impl Write, line: &str) {
     let _ = out.flush();
 }
 
+/// Escape a string for embedding inside a JSON string literal (std-only), so a delta
+/// containing quotes, backslashes, or control characters still produces valid JSONL.
+fn json_escape(input: &str) -> String {
+    let mut escaped = String::with_capacity(input.len());
+    for ch in input.chars() {
+        match ch {
+            '"' => escaped.push_str("\\\""),
+            '\\' => escaped.push_str("\\\\"),
+            '\n' => escaped.push_str("\\n"),
+            '\r' => escaped.push_str("\\r"),
+            '\t' => escaped.push_str("\\t"),
+            c if (c as u32) < 0x20 => escaped.push_str(&format!("\\u{:04x}", c as u32)),
+            c => escaped.push(c),
+        }
+    }
+    escaped
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let resumed = args.iter().any(|arg| arg == "--resume");
@@ -35,7 +53,10 @@ fn main() {
     for delta in deltas {
         emit(
             &mut out,
-            &format!(r#"{{"type":"assistant.message_delta","delta":"{delta}"}}"#),
+            &format!(
+                r#"{{"type":"assistant.message_delta","delta":"{}"}}"#,
+                json_escape(delta)
+            ),
         );
     }
 

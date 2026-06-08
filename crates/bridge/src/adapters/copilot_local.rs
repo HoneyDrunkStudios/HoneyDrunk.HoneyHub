@@ -55,12 +55,51 @@ struct CopilotRun {
     usage_emitted: bool,
 }
 
+/// A run's slot: the live `CopilotRun`, or a retired record keeping only the captured
+/// vendor session id. Mirrors [`super::child_run::RunSlot`] for the composed copilot
+/// run type (which carries extra estimate state the shared `ChildRun`-only slot cannot
+/// hold). Retiring a finished run frees the child handle, reader thread, and channel in
+/// a long-lived host while still letting a follow-up turn resume the session.
+enum CopilotSlot {
+    // Boxed so the large live variant does not inflate every map entry.
+    Live(Box<CopilotRun>),
+    Done { backend_session_id: Option<String> },
+}
+
+impl CopilotSlot {
+    fn live(run: CopilotRun) -> Self {
+        CopilotSlot::Live(Box::new(run))
+    }
+
+    fn backend_session_id(&self) -> Option<&str> {
+        match self {
+            CopilotSlot::Live(run) => run.child.backend_session_id.as_deref(),
+            CopilotSlot::Done { backend_session_id } => backend_session_id.as_deref(),
+        }
+    }
+
+    fn as_live_mut(&mut self) -> Option<&mut CopilotRun> {
+        match self {
+            CopilotSlot::Live(run) => Some(run),
+            CopilotSlot::Done { .. } => None,
+        }
+    }
+
+    fn retire(&mut self) {
+        if let CopilotSlot::Live(run) = self {
+            *self = CopilotSlot::Done {
+                backend_session_id: run.child.backend_session_id.clone(),
+            };
+        }
+    }
+}
+
 /// The `copilot.local` backend adapter. Live runs live behind a `Mutex` for the
 /// interior mutability the `&self` trait contract requires.
 pub struct CopilotLocalAdapter {
     program: String,
     clock: EventClock,
-    runs: Mutex<HashMap<String, CopilotRun>>,
+    runs: Mutex<HashMap<String, CopilotSlot>>,
 }
 
 impl CopilotLocalAdapter {
@@ -74,7 +113,7 @@ impl CopilotLocalAdapter {
         }
     }
 
-    fn lock_runs(&self) -> Result<MutexGuard<'_, HashMap<String, CopilotRun>>, BridgeError> {
+    fn lock_runs(&self) -> Result<MutexGuard<'_, HashMap<String, CopilotSlot>>, BridgeError> {
         self.runs
             .lock()
             .map_err(|_| BridgeError::new("lock_poisoned", "copilot adapter lock was poisoned"))
@@ -99,7 +138,7 @@ impl CopilotLocalAdapter {
         self.lock_runs().ok().and_then(|guard| {
             guard
                 .get(run_id)
-                .and_then(|run| run.child.backend_session_id.clone())
+                .and_then(|slot| slot.backend_session_id().map(str::to_string))
         })
     }
 }
@@ -332,12 +371,12 @@ impl AgentBackendAdapter for CopilotLocalAdapter {
 
         self.lock_runs()?.insert(
             run_id.clone(),
-            CopilotRun {
+            CopilotSlot::live(CopilotRun {
                 child,
                 input_chars: request.task.chars().count(),
                 output_chars: 0,
                 usage_emitted: false,
-            },
+            }),
         );
 
         Ok(RunHandle {
@@ -348,9 +387,13 @@ impl AgentBackendAdapter for CopilotLocalAdapter {
 
     fn stream(&self, run_id: &str) -> Result<Vec<BridgeEvent>, BridgeError> {
         let mut guard = self.lock_runs()?;
-        let run = guard
+        let slot = guard
             .get_mut(run_id)
             .ok_or_else(|| BridgeError::new("run_not_found", format!("run {run_id} not found")))?;
+        // A retired (completed) turn has nothing left to stream.
+        let Some(run) = slot.as_live_mut() else {
+            return Ok(Vec::new());
+        };
 
         let lines = run.child.drain_lines();
         let session_id = run.child.session_id.clone();
@@ -426,6 +469,9 @@ impl AgentBackendAdapter for CopilotLocalAdapter {
                     DispatchRunState::Failed,
                 ));
             }
+            // Retire the finished turn so its child handle/threads/channel are freed;
+            // the captured vendor session id survives for a follow-up turn.
+            slot.retire();
         }
 
         Ok(events)
@@ -442,11 +488,13 @@ impl AgentBackendAdapter for CopilotLocalAdapter {
     }
 
     fn stop(&self, run_id: &str) -> Result<(), BridgeError> {
-        let mut run = self
+        let mut slot = self
             .lock_runs()?
             .remove(run_id)
             .ok_or_else(|| BridgeError::new("run_not_found", format!("run {run_id} not found")))?;
-        run.child.close_and_kill();
+        if let Some(run) = slot.as_live_mut() {
+            run.child.close_and_kill();
+        }
         Ok(())
     }
 
@@ -462,12 +510,12 @@ impl AgentBackendAdapter for CopilotLocalAdapter {
 
         self.lock_runs()?.insert(
             run_id.clone(),
-            CopilotRun {
+            CopilotSlot::live(CopilotRun {
                 child,
                 input_chars: 0,
                 output_chars: 0,
                 usage_emitted: false,
-            },
+            }),
         );
 
         Ok(RunHandle {
