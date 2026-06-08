@@ -132,6 +132,31 @@ opt-in.
 `BridgeTrustConfig` bundles the pairing registry and both allowlists into one
 serializable, local-only unit for the store packet (07) to persist.
 
+## Local Store and Notifications
+
+`store::LocalStore` persists the session model **local-first** (ADR-0092 D1): a
+`store.json` document holds structured records (sessions, runs, control events,
+artifacts, usage signals, policy hints); transcript bodies live in separate
+`transcripts/<run_id>.jsonl` files. Nothing syncs off-device, and the model
+carries no central-store assumption. The storage **engine is `[Provisional]`** (a
+SQLite-class store is the eventual shape) — the file-backed document is the v1
+stand-in behind a stable API.
+
+Retention: active transcripts are kept until a run is terminal; a completed
+session's transcript is kept for a configurable window unless **pinned**, then
+pruned via `prune(cutoff)`; durable records (status/backend/repo, artifact links,
+usage totals, outcomes) are kept longer and carry no raw prompt/code. The window
+default is **30 days (`[Provisional]`)**, applied by the host, which passes the
+computed cutoff to `prune` (the crate stays clock-free).
+
+`notify` emits **state-only** notifications (ADR-0090 D7): `Notification` carries
+status/backend/repo/link only — by shape it cannot hold prompt text, code,
+secrets, stack traces, or full paths. Notifications fire on
+`needs_input`/`completed`/`failed`/`cancelled` and on a persisted PR artifact
+(`PR opened` — the adapter detects, this seam fires on the stored row). The
+in-app `NotificationCenter` is the Phase 2 transport; richer transports are an
+additive seam.
+
 ## Wire Protocol [Provisional]
 
 Protocol version: `honeyhub.bridge.v1`

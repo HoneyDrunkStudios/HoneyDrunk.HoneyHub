@@ -1,15 +1,19 @@
 import { useState } from "react";
-import type { DispatchRunState, UsageFidelity } from "@honeydrunk/honeyhub-types";
+import type { DispatchRunState, Notification, UsageFidelity } from "@honeydrunk/honeyhub-types";
 import { BridgeSettings } from "./BridgeSettings";
+import { NotificationList } from "./NotificationList";
 import "./styles.css";
 
 const sampleState: DispatchRunState = "created";
 const sampleFidelity: UsageFidelity = "exact";
 
-type View = "run" | "settings";
+type View = "run" | "settings" | "notifications";
 
 export function App() {
   const [view, setView] = useState<View>("run");
+  // Notifications arrive from the bridge once the run-screen transport is wired
+  // (packet 08); the surface itself is ready now.
+  const [notifications] = useState<Notification[]>([]);
 
   return (
     <main className="app-shell">
@@ -36,6 +40,13 @@ export function App() {
         >
           Bridge settings
         </button>
+        <button
+          type="button"
+          aria-pressed={view === "notifications"}
+          onClick={() => setView("notifications")}
+        >
+          Notifications
+        </button>
       </nav>
 
       {/* Both panels stay mounted; we toggle visibility so the bridge-settings
@@ -61,6 +72,10 @@ export function App() {
 
       <div hidden={view !== "settings"}>
         <BridgeSettings />
+      </div>
+
+      <div hidden={view !== "notifications"}>
+        <NotificationList notifications={notifications} />
       </div>
     </main>
   );

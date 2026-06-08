@@ -4,6 +4,7 @@ import {
   defaultClaudeCapabilities,
   oneShotCapabilities,
   wireProtocolVersion,
+  type Notification,
   type PairedDeviceView,
   type PairingGrant,
   type RunHandle,
@@ -74,6 +75,36 @@ test("pairing grants surface the token exactly once alongside a safe view", () =
 
   assert.equal(grant.token, "one-time-token");
   assert.equal("token" in grant.device, false);
+});
+
+test("notifications carry only state-only fields", () => {
+  const notification: Notification = {
+    id: "n1",
+    kind: "pr_opened",
+    sessionId: "s1",
+    runId: "r1",
+    backend: "claude.local",
+    link: "https://example.test/pr/1",
+    createdAt: "2026-06-07T12:00:00Z"
+  };
+
+  // Compile-time guard: if `Notification` ever gains a key outside this allowlist
+  // (e.g. `body`/`task`/`path`), `Exclude<...>` stops being `never` and this fails
+  // to type-check — the runtime `in` check alone could not catch that.
+  type AllowedKey =
+    | "id"
+    | "kind"
+    | "sessionId"
+    | "runId"
+    | "backend"
+    | "repo"
+    | "link"
+    | "createdAt";
+  type ExtraKeys = Exclude<keyof Notification, AllowedKey>;
+  const _noExtraKeys: ExtraKeys extends never ? true : never = true;
+  void _noExtraKeys;
+
+  assert.equal(notification.kind, "pr_opened");
 });
 
 test("run handles may carry adapter process metadata", () => {

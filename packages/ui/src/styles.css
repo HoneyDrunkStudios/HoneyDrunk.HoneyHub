@@ -205,6 +205,60 @@ h2 {
   gap: 8px;
 }
 
+.notifications {
+  display: grid;
+  gap: 16px;
+  padding: 24px;
+  border: 1px solid #2b3541;
+  border-radius: 8px;
+  background: #151b22;
+}
+
+.notifications-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.notifications-badge {
+  min-width: 28px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: #18212a;
+  border: 1px solid #38434f;
+  color: #f8d86a;
+  text-align: center;
+  font-size: 0.85rem;
+}
+
+.notifications ul {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.notification {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px;
+  border: 1px solid #2b3541;
+  border-radius: 6px;
+  background: #101820;
+}
+
+.notification-kind {
+  font-weight: 700;
+}
+
+.notification-backend,
+.notification-repo {
+  color: #b8c3cf;
+  font-size: 0.85rem;
+}
+
 @media (max-width: 720px) {
   .toolbar {
     align-items: flex-start;
