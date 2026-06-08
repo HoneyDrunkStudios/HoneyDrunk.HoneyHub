@@ -32,7 +32,7 @@ pub use process::{redact_command_line, ProcessExitStatus, ProcessHandle};
 pub use session::{
     DispatchControlEvent, DispatchControlEventKind, DispatchMessage, DispatchMessageRole,
     DispatchRun, DispatchRunRecord, DispatchRunState, DispatchSession, PolicyHint,
-    PolicyHintSeverity, UsageConfidence, UsageFidelity, UsageSignal,
+    PolicyHintSeverity, UsageConfidence, UsageFidelity, UsageRollup, UsageSignal, UsageSummary,
 };
 pub use store::{LocalStore, StoreError};
 pub use wire::{

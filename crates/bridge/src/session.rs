@@ -17,7 +17,7 @@ pub enum DispatchRunState {
     Cancelled,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum UsageFidelity {
     Exact,
@@ -141,6 +141,140 @@ pub struct UsageSignal {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub confidence: Option<UsageConfidence>,
     pub recorded_at: String,
+}
+
+/// A per-`(backend, fidelity)` rollup of usage across many turns. Backends with
+/// different usage fidelity (`exact` / `derived` / `estimated`) are kept in
+/// **separate** rollups so the spend view never sums a measured cost together with
+/// an estimate (ADR-0092 D2: each usage figure is load-bearing only with its
+/// fidelity attached).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UsageRollup {
+    pub backend: AgentBackend,
+    pub fidelity: UsageFidelity,
+    /// Number of usage signals (billed turns) folded into this rollup.
+    pub turn_count: u64,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub total_tokens: u64,
+    /// Summed USD across this rollup's signals that carried a cost. `None` when no
+    /// signal in the group reported USD — an `estimated` backend never does, and a
+    /// `derived` backend with no rate table wired does not either (USD is never
+    /// fabricated).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub total_usd: Option<f64>,
+    /// Summed premium requests (the real billing unit for `estimated` backends like
+    /// Copilot). `None` when no signal in the group reported a premium-request count.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub premium_requests: Option<u64>,
+    pub duration_ms: u64,
+}
+
+/// A device-wide "your spend" summary: usage rolled up per `(backend, fidelity)`,
+/// plus a **grounded** USD total that deliberately excludes estimated spend.
+/// Cross-session and local-only (ADR-0092 D1/D2) — nothing here syncs off-device.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UsageSummary {
+    /// Distinct sessions that contributed at least one run (supplied by the caller,
+    /// which knows the session set; the aggregator only sees signals).
+    pub session_count: u64,
+    /// Total billed turns across every rollup.
+    pub total_turns: u64,
+    pub rollups: Vec<UsageRollup>,
+    /// Sum of USD across **exact + derived** rollups only — a real dollar figure.
+    /// Estimated backends (Copilot bills premium requests, not a token cost) are
+    /// excluded so a guess can never inflate the headline spend. `None` when no
+    /// grounded signal reported USD.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub grounded_total_usd: Option<f64>,
+    /// Total premium requests across estimated backends — surfaced separately from
+    /// the grounded dollar figure, never folded into it.
+    pub total_premium_requests: u64,
+}
+
+impl UsageSummary {
+    /// Aggregate raw usage signals into a device-wide summary. Pure over its inputs
+    /// (the caller supplies the distinct `session_count`) so it is testable without a
+    /// store or a runtime, and shared by every producer of a summary (the live
+    /// runtime today; the persistent store when it is wired in). Rollups are ordered
+    /// deterministically by `(backend, fidelity)`.
+    pub fn from_signals(signals: &[UsageSignal], session_count: u64) -> Self {
+        use std::collections::BTreeMap;
+        let mut groups: BTreeMap<(AgentBackend, UsageFidelity), UsageRollup> = BTreeMap::new();
+        for signal in signals {
+            let rollup = groups
+                .entry((signal.backend.clone(), signal.fidelity.clone()))
+                .or_insert_with(|| UsageRollup {
+                    backend: signal.backend.clone(),
+                    fidelity: signal.fidelity.clone(),
+                    turn_count: 0,
+                    input_tokens: 0,
+                    output_tokens: 0,
+                    total_tokens: 0,
+                    total_usd: None,
+                    premium_requests: None,
+                    duration_ms: 0,
+                });
+            rollup.turn_count += 1;
+            rollup.input_tokens += signal.input_tokens.unwrap_or(0);
+            rollup.output_tokens += signal.output_tokens.unwrap_or(0);
+            rollup.total_tokens += signal.total_tokens.unwrap_or(0);
+            if let Some(usd) = signal.total_usd {
+                rollup.total_usd = Some(rollup.total_usd.unwrap_or(0.0) + usd);
+            }
+            // Premium requests are an estimated-backend unit: only accumulate them
+            // onto an estimated rollup, so a stray count on an exact/derived signal
+            // never leaks into a per-backend row (the rollup is keyed by fidelity,
+            // so this is the root-cause guard the `total` filter mirrors).
+            if let (Some(premium), UsageFidelity::Estimated) =
+                (signal.premium_requests, &signal.fidelity)
+            {
+                rollup.premium_requests = Some(rollup.premium_requests.unwrap_or(0) + premium);
+            }
+            rollup.duration_ms += signal.duration_ms.unwrap_or(0);
+        }
+
+        let rollups: Vec<UsageRollup> = groups.into_values().collect();
+        let total_turns = rollups.iter().map(|rollup| rollup.turn_count).sum();
+        let is_grounded = |rollup: &&UsageRollup| {
+            matches!(
+                rollup.fidelity,
+                UsageFidelity::Exact | UsageFidelity::Derived
+            )
+        };
+        // Headline spend sums grounded USD only; `None` (not `0.00`) when no grounded
+        // signal carried a cost, so the UI can distinguish "no spend recorded" from
+        // "spend that genuinely rounds to zero".
+        let any_grounded_usd = rollups
+            .iter()
+            .filter(is_grounded)
+            .any(|rollup| rollup.total_usd.is_some());
+        let grounded_total_usd = any_grounded_usd.then(|| {
+            rollups
+                .iter()
+                .filter(is_grounded)
+                .filter_map(|rollup| rollup.total_usd)
+                .sum()
+        });
+        // Premium requests are an estimated-backend billing unit; restrict the total
+        // to estimated rollups so a stray premium-request count on an exact/derived
+        // signal can never inflate it (matches the field's documented meaning).
+        let total_premium_requests = rollups
+            .iter()
+            .filter(|rollup| matches!(rollup.fidelity, UsageFidelity::Estimated))
+            .filter_map(|rollup| rollup.premium_requests)
+            .sum();
+
+        Self {
+            session_count,
+            total_turns,
+            rollups,
+            grounded_total_usd,
+            total_premium_requests,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -452,5 +586,168 @@ mod tests {
                 "createdAt": "2026-06-07T12:02:01Z"
             })
         );
+    }
+
+    fn usage(
+        backend: AgentBackend,
+        fidelity: UsageFidelity,
+        tokens: u64,
+        usd: Option<f64>,
+        premium: Option<u64>,
+        duration: u64,
+    ) -> UsageSignal {
+        UsageSignal {
+            id: "u".to_string(),
+            session_id: "s".to_string(),
+            run_id: "r".to_string(),
+            backend,
+            fidelity,
+            model_label: None,
+            input_tokens: Some(tokens / 2),
+            output_tokens: Some(tokens / 2),
+            total_tokens: Some(tokens),
+            total_usd: usd,
+            premium_requests: premium,
+            duration_ms: Some(duration),
+            confidence: None,
+            recorded_at: "2026-06-07T12:00:00Z".to_string(),
+        }
+    }
+
+    #[test]
+    fn usage_summary_keeps_fidelities_separate_and_grounds_only_measured_usd() {
+        let signals = vec![
+            // Two exact (claude) turns: tokens and USD sum within the rollup.
+            usage(
+                AgentBackend::ClaudeLocal,
+                UsageFidelity::Exact,
+                100,
+                Some(0.10),
+                None,
+                1000,
+            ),
+            usage(
+                AgentBackend::ClaudeLocal,
+                UsageFidelity::Exact,
+                60,
+                Some(0.05),
+                None,
+                500,
+            ),
+            // One derived (codex) turn with USD — also grounded.
+            usage(
+                AgentBackend::CodexLocal,
+                UsageFidelity::Derived,
+                40,
+                Some(0.02),
+                None,
+                300,
+            ),
+            // One estimated (copilot) turn: premium requests, no USD — excluded from
+            // the grounded dollar total.
+            usage(
+                AgentBackend::CopilotLocal,
+                UsageFidelity::Estimated,
+                20,
+                None,
+                Some(1),
+                1800,
+            ),
+        ];
+
+        let summary = UsageSummary::from_signals(&signals, 3);
+
+        assert_eq!(summary.session_count, 3);
+        assert_eq!(summary.total_turns, 4);
+        // Grounded = exact (0.10 + 0.05) + derived (0.02); estimated is excluded.
+        // USD is summed in f64, so compare within a cent's worth of epsilon rather
+        // than bit-exact (0.10 + 0.05 does not round-trip exactly in binary float).
+        let grounded = summary.grounded_total_usd.expect("grounded usd present");
+        assert!((grounded - 0.17).abs() < 1e-9, "grounded was {grounded}");
+        assert_eq!(summary.total_premium_requests, 1);
+
+        // Rollups are ordered deterministically by (backend, fidelity).
+        assert_eq!(summary.rollups.len(), 3);
+        let claude = &summary.rollups[0];
+        assert_eq!(claude.backend, AgentBackend::ClaudeLocal);
+        assert_eq!(claude.fidelity, UsageFidelity::Exact);
+        assert_eq!(claude.turn_count, 2);
+        assert_eq!(claude.total_tokens, 160);
+        let claude_usd = claude.total_usd.expect("claude usd present");
+        assert!(
+            (claude_usd - 0.15).abs() < 1e-9,
+            "claude usd was {claude_usd}"
+        );
+        assert_eq!(claude.duration_ms, 1500);
+
+        let copilot = &summary.rollups[2];
+        assert_eq!(copilot.backend, AgentBackend::CopilotLocal);
+        assert_eq!(copilot.fidelity, UsageFidelity::Estimated);
+        // Estimated rollup carries premium requests but no USD.
+        assert_eq!(copilot.total_usd, None);
+        assert_eq!(copilot.premium_requests, Some(1));
+    }
+
+    #[test]
+    fn usage_summary_grounded_usd_is_none_when_no_measured_cost() {
+        // Estimated-only activity: there is no grounded dollar figure to report, and
+        // the headline must stay `None` rather than collapse to a misleading 0.00.
+        let signals = vec![usage(
+            AgentBackend::CopilotLocal,
+            UsageFidelity::Estimated,
+            20,
+            None,
+            Some(2),
+            900,
+        )];
+
+        let summary = UsageSummary::from_signals(&signals, 1);
+
+        assert_eq!(summary.grounded_total_usd, None);
+        assert_eq!(summary.total_premium_requests, 2);
+        assert_eq!(summary.total_turns, 1);
+    }
+
+    #[test]
+    fn usage_summary_premium_requests_count_estimated_rollups_only() {
+        // A premium-request count on a non-estimated signal must not inflate the
+        // total — only estimated backends bill in premium requests.
+        let signals = vec![
+            usage(
+                AgentBackend::ClaudeLocal,
+                UsageFidelity::Exact,
+                100,
+                Some(0.1),
+                Some(5),
+                0,
+            ),
+            usage(
+                AgentBackend::CopilotLocal,
+                UsageFidelity::Estimated,
+                20,
+                None,
+                Some(2),
+                0,
+            ),
+        ];
+        let summary = UsageSummary::from_signals(&signals, 1);
+        assert_eq!(summary.total_premium_requests, 2);
+        // The exact rollup must not carry the stray premium-request count in its
+        // per-rollup field either (not just the total).
+        let claude = summary
+            .rollups
+            .iter()
+            .find(|rollup| rollup.backend == AgentBackend::ClaudeLocal)
+            .expect("claude rollup");
+        assert_eq!(claude.premium_requests, None);
+    }
+
+    #[test]
+    fn usage_summary_is_empty_for_no_signals() {
+        let summary = UsageSummary::from_signals(&[], 0);
+        assert!(summary.rollups.is_empty());
+        assert_eq!(summary.total_turns, 0);
+        assert_eq!(summary.grounded_total_usd, None);
+        assert_eq!(summary.total_premium_requests, 0);
     }
 }

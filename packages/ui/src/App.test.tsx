@@ -18,4 +18,12 @@ describe("App", () => {
     expect(screen.getByRole("heading", { name: "Bridge settings" })).toBeTruthy();
     expect(screen.getByLabelText("Device name")).toBeTruthy();
   });
+
+  it("switches to the spend view", async () => {
+    render(<App />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Spend" }));
+
+    expect(await screen.findByRole("heading", { name: "Your spend" })).toBeTruthy();
+  });
 });

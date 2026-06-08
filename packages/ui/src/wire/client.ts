@@ -20,6 +20,10 @@ export interface WireClient {
   reply(runId: string, text: string): Promise<void>;
   /** Request graceful cancellation of a run. */
   stop(runId: string): Promise<void>;
+  /** Ask the host for the device-wide "your spend" summary. The answer arrives as
+      a `usage_summary` server event via `subscribe` (this resolves on the host's
+      ack, not with the summary itself), so the caller listens for the event. */
+  requestUsageSummary(): Promise<void>;
   /** Subscribe to bridge events; returns an unsubscribe function. */
   subscribe(handler: WireEventHandler): () => void;
 }

@@ -1,7 +1,7 @@
 use crate::adapter::{AgentBackend, BridgeError, StartRunRequest};
 use crate::artifact::DispatchArtifact;
 use crate::session::{
-    DispatchControlEvent, DispatchMessage, DispatchRunState, PolicyHint, UsageSignal,
+    DispatchControlEvent, DispatchMessage, DispatchRunState, PolicyHint, UsageSignal, UsageSummary,
 };
 use serde::{Deserialize, Serialize};
 
@@ -110,11 +110,26 @@ impl WireFrame {
     rename_all_fields = "camelCase"
 )]
 pub enum ClientCommand {
-    Start { request: Box<StartRunRequest> },
-    Reply { run_id: String, text: String },
-    Stop { run_id: String },
-    Resume { session_id_or_transcript: String },
-    Reconnect { request: ReconnectRequest },
+    Start {
+        request: Box<StartRunRequest>,
+    },
+    Reply {
+        run_id: String,
+        text: String,
+    },
+    Stop {
+        run_id: String,
+    },
+    Resume {
+        session_id_or_transcript: String,
+    },
+    Reconnect {
+        request: ReconnectRequest,
+    },
+    /// Request the device-wide "your spend" summary (ADR-0092 D2 cost view). A
+    /// read-only query carrying no fields; the host answers with a single
+    /// [`BridgeEventPayload::UsageSummary`] server event followed by an ack.
+    UsageSummary,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -246,6 +261,24 @@ impl BridgeEvent {
             payload: BridgeEventPayload::Artifact { artifact },
         }
     }
+
+    /// A device-wide usage summary event. It is **not** scoped to a single run or
+    /// session (it aggregates across all of them), so `session_id`/`run_id` are
+    /// empty and `sequence` is `0`; the client dispatches on the payload kind.
+    pub fn usage_summary(
+        id: impl Into<String>,
+        created_at: impl Into<String>,
+        summary: UsageSummary,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            session_id: String::new(),
+            run_id: String::new(),
+            sequence: 0,
+            created_at: created_at.into(),
+            payload: BridgeEventPayload::UsageSummary { summary },
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -257,6 +290,7 @@ pub enum BridgeEventPayload {
     PolicyHint { hint: PolicyHint },
     Status { status: BridgeStatusEvent },
     Artifact { artifact: DispatchArtifact },
+    UsageSummary { summary: UsageSummary },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -387,6 +421,18 @@ mod tests {
                 "kind": "resume",
                 "sessionIdOrTranscript": "session-1"
             })
+        );
+    }
+
+    #[test]
+    fn serializes_usage_summary_query_as_fieldless_tagged_command() {
+        // The query carries no payload; it must serialize as just the tag so the
+        // client can send a bare `{"kind":"usage_summary"}` (snake_case, per the
+        // enum's `rename_all`).
+        let command = ClientCommand::UsageSummary;
+        assert_eq!(
+            serde_json::to_value(command).expect("command serializes"),
+            json!({ "kind": "usage_summary" })
         );
     }
 
@@ -545,6 +591,34 @@ mod tests {
                         last_event_id: Some("event-4".to_string()),
                     },
                 },
+                created_at,
+            ),
+            WireFrame::client_command("frame-usage-query", ClientCommand::UsageSummary, created_at),
+            WireFrame::server_event(
+                "frame-usage-summary",
+                BridgeEvent::usage_summary(
+                    "event-usage-summary",
+                    created_at,
+                    crate::session::UsageSummary::from_signals(
+                        &[UsageSignal {
+                            id: "u1".to_string(),
+                            session_id: "session-1".to_string(),
+                            run_id: "run-1".to_string(),
+                            backend: AgentBackend::ClaudeLocal,
+                            fidelity: UsageFidelity::Exact,
+                            model_label: None,
+                            input_tokens: Some(10),
+                            output_tokens: Some(5),
+                            total_tokens: Some(15),
+                            total_usd: Some(0.01),
+                            premium_requests: None,
+                            duration_ms: Some(100),
+                            confidence: None,
+                            recorded_at: created_at.to_string(),
+                        }],
+                        1,
+                    ),
+                ),
                 created_at,
             ),
             WireFrame::ack("frame-ack", "frame-reply", created_at),

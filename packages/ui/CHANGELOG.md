@@ -1,5 +1,9 @@
 # Changelog
 
+## [0.11.0] - 2026-06-08
+
+- Added a **Spend** tab: a device-wide "your spend" view that asks the host for a usage summary and renders measured dollars (Claude exact + Codex rate-derived) as the headline, with Copilot's premium-request activity shown separately so an estimate is never read as a measured cost. Per-backend rollups show cost (fidelity-prefixed), tokens, and turns; an empty state shows until the first run records usage. States the local-only posture up front; the tab only queries the host while it is active. Added `requestUsageSummary` to the `WireClient` seam (WebSocket + offline mock).
+
 ## [0.10.0] - 2026-06-08
 
 - Added a per-session **Diagnostics** panel to the run screen: where the session was routed (provider · model + usage fidelity), token/cost usage for the whole session and the last turn, message count + elapsed time, and rules-based session-health recommendations (e.g. start a fresh session once it gets long). Cross-session suggestions remain a separate, later surface.

@@ -3,8 +3,10 @@ import type {
   BridgeEvent,
   BridgeEventPayload,
   DispatchRunState,
-  StartRunRequest
+  StartRunRequest,
+  UsageSignal
 } from "@honeydrunk/honeyhub-types";
+import { summarizeUsage } from "../routes/spend/spendModel";
 import type { StartedRun, WireClient, WireEventHandler } from "./client";
 
 // An in-memory wire client that scripts a realistic Claude Code exchange:
@@ -22,6 +24,10 @@ export class MockWireClient implements WireClient {
   private sequence = 0;
   private runs = new Map<string, MockState>();
   private createdAt = "2026-06-07T12:00:00.000Z";
+  // Accumulate the usage the demo emits so `requestUsageSummary` can roll it up the
+  // same way the real host does (mirroring `UsageSummary::from_signals`).
+  private usageSignals: UsageSignal[] = [];
+  private sessionIds = new Set<string>();
 
   subscribe(handler: WireEventHandler): () => void {
     this.handlers.add(handler);
@@ -31,6 +37,9 @@ export class MockWireClient implements WireClient {
   }
 
   private emit(sessionId: string, runId: string, payload: BridgeEventPayload): void {
+    if (payload.kind === "usage") {
+      this.usageSignals.push(payload.signal);
+    }
     const event: BridgeEvent = {
       id: `event-${this.sequence}`,
       sessionId,
@@ -74,6 +83,7 @@ export class MockWireClient implements WireClient {
     const sessionId = request.session.id;
     const backend = request.session.backend;
     this.runs.set(runId, { sessionId, backend });
+    this.sessionIds.add(sessionId);
 
     this.status(sessionId, runId, backend, "running");
     this.message(sessionId, runId, "Reading the workspace", true);
@@ -133,5 +143,28 @@ export class MockWireClient implements WireClient {
     const { sessionId, backend } = run;
     this.status(sessionId, runId, backend, "stopping");
     this.status(sessionId, runId, backend, "cancelled");
+  }
+
+  async requestUsageSummary(): Promise<void> {
+    // The host answers a usage-summary query with a device-wide event; the mock
+    // rolls up the usage it has emitted so far through the same aggregator the UI
+    // ships, and surfaces it as a `usage_summary` event (session/run ids empty,
+    // matching the bridge's device-scoped event).
+    const summary = summarizeUsage(this.usageSignals, this.sessionIds.size);
+    const event: BridgeEvent = {
+      id: `event-${this.sequence}`,
+      sessionId: "",
+      runId: "",
+      // Device-scoped event: sequence is 0 to match the bridge's
+      // `BridgeEvent::usage_summary` contract (it is not part of any run's ordered
+      // stream). The id still uses the counter so it stays unique.
+      sequence: 0,
+      createdAt: this.createdAt,
+      payload: { kind: "usage_summary", summary }
+    };
+    this.sequence += 1;
+    for (const handler of this.handlers) {
+      handler(event);
+    }
   }
 }

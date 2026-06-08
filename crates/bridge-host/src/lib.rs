@@ -268,6 +268,14 @@ async fn handle_command<A: AgentBackendAdapter>(
             }
             ClientCommand::Stop { run_id } => runtime.stop(&run_id, now_rfc3339()).map(|_| None),
             ClientCommand::Reconnect { request } => runtime.replay_events(&request).map(Some),
+            ClientCommand::UsageSummary => {
+                let summary = runtime.usage_summary();
+                Ok(Some(vec![BridgeEvent::usage_summary(
+                    new_id(),
+                    now_rfc3339(),
+                    summary,
+                )]))
+            }
             ClientCommand::Resume { .. } => Err(BridgeError::new(
                 "unsupported_command",
                 "resume is not driven by the host runtime yet",
