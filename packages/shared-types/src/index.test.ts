@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   defaultClaudeCapabilities,
+  defaultCodexCapabilities,
+  defaultCopilotCapabilities,
   oneShotCapabilities,
   wireProtocolVersion,
   type Notification,
@@ -14,7 +16,25 @@ import {
 test("default Claude capabilities declare exact usage and live replies", () => {
   assert.equal(defaultClaudeCapabilities.interactive_reply, true);
   assert.equal(defaultClaudeCapabilities.usage_exact, true);
+  assert.equal(defaultClaudeCapabilities.usage_derived, false);
   assert.equal(defaultClaudeCapabilities.usage_estimated, false);
+});
+
+test("Codex capabilities declare resume-based replies and derived USD", () => {
+  // Resume-based, so the core uses the follow-up-run path, not same-process.
+  assert.equal(defaultCodexCapabilities.interactive_reply, false);
+  assert.equal(defaultCodexCapabilities.resume_session, true);
+  // Exact tokens, derived (rate-table) USD — exactly one usage flag set.
+  assert.equal(defaultCodexCapabilities.usage_exact, false);
+  assert.equal(defaultCodexCapabilities.usage_derived, true);
+  assert.equal(defaultCodexCapabilities.usage_estimated, false);
+});
+
+test("Copilot capabilities declare premium-request estimated usage", () => {
+  assert.equal(defaultCopilotCapabilities.interactive_reply, false);
+  assert.equal(defaultCopilotCapabilities.usage_exact, false);
+  assert.equal(defaultCopilotCapabilities.usage_derived, false);
+  assert.equal(defaultCopilotCapabilities.usage_estimated, true);
 });
 
 test("one-shot capabilities force replies through follow-up runs", () => {

@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.16.0] - 2026-06-08
+
+- Added the `codex.local` adapter (`adapters::codex_local::CodexLocalAdapter`): drives the official Codex CLI's non-interactive `codex exec --json` mode under the user's own local session (ADR-0090 §3a), as a thin strategy over the shared `child_run` driver. Resume-based (`interactive_reply` false → the core's follow-up-run path); parses `thread.started`/`session.created`, `item.completed` (agent-message items only), and `turn.completed`.
+- Usage fidelity `derived` (ADR-0092 D2): exact tokens taken directly, USD computed via an injected `UsdRateLookup` (the operator-configurable rate table); with no rate wired, tokens stay exact and USD is absent — never fabricated. Added `usage_derived` to `CapabilityFlags` (the spike's third usage shape) + `codex_local()`/`copilot_local()` presets, mirrored in the TS shared-types.
+- The resumed command places `--json` immediately after `exec`, before the `resume` subcommand (`codex exec --json resume <session> <task>`) — the shape the CLI requires for reliable non-interactive resume; covered by command-shape unit tests. A follow-up whose prior run has no captured vendor session id fails explicitly (`follow_up_session_missing`).
+- **Core:** `BridgeRuntime::reply` lets a terminal run start a follow-up when the backend is resume-based (`interactive_reply` false + `resume_session`) — a completed `codex exec` turn is a valid reply target. The `terminal_run_reply` rejection now applies only to interactive backends. Added a runtime regression test.
+- `stream()` does the bounded tail drain + child drop off the runs lock; a vendor session id discovered only in the drained tail is written back into the retired slot for a later resume.
+
 ## [0.15.0] - 2026-06-08
 
 - Extracted the shared child-process driver into `adapters::child_run` (`ChildRun`): spawn-with-piped-stdio, stderr drain, stdout reader thread, process-tree kill, reap, and one-time exit detection now live in one place. `claude.local` is now a thin strategy over it (command + capability flags + `stream-json` parsing + same-process reply framing), so the `codex.local` / `copilot.local` adapters reuse the mechanics rather than copying them. `EventClock` / `default_event_clock` moved to `child_run` and are re-exported unchanged.
