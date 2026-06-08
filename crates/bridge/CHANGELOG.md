@@ -1,5 +1,9 @@
 # Changelog
 
+## [0.11.0] - 2026-06-08
+
+- Extracted the shared child-process driver into `adapters::child_run` (`ChildRun`): spawn-with-piped-stdio, stderr drain, stdout reader thread, process-tree kill, reap, and one-time exit detection now live in one place. `claude.local` is now a thin strategy over it (command + capability flags + `stream-json` parsing + same-process reply framing), so the upcoming `codex.local` / `copilot.local` adapters reuse the mechanics rather than copying them. `EventClock` / `default_event_clock` moved to `child_run` and are re-exported unchanged. No behavior change; the full `fake_claude` lifecycle integration test still passes.
+
 ## [0.10.0] - 2026-06-08
 
 - Version alignment for the session-diagnostics release (no bridge code change).

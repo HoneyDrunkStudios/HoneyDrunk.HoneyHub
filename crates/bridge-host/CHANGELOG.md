@@ -1,5 +1,9 @@
 # Changelog
 
+## [0.11.0] - 2026-06-08
+
+- Version alignment for the shared `child_run` adapter-driver extraction (no host code change).
+
 ## [0.10.0] - 2026-06-08
 
 - Version alignment for the session-diagnostics release (no host code change).
