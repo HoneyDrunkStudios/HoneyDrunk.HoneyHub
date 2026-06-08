@@ -30,7 +30,7 @@
 use crate::adapter::{
     AgentBackend, AgentBackendAdapter, BridgeError, CapabilityFlags, RunHandle, StartRunRequest,
 };
-use crate::adapters::child_run::{ChildRun, EventClock};
+use crate::adapters::child_run::{ChildRun, EventClock, RunSlot};
 use crate::session::{
     DispatchMessage, DispatchMessageRole, DispatchRunState, UsageConfidence, UsageFidelity,
     UsageSignal,
@@ -63,7 +63,7 @@ pub struct CodexLocalAdapter {
     program: String,
     clock: EventClock,
     rate_lookup: UsdRateLookup,
-    runs: Mutex<HashMap<String, ChildRun>>,
+    runs: Mutex<HashMap<String, RunSlot>>,
 }
 
 impl CodexLocalAdapter {
@@ -88,7 +88,7 @@ impl CodexLocalAdapter {
         }
     }
 
-    fn lock_runs(&self) -> Result<MutexGuard<'_, HashMap<String, ChildRun>>, BridgeError> {
+    fn lock_runs(&self) -> Result<MutexGuard<'_, HashMap<String, RunSlot>>, BridgeError> {
         self.runs
             .lock()
             .map_err(|_| BridgeError::new("lock_poisoned", "codex adapter lock was poisoned"))
@@ -119,7 +119,7 @@ impl CodexLocalAdapter {
         self.lock_runs().ok().and_then(|guard| {
             guard
                 .get(run_id)
-                .and_then(|run| run.backend_session_id.clone())
+                .and_then(|slot| slot.backend_session_id().map(str::to_string))
         })
     }
 }
@@ -323,7 +323,7 @@ impl AgentBackendAdapter for CodexLocalAdapter {
         let run = ChildRun::spawn(command, request.session.id.clone(), resume_session)?;
         let process_id = run.process_id();
 
-        self.lock_runs()?.insert(run_id.clone(), run);
+        self.lock_runs()?.insert(run_id.clone(), RunSlot::live(run));
 
         Ok(RunHandle {
             run_id,
@@ -333,9 +333,13 @@ impl AgentBackendAdapter for CodexLocalAdapter {
 
     fn stream(&self, run_id: &str) -> Result<Vec<BridgeEvent>, BridgeError> {
         let mut guard = self.lock_runs()?;
-        let run = guard
+        let slot = guard
             .get_mut(run_id)
             .ok_or_else(|| BridgeError::new("run_not_found", format!("run {run_id} not found")))?;
+        // A retired (completed) turn has nothing left to stream.
+        let Some(run) = slot.as_live_mut() else {
+            return Ok(Vec::new());
+        };
 
         let lines = run.drain_lines();
         let session_id = run.session_id.clone();
@@ -353,7 +357,9 @@ impl AgentBackendAdapter for CodexLocalAdapter {
 
         // A Codex `exec` turn runs to completion, so the exit transition is the
         // normal end of a turn. Emit it exactly once (clean exit finalizes then
-        // completes; a non-zero exit fails).
+        // completes; a non-zero exit fails), then retire the run so the finished
+        // child does not linger — the captured vendor session survives for a
+        // follow-up turn.
         if let Some(success) = run.poll_exit() {
             let now = (self.clock)();
             if success {
@@ -377,6 +383,7 @@ impl AgentBackendAdapter for CodexLocalAdapter {
                     DispatchRunState::Failed,
                 ));
             }
+            slot.retire();
         }
 
         Ok(events)
@@ -394,11 +401,13 @@ impl AgentBackendAdapter for CodexLocalAdapter {
     }
 
     fn stop(&self, run_id: &str) -> Result<(), BridgeError> {
-        let mut run = self
+        let mut slot = self
             .lock_runs()?
             .remove(run_id)
             .ok_or_else(|| BridgeError::new("run_not_found", format!("run {run_id} not found")))?;
-        run.close_and_kill();
+        if let Some(run) = slot.as_live_mut() {
+            run.close_and_kill();
+        }
         Ok(())
     }
 
@@ -412,7 +421,7 @@ impl AgentBackendAdapter for CodexLocalAdapter {
         )?;
         let process_id = run.process_id();
 
-        self.lock_runs()?.insert(run_id.clone(), run);
+        self.lock_runs()?.insert(run_id.clone(), RunSlot::live(run));
 
         Ok(RunHandle {
             run_id,
