@@ -23,6 +23,11 @@ export interface RunScreenProps {
   /** Allowlisted workspace roots (packet 05). When empty, a free-text root is
       accepted and the bridge enforces the allowlist on launch. */
   workspaceRoots?: string[];
+  /** The user's allowlisted backends. When empty (not yet configured), all routable
+      backends are offered and the bridge enforces the allowlist on launch; when set,
+      the picker and the router only consider these — no unavailable backend is
+      offered. */
+  availableBackends?: AgentBackend[];
 }
 
 const TERMINAL: DispatchRunState[] = ["completed", "failed", "cancelled"];
@@ -31,7 +36,14 @@ function isTerminal(state: DispatchRunState | undefined): boolean {
   return state !== undefined && TERMINAL.includes(state);
 }
 
-export function RunScreen({ client, workspaceRoots = [] }: RunScreenProps) {
+export function RunScreen({
+  client,
+  workspaceRoots = [],
+  availableBackends = []
+}: RunScreenProps) {
+  // Offer the user's configured backends; before they configure any, fall back to the
+  // full routable set (the bridge still enforces its allowlist on launch).
+  const routableBackends = availableBackends.length > 0 ? availableBackends : ROUTABLE_BACKENDS;
   const [task, setTask] = useState("");
   const [workspaceRoot, setWorkspaceRoot] = useState(workspaceRoots[0] ?? "");
   const [runId, setRunId] = useState<string | undefined>(undefined);
@@ -48,8 +60,8 @@ export function RunScreen({ client, workspaceRoots = [] }: RunScreenProps) {
   // The router's suggestion for the current task (app-tier, ADR-0092 D3). Recomputed
   // as the task text changes; a pure function of the task + the bundled snapshot.
   const recommendation = useMemo(
-    () => recommendBackend({ task, availableBackends: ROUTABLE_BACKENDS }, BUNDLED_SNAPSHOT),
-    [task]
+    () => recommendBackend({ task, availableBackends: routableBackends }, BUNDLED_SNAPSHOT),
+    [task, routableBackends]
   );
   // The backend a run will launch on: the user's pick once they override, otherwise
   // the live suggestion. Derived (not synced via an effect), so it is never stale at
@@ -262,7 +274,7 @@ export function RunScreen({ client, workspaceRoots = [] }: RunScreenProps) {
             value={backend}
             onChange={(event) => setPinnedBackend(event.target.value as AgentBackend)}
           >
-            {ROUTABLE_BACKENDS.map((option) => (
+            {routableBackends.map((option) => (
               <option key={option} value={option}>
                 {backendLabel(option)}
                 {option === recommendation.backend ? " (suggested)" : ""}

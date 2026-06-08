@@ -1,7 +1,20 @@
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
+import type { StartRunRequest } from "@honeydrunk/honeyhub-types";
 import { RunScreen } from "./RunScreen";
 import { MockWireClient } from "../../wire/mockClient";
+
+/** A mock client that records every StartRunRequest it is asked to launch. */
+function recordingClient(): { client: MockWireClient; started: StartRunRequest[] } {
+  const client = new MockWireClient();
+  const started: StartRunRequest[] = [];
+  const realStart = client.start.bind(client);
+  client.start = (request) => {
+    started.push(request);
+    return realStart(request);
+  };
+  return { client, started };
+}
 
 function startRun(task = "Add a feature") {
   render(<RunScreen client={new MockWireClient()} />);
@@ -74,6 +87,56 @@ describe("RunScreen", () => {
       target: { value: "Redesign the whole architecture" }
     });
     expect(backendSelect.value).toBe("codex.local");
+  });
+
+  it("launches the run on the suggested backend by default", async () => {
+    const { client, started } = recordingClient();
+    render(<RunScreen client={client} />);
+    fireEvent.change(screen.getByLabelText("Workspace root"), { target: { value: "/work" } });
+    fireEvent.change(screen.getByLabelText("Task"), {
+      target: { value: "Refactor the concurrency model and debug the race" }
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Start session" }));
+
+    await waitFor(() => expect(started).toHaveLength(1));
+    expect(started[0]?.session.backend).toBe("claude.local");
+  });
+
+  it("launches the run on an overridden backend", async () => {
+    const { client, started } = recordingClient();
+    render(<RunScreen client={client} />);
+    fireEvent.change(screen.getByLabelText("Workspace root"), { target: { value: "/work" } });
+    fireEvent.change(screen.getByLabelText("Task"), {
+      target: { value: "Refactor the concurrency model" }
+    });
+    // Override the suggestion before launching.
+    fireEvent.change(screen.getByLabelText("Backend"), { target: { value: "codex.local" } });
+    fireEvent.click(screen.getByRole("button", { name: "Start session" }));
+
+    await waitFor(() => expect(started).toHaveLength(1));
+    expect(started[0]?.session.backend).toBe("codex.local");
+  });
+
+  it("offers only the configured backends and routes among them", () => {
+    render(
+      <RunScreen
+        client={new MockWireClient()}
+        availableBackends={["codex.local", "copilot.local"]}
+      />
+    );
+    const select = screen.getByLabelText("Backend") as HTMLSelectElement;
+    expect(Array.from(select.options).map((option) => option.value)).toEqual([
+      "codex.local",
+      "copilot.local"
+    ]);
+    // A complex task routes AMONG the available set, never the unavailable Claude
+    // (which is the most capable but not offered). Among the equal-capability pair,
+    // the cost tiebreak picks Copilot.
+    fireEvent.change(screen.getByLabelText("Task"), {
+      target: { value: "Refactor and redesign the whole architecture" }
+    });
+    expect(select.value).not.toBe("claude.local");
+    expect(select.value).toBe("copilot.local");
   });
 
   it("stops an active run", async () => {
