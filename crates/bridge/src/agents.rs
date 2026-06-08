@@ -186,15 +186,7 @@ fn build_definition(
 /// label rather than the raw absolute root — so the no-absolute-path posture holds
 /// even for those roots.
 fn workspace_label(workspace_root: &str) -> String {
-    // Trim trailing separators first: a user-entered root like `/home/user/work/`
-    // (the UI only trims whitespace) would otherwise have no `file_name`. Keep the
-    // original if trimming empties it (e.g. `/`), so the hash fallback still applies.
-    let trimmed = workspace_root.trim_end_matches(['/', '\\']);
-    let candidate = if trimmed.is_empty() {
-        workspace_root
-    } else {
-        trimmed
-    };
+    let candidate = normalized_root(workspace_root);
     Path::new(candidate)
         .file_name()
         .and_then(|component| component.to_str())
@@ -202,12 +194,25 @@ fn workspace_label(workspace_root: &str) -> String {
         .unwrap_or_else(|| format!("workspace-{}", &workspace_hash(workspace_root)[..8]))
 }
 
+/// Normalize a root for label/id derivation by trimming trailing separators, so
+/// semantically identical roots (`/work` and `/work/`) yield the same label and id.
+/// Keeps the original when trimming empties it (e.g. `/`), so the hash fallback in
+/// `workspace_label` still applies.
+fn normalized_root(workspace_root: &str) -> &str {
+    let trimmed = workspace_root.trim_end_matches(['/', '\\']);
+    if trimmed.is_empty() {
+        workspace_root
+    } else {
+        trimmed
+    }
+}
+
 /// A stable, opaque id for a workspace root (FNV-1a 64-bit, dependency-free and
 /// deterministic) so the agent id can be unique per workspace without revealing the
-/// absolute path.
+/// absolute path. Hashes the **normalized** root, so `/work` and `/work/` match.
 fn workspace_hash(workspace_root: &str) -> String {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-    for byte in workspace_root.as_bytes() {
+    for byte in normalized_root(workspace_root).as_bytes() {
         hash ^= u64::from(*byte);
         hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
     }
@@ -366,6 +371,10 @@ mod tests {
             "HoneyDrunk.HoneyHub"
         );
         assert_eq!(workspace_label("/home/user/work/"), "work");
+        // Semantically identical roots hash the same (stable id, no duplicate catalog
+        // entries) and label the same.
+        assert_eq!(workspace_hash("/work"), workspace_hash("/work/"));
+        assert_eq!(workspace_label("/work"), workspace_label("/work/"));
         // A root with no final component must NOT serialize the raw absolute root —
         // it falls back to an opaque, hash-derived label. (`/` and `""` are rootless
         // on every platform; a backslash is not a separator off Windows.)

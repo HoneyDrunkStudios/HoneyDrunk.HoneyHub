@@ -25,8 +25,14 @@ export function groupAgents(agents: AgentDefinition[]): AgentGroup[] {
   return BACKEND_ORDER.filter((backend) => byBackend.has(backend)).map((backend) => ({
     backend,
     label: backendLabel(backend),
+    // Code-point comparison (not localeCompare) so the order is locale-independent
+    // and matches the host's byte-order sort — the list never reorders by environment.
     agents: [...(byBackend.get(backend) ?? [])].sort(
-      (left, right) => left.name.localeCompare(right.name) || left.id.localeCompare(right.id)
+      (left, right) => compare(left.name, right.name) || compare(left.id, right.id)
     )
   }));
+}
+
+function compare(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0;
 }

@@ -210,11 +210,13 @@ export class MockWireClient implements WireClient {
     }
   }
 
-  async discoverAgents(workspaceRoot?: string): Promise<void> {
+  async discoverAgents(_workspaceRoot?: string): Promise<void> {
     // The real host scans the filesystem; the mock returns a small *scripted demo*
     // catalog (one Claude subagent, one Copilot agent) so the Agents surface is
     // exercised offline.
-    const label = (workspaceRoot ?? "/work/demo").split(/[\\/]/).filter(Boolean).pop() ?? "demo";
+    // A fixed scripted-demo label (the host derives one from the root's basename or a
+    // hash; the mock keeps it constant so it never diverges for a rootless root).
+    const label = "demo";
     // Mirror the host id shape: an opaque root-hash prefix + the relative source path
     // (the real ids are FNV-hashed), so demos/tests don't depend on a format the host
     // never produces.
