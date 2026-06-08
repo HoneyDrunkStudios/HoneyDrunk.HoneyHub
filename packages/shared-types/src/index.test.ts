@@ -88,10 +88,23 @@ test("notifications carry only state-only fields", () => {
     createdAt: "2026-06-07T12:00:00Z"
   };
 
+  // Compile-time guard: if `Notification` ever gains a key outside this allowlist
+  // (e.g. `body`/`task`/`path`), `Exclude<...>` stops being `never` and this fails
+  // to type-check — the runtime `in` check alone could not catch that.
+  type AllowedKey =
+    | "id"
+    | "kind"
+    | "sessionId"
+    | "runId"
+    | "backend"
+    | "repo"
+    | "link"
+    | "createdAt";
+  type ExtraKeys = Exclude<keyof Notification, AllowedKey>;
+  const _noExtraKeys: ExtraKeys extends never ? true : never = true;
+  void _noExtraKeys;
+
   assert.equal(notification.kind, "pr_opened");
-  // No body/task/prompt/path field exists on the type.
-  assert.equal("body" in notification, false);
-  assert.equal("task" in notification, false);
 });
 
 test("run handles may carry adapter process metadata", () => {

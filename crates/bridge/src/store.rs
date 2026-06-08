@@ -113,14 +113,38 @@ impl LocalStore {
     fn save(&self) -> Result<(), StoreError> {
         let raw = serde_json::to_string_pretty(&self.data)
             .map_err(|error| StoreError::new("store_encode", error.to_string()))?;
-        fs::write(self.root.join("store.json"), raw)
-            .map_err(|error| StoreError::io("write store document", error))
+        // Atomic write: a crash mid-write must not truncate the durable document.
+        let temp = self.root.join("store.json.tmp");
+        fs::write(&temp, raw).map_err(|error| StoreError::io("write store document", error))?;
+        fs::rename(&temp, self.root.join("store.json"))
+            .map_err(|error| StoreError::io("commit store document", error))
     }
 
     fn transcript_path(&self, run_id: &str) -> PathBuf {
-        self.root
-            .join("transcripts")
-            .join(format!("{run_id}.jsonl"))
+        // Sanitize the run id into a flat filename: a `run_id` carrying path
+        // separators or `..` (it can originate from the host/client via
+        // `requested_run_id`) must never escape the transcripts directory or let
+        // `prune` touch arbitrary files.
+        let safe: String = run_id
+            .chars()
+            .map(|character| {
+                if character.is_ascii_alphanumeric() || character == '-' || character == '_' {
+                    character
+                } else {
+                    '_'
+                }
+            })
+            .collect();
+        self.root.join("transcripts").join(format!("{safe}.jsonl"))
+    }
+
+    /// A durable copy of a run with the prompt `task` stripped — the task is raw
+    /// user prompt text (it lives in the transcript), and the durable record must
+    /// carry no raw prompt/code (ADR-0090 D11 / ADR-0092 retention).
+    fn durable_run(run: &DispatchRun) -> DispatchRun {
+        let mut redacted = run.clone();
+        redacted.task = String::new();
+        redacted
     }
 
     fn run_mut(&mut self, session_id: &str, run_id: &str) -> Result<&mut StoredRun, StoreError> {
@@ -155,12 +179,12 @@ impl LocalStore {
             StoreError::new("session_not_found", format!("session {}", run.session_id))
         })?;
         match stored.runs.get_mut(&run.id) {
-            Some(existing) => existing.run = run.clone(),
+            Some(existing) => existing.run = Self::durable_run(run),
             None => {
                 stored.runs.insert(
                     run.id.clone(),
                     StoredRun {
-                        run: run.clone(),
+                        run: Self::durable_run(run),
                         control_events: Vec::new(),
                         artifacts: Vec::new(),
                         usage: Vec::new(),
@@ -233,10 +257,19 @@ impl LocalStore {
             .open(&path)
             .map_err(|error| StoreError::io("open transcript file", error))?;
         writeln!(file, "{line}").map_err(|error| StoreError::io("append transcript", error))?;
+        // A re-appeared transcript clears the pruned flag; persist the flip so a
+        // restart does not report it as still pruned.
+        let mut flipped = false;
         if let Some(stored) = self.data.sessions.get_mut(&message.session_id) {
             if let Some(run) = stored.runs.get_mut(&message.run_id) {
-                run.transcript_pruned = false;
+                if run.transcript_pruned {
+                    run.transcript_pruned = false;
+                    flipped = true;
+                }
             }
+        }
+        if flipped {
+            self.save()?;
         }
         Ok(())
     }
@@ -473,6 +506,9 @@ mod tests {
         let store = LocalStore::open(&root).expect("reopens");
         assert_eq!(store.sessions().len(), 1);
         assert_eq!(store.runs("s1").len(), 1);
+        // The durable run record carries no raw prompt: `task` is redacted (the
+        // prompt lives in the transcript).
+        assert!(store.runs("s1")[0].task.is_empty());
         assert_eq!(store.artifacts("s1", "r1").len(), 1);
         assert_eq!(store.usage("s1", "r1")[0].fidelity, UsageFidelity::Exact);
         let transcript = store.read_transcript("r1").expect("reads transcript");

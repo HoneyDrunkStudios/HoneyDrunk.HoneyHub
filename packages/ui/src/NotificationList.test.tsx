@@ -27,12 +27,12 @@ describe("NotificationList", () => {
   it("shows an empty state and a zero badge", () => {
     render(<NotificationList notifications={[]} />);
     expect(screen.getByText("No notifications yet.")).toBeTruthy();
-    expect(screen.getByLabelText("Unread notifications").textContent).toBe("0");
+    expect(screen.getByLabelText("Notification count").textContent).toBe("0");
   });
 
   it("renders notifications with a count badge and a link", () => {
     render(<NotificationList notifications={sample} />);
-    expect(screen.getByLabelText("Unread notifications").textContent).toBe("2");
+    expect(screen.getByLabelText("Notification count").textContent).toBe("2");
 
     const list = screen.getByRole("list", { name: "Notification list" });
     expect(within(list).getByText("PR opened")).toBeTruthy();

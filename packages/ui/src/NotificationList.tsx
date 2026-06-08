@@ -20,7 +20,7 @@ export function NotificationList({ notifications }: NotificationListProps) {
     <section className="notifications" aria-label="Notifications">
       <header className="notifications-header">
         <h2>Notifications</h2>
-        <span className="notifications-badge" aria-label="Unread notifications">
+        <span className="notifications-badge" aria-label="Notification count">
           {notifications.length}
         </span>
       </header>
