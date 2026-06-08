@@ -4,7 +4,7 @@
 //! out to an official CLI under the user's own local session (ADR-0090 D2/D10) and
 //! differs only in four things: the command it builds, the capability flags it
 //! declares, how it delivers a reply (same-process stdin vs. a resume/follow-up
-//! run), and how it parses the CLI's JSONL into [`BridgeEvent`]s. The *mechanics* —
+//! run), and how it parses the CLI's JSONL into [`crate::wire::BridgeEvent`]s. The *mechanics* —
 //! spawning with piped stdio, draining stderr so it cannot deadlock, reading stdout
 //! lines on a background thread, killing the whole process tree, reaping the child,
 //! and detecting the one-time process exit — are identical, so they live here once.
