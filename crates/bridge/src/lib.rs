@@ -2,6 +2,7 @@ pub mod adapter;
 pub mod adapters;
 pub mod artifact;
 pub mod clock;
+pub mod coaching;
 pub mod core;
 pub mod notify;
 pub mod pairing;
@@ -15,6 +16,7 @@ pub use adapter::{
 };
 pub use adapters::{default_event_clock, ClaudeLocalAdapter, EventClock};
 pub use artifact::{ArtifactKind, DispatchArtifact};
+pub use coaching::{coach, CoachingSnapshot};
 pub use core::{BridgeRuntime, ManagedRun, ReplyOutcome};
 pub use notify::{
     notification_for_artifact, notification_for_state, Notification, NotificationCenter,
