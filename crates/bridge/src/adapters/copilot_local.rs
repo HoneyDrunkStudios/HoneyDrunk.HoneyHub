@@ -85,11 +85,20 @@ impl CopilotSlot {
         }
     }
 
-    fn retire(&mut self) {
-        if let CopilotSlot::Live(run) = self {
-            *self = CopilotSlot::Done {
-                backend_session_id: run.child.backend_session_id.clone(),
-            };
+    /// Retire to a `Done` record, returning the displaced run so the caller can drop
+    /// it (which joins the stdout reader thread) *after* releasing the runs lock —
+    /// see [`super::child_run::RunSlot::retire`]. Returns `None` if already retired.
+    #[must_use = "drop the returned CopilotRun after releasing the runs lock"]
+    fn retire(&mut self) -> Option<Box<CopilotRun>> {
+        match self {
+            CopilotSlot::Live(run) => {
+                let backend_session_id = run.child.backend_session_id.clone();
+                match std::mem::replace(self, CopilotSlot::Done { backend_session_id }) {
+                    CopilotSlot::Live(run) => Some(run),
+                    CopilotSlot::Done { .. } => None,
+                }
+            }
+            CopilotSlot::Done { .. } => None,
         }
     }
 }
@@ -449,7 +458,7 @@ impl AgentBackendAdapter for CopilotLocalAdapter {
         // cleanly without a completion event carrying usage, synthesize the estimated
         // usage signal from what we accumulated so a turn always reports its premium
         // request (the real billing unit) — never silently dropping it.
-        if let Some(success) = run.child.poll_exit() {
+        let retired = if let Some(success) = run.child.poll_exit() {
             let now = (self.clock)();
             if success {
                 if !run.usage_emitted {
@@ -496,8 +505,15 @@ impl AgentBackendAdapter for CopilotLocalAdapter {
             }
             // Retire the finished turn so its child handle/threads/channel are freed;
             // the captured vendor session id survives for a follow-up turn.
-            slot.retire();
-        }
+            slot.retire()
+        } else {
+            None
+        };
+
+        // Release the runs lock before dropping the retired run: `ChildRun::drop`
+        // joins the stdout reader thread, which must not block other runs.
+        drop(guard);
+        drop(retired);
 
         Ok(events)
     }
