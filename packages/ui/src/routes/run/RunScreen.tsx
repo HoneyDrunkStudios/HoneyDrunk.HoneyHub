@@ -26,10 +26,10 @@ export interface RunScreenProps {
   /** Allowlisted workspace roots (packet 05). When empty, a free-text root is
       accepted and the bridge enforces the allowlist on launch. */
   workspaceRoots?: string[];
-  /** The user's allowlisted backends. When empty (not yet configured), all routable
-      backends are offered and the bridge enforces the allowlist on launch; when set,
-      the picker and the router only consider these — no unavailable backend is
-      offered. */
+  /** The user's allowlisted backends. When empty (not yet configured), only the
+      proven-initial backend (Claude) is offered, so an unconfigured cockpit never
+      implies an uninstalled CLI is launchable; when set, the picker and the router
+      consider only these. The bridge still enforces its allowlist on launch. */
   availableBackends?: AgentBackend[];
 }
 
@@ -59,6 +59,9 @@ export function RunScreen({
   const [error, setError] = useState<string | undefined>(undefined);
   // The user's explicit backend pick, set only when they override the suggestion.
   const [pinnedBackend, setPinnedBackend] = useState<AgentBackend | undefined>(undefined);
+  // The backend the active run actually launched on, frozen at launch so the active
+  // run's diagnostics never drift if the task/config changes mid-session.
+  const [runBackend, setRunBackend] = useState<AgentBackend | undefined>(undefined);
 
   // The routing snapshot, loaded once through the consumption seam (a fetch-shaped
   // loader; v1 returns the bundled JSON projection).
@@ -137,11 +140,15 @@ export function RunScreen({
     setRunId(newRunId);
     setRunState(undefined);
     setStreaming("");
+    // Freeze the backend for this run so the request and the active-run diagnostics
+    // use exactly what launched, even if the task/config changes mid-session.
+    const launchBackend = backend;
+    setRunBackend(launchBackend);
 
     const request: StartRunRequest = {
       session: {
         id: "session-1",
-        backend,
+        backend: launchBackend,
         title: taskText,
         workspaceRoot,
         createdAt: new Date().toISOString(),
@@ -309,7 +316,7 @@ export function RunScreen({
         </div>
       ) : (
         <>
-          <SessionDiagnostics backend={backend} messages={messages} usage={usage} />
+          <SessionDiagnostics backend={runBackend ?? backend} messages={messages} usage={usage} />
 
           <ol className="transcript" aria-label="Transcript">
             {messages.map((message) => (

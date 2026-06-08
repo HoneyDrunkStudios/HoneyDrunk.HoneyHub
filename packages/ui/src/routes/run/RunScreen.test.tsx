@@ -169,6 +169,27 @@ describe("RunScreen", () => {
     expect(["codex.local", "copilot.local"]).toContain(select.value);
   });
 
+  it("freezes the active run's backend in diagnostics across a mid-run config change", async () => {
+    const client = new MockWireClient();
+    const { rerender } = render(
+      <RunScreen client={client} availableBackends={["claude.local"]} />
+    );
+    fireEvent.change(screen.getByLabelText("Workspace root"), { target: { value: "/work" } });
+    fireEvent.change(screen.getByLabelText("Task"), { target: { value: "Fix a typo" } });
+    fireEvent.click(screen.getByRole("button", { name: "Start session" }));
+    await waitFor(() =>
+      expect(screen.getByLabelText("Run state").textContent).toBe("needs_input")
+    );
+    // The run launched on Claude; its diagnostics show it.
+    const diagnostics = screen.getByLabelText("Session diagnostics");
+    expect(within(diagnostics).getByText(/claude\.local/)).toBeTruthy();
+
+    // Reconfiguring the backends mid-run must NOT drift the active run's diagnostics
+    // to a new suggestion — the launched backend is frozen.
+    rerender(<RunScreen client={client} availableBackends={["codex.local", "copilot.local"]} />);
+    expect(within(diagnostics).getByText(/claude\.local/)).toBeTruthy();
+  });
+
   it("stops an active run", async () => {
     startRun();
     await waitFor(() =>
