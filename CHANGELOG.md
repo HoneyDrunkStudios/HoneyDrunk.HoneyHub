@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.13.0] - 2026-06-08
+
+- Added **agent discovery** (packet 09 §3f-bis): the cockpit auto-discovers the user's own agent definitions — every `.claude/agents/*.md` (Claude) and `.github/` files named `*agent*` (Copilot) — from within the workspace allowlist, read-only, and surfaces them in a new **Agents** tab grouped by backend. The bridge does the discovery (`BridgeRuntime::discover_agents`, allowlist-gated) and answers a new `discover_agents` wire query. Codex has no folder-of-agents convention, so it is not scanned. Metadata only; nothing is read outside the allowlist and no prompt body or absolute path leaves the device.
+- Bumped the bridge crate to 0.20.0 and the TS packages (types 0.14.0; ui/shell/root 0.13.0).
+
 ## [0.12.0] - 2026-06-08
 
 - Added the **coaching surface** (ADR-0092 D4 / packet 09 §3e): the rules-based session coach (shipped as a pure engine in 0.x) is now wired into a device-wide query. The bridge runs it over every session (`BridgeRuntime::coaching_hints`), answers a new `coaching_hints` wire query, and the PWA renders the advisories in a new **Coaching** tab — severity-first, advisory-only, local-only. No learned model (that stays a gated v2 decision).

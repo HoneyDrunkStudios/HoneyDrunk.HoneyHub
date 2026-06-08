@@ -285,6 +285,16 @@ async fn handle_command<A: AgentBackendAdapter>(
                     hints,
                 )]))
             }
+            ClientCommand::DiscoverAgents { workspace_root } => {
+                match runtime.discover_agents(workspace_root.as_deref()) {
+                    Ok(agents) => Ok(Some(vec![BridgeEvent::agent_catalog(
+                        new_id(),
+                        now_rfc3339(),
+                        agents,
+                    )])),
+                    Err(error) => Err(error),
+                }
+            }
             ClientCommand::Resume { .. } => Err(BridgeError::new(
                 "unsupported_command",
                 "resume is not driven by the host runtime yet",

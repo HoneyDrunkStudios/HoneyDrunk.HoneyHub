@@ -1,4 +1,5 @@
 use crate::adapter::{AgentBackend, BridgeError, StartRunRequest};
+use crate::agents::AgentDefinition;
 use crate::artifact::DispatchArtifact;
 use crate::session::{
     DispatchControlEvent, DispatchMessage, DispatchRunState, PolicyHint, UsageSignal, UsageSummary,
@@ -134,6 +135,13 @@ pub enum ClientCommand {
     /// A read-only query carrying no fields; the host answers with a single
     /// [`BridgeEventPayload::CoachingHints`] server event followed by an ack.
     CoachingHints,
+    /// Discover the user's own agent definitions (packet 09 §3f-bis). `workspace_root`
+    /// scopes discovery to one allowlisted root; omitted, every allowlisted root is
+    /// scanned. The host answers with a single [`BridgeEventPayload::AgentCatalog`].
+    DiscoverAgents {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        workspace_root: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -301,6 +309,24 @@ impl BridgeEvent {
             payload: BridgeEventPayload::CoachingHints { hints },
         }
     }
+
+    /// A device-wide agent-catalog event (the discovered definitions). Not scoped to a
+    /// run or session, so the envelope's `session_id`/`run_id` are empty and
+    /// `sequence` is `0`.
+    pub fn agent_catalog(
+        id: impl Into<String>,
+        created_at: impl Into<String>,
+        agents: Vec<AgentDefinition>,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            session_id: String::new(),
+            run_id: String::new(),
+            sequence: 0,
+            created_at: created_at.into(),
+            payload: BridgeEventPayload::AgentCatalog { agents },
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -314,6 +340,7 @@ pub enum BridgeEventPayload {
     Artifact { artifact: DispatchArtifact },
     UsageSummary { summary: UsageSummary },
     CoachingHints { hints: Vec<PolicyHint> },
+    AgentCatalog { agents: Vec<AgentDefinition> },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -465,6 +492,24 @@ mod tests {
         assert_eq!(
             serde_json::to_value(command).expect("command serializes"),
             json!({ "kind": "coaching_hints" })
+        );
+    }
+
+    #[test]
+    fn serializes_discover_agents_command_with_optional_root() {
+        assert_eq!(
+            serde_json::to_value(ClientCommand::DiscoverAgents {
+                workspace_root: None
+            })
+            .expect("serializes"),
+            json!({ "kind": "discover_agents" })
+        );
+        assert_eq!(
+            serde_json::to_value(ClientCommand::DiscoverAgents {
+                workspace_root: Some("C:/work".to_string())
+            })
+            .expect("serializes"),
+            json!({ "kind": "discover_agents", "workspaceRoot": "C:/work" })
         );
     }
 
@@ -671,6 +716,30 @@ mod tests {
                         severity: PolicyHintSeverity::Warning,
                         message: "This session is large.".to_string(),
                         created_at: created_at.to_string(),
+                    }],
+                ),
+                created_at,
+            ),
+            WireFrame::client_command(
+                "frame-discover-agents",
+                ClientCommand::DiscoverAgents {
+                    workspace_root: Some("C:/work".to_string()),
+                },
+                created_at,
+            ),
+            WireFrame::server_event(
+                "frame-agent-catalog",
+                BridgeEvent::agent_catalog(
+                    "event-agent-catalog",
+                    created_at,
+                    vec![crate::agents::AgentDefinition {
+                        id: "a1b2c3d4e5f6a7b8:.claude/agents/reviewer.md".to_string(),
+                        name: "Reviewer".to_string(),
+                        description: "Reviews diffs".to_string(),
+                        backend: AgentBackend::ClaudeLocal,
+                        model: Some("claude-opus".to_string()),
+                        source_path: ".claude/agents/reviewer.md".to_string(),
+                        workspace_label: "work".to_string(),
                     }],
                 ),
                 created_at,

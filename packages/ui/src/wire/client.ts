@@ -27,6 +27,10 @@ export interface WireClient {
   /** Ask the host for the cross-session coaching advisories. The answer arrives as
       a `coaching_hints` server event via `subscribe` (this resolves on the ack). */
   requestCoachingHints(): Promise<void>;
+  /** Discover the user's own agent definitions. With a `workspaceRoot` it scopes to
+      that allowlisted root; omitted, every allowlisted root is scanned. The answer
+      arrives as an `agent_catalog` server event via `subscribe`. */
+  discoverAgents(workspaceRoot?: string): Promise<void>;
   /** Subscribe to bridge events; returns an unsubscribe function. */
   subscribe(handler: WireEventHandler): () => void;
 }

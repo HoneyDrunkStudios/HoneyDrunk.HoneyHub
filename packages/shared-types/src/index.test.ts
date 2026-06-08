@@ -174,6 +174,45 @@ test("usage summary keeps fidelities separate and grounds only measured spend", 
   assert.equal(summary.totalPremiumRequests, 1);
 });
 
+test("discover_agents carries an optional root and answers with an agent catalog", () => {
+  const query: WireFrame = {
+    protocol: wireProtocolVersion,
+    frameId: "frame-dq",
+    kind: "client_command",
+    createdAt: "2026-06-07T12:00:00Z",
+    command: { kind: "discover_agents", workspaceRoot: "C:/work" }
+  };
+  assert.equal(query.command?.kind, "discover_agents");
+
+  const event: WireFrame = {
+    protocol: wireProtocolVersion,
+    frameId: "frame-de",
+    kind: "server_event",
+    createdAt: "2026-06-07T12:00:00Z",
+    event: {
+      id: "e1",
+      sessionId: "",
+      runId: "",
+      sequence: 0,
+      createdAt: "2026-06-07T12:00:00Z",
+      payload: {
+        kind: "agent_catalog",
+        agents: [
+          {
+            id: "a1b2c3d4e5f6a7b8:.claude/agents/reviewer.md",
+            name: "Reviewer",
+            description: "Reviews diffs",
+            backend: "claude.local",
+            sourcePath: ".claude/agents/reviewer.md",
+            workspaceLabel: "work"
+          }
+        ]
+      }
+    }
+  };
+  assert.equal(event.event?.payload.kind, "agent_catalog");
+});
+
 test("coaching_hints is a fieldless query and a hint-bearing event", () => {
   const query: WireFrame = {
     protocol: wireProtocolVersion,

@@ -165,6 +165,22 @@ export interface UsageSummary {
   totalPremiumRequests: number;
 }
 
+/**
+ * A discovered, runnable agent definition (packet 09 §3f-bis). Metadata only — the
+ * prompt body stays on disk. No absolute local path crosses the wire: `sourcePath`
+ * is workspace-relative, `workspaceLabel` is the root's final component (for
+ * disambiguation), and `id` hashes the root rather than embedding it.
+ */
+export interface AgentDefinition {
+  id: string;
+  name: string;
+  description: string;
+  backend: AgentBackend;
+  model?: string;
+  sourcePath: string;
+  workspaceLabel: string;
+}
+
 export type PolicyHintSeverity = "info" | "warning" | "block";
 
 export interface PolicyHint {
@@ -205,7 +221,8 @@ export type ClientCommand =
   | { kind: "resume"; sessionIdOrTranscript: string }
   | { kind: "reconnect"; request: ReconnectRequest }
   | { kind: "usage_summary" }
-  | { kind: "coaching_hints" };
+  | { kind: "coaching_hints" }
+  | { kind: "discover_agents"; workspaceRoot?: string };
 
 export interface ReconnectRequest {
   sessionId: string;
@@ -244,7 +261,8 @@ export type BridgeEventPayload =
   | { kind: "status"; status: BridgeStatusEvent }
   | { kind: "artifact"; artifact: DispatchArtifact }
   | { kind: "usage_summary"; summary: UsageSummary }
-  | { kind: "coaching_hints"; hints: PolicyHint[] };
+  | { kind: "coaching_hints"; hints: PolicyHint[] }
+  | { kind: "agent_catalog"; agents: AgentDefinition[] };
 
 export interface BridgeStatusEvent {
   state: DispatchRunState;

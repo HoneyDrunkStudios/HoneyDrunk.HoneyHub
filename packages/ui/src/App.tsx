@@ -5,13 +5,14 @@ import { NotificationList } from "./NotificationList";
 import { RunScreen } from "./routes/run/RunScreen";
 import { SpendView } from "./routes/spend/SpendView";
 import { CoachingView } from "./routes/coaching/CoachingView";
+import { AgentsView } from "./routes/agents/AgentsView";
 import { emptyBridgeSettings, type BridgeSettingsState } from "./settingsModel";
 import { MockWireClient } from "./wire/mockClient";
 import { bridgeWsUrl, WebSocketWireClient } from "./wire/webSocketClient";
 import type { WireClient } from "./wire/client";
 import "./styles.css";
 
-type View = "run" | "spend" | "coaching" | "settings" | "notifications";
+type View = "run" | "spend" | "coaching" | "agents" | "settings" | "notifications";
 
 export interface AppProps {
   // Injectable so tests (and a future real WebSocket client) can supply their own
@@ -109,6 +110,9 @@ export function App({ client }: AppProps = {}) {
         >
           Coaching
         </button>
+        <button type="button" aria-pressed={view === "agents"} onClick={() => setView("agents")}>
+          Agents
+        </button>
         <button
           type="button"
           aria-pressed={view === "settings"}
@@ -137,6 +141,10 @@ export function App({ client }: AppProps = {}) {
 
       <div hidden={view !== "coaching"}>
         <CoachingView client={wireClient} active={view === "coaching"} />
+      </div>
+
+      <div hidden={view !== "agents"}>
+        <AgentsView client={wireClient} active={view === "agents"} />
       </div>
 
       <div hidden={view !== "settings"}>

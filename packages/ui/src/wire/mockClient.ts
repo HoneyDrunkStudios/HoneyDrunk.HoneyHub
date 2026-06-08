@@ -1,5 +1,6 @@
 import type {
   AgentBackend,
+  AgentDefinition,
   BridgeEvent,
   BridgeEventPayload,
   DispatchRunState,
@@ -202,6 +203,50 @@ export class MockWireClient implements WireClient {
       sequence: 0,
       createdAt: this.createdAt,
       payload: { kind: "coaching_hints", hints }
+    };
+    this.sequence += 1;
+    for (const handler of this.handlers) {
+      handler(event);
+    }
+  }
+
+  async discoverAgents(_workspaceRoot?: string): Promise<void> {
+    // The real host scans the filesystem; the mock returns a small *scripted demo*
+    // catalog (one Claude subagent, one Copilot agent) so the Agents surface is
+    // exercised offline.
+    // A fixed scripted-demo label (the host derives one from the root's basename or a
+    // hash; the mock keeps it constant so it never diverges for a rootless root).
+    const label = "demo";
+    // Mirror the host id shape: an opaque root-hash prefix + the relative source path
+    // (the real ids are FNV-hashed), so demos/tests don't depend on a format the host
+    // never produces.
+    const rootHash = "0000000000000000";
+    const agents: AgentDefinition[] = [
+      {
+        id: `${rootHash}:.claude/agents/code-reviewer.md`,
+        name: "Code Reviewer",
+        description: "Reviews a diff against the Grid invariants before a PR.",
+        backend: "claude.local",
+        model: "claude-opus",
+        sourcePath: ".claude/agents/code-reviewer.md",
+        workspaceLabel: label
+      },
+      {
+        id: `${rootHash}:.github/release-agent.md`,
+        name: "release agent",
+        description: "Drafts release notes from merged PRs.",
+        backend: "copilot.local",
+        sourcePath: ".github/release-agent.md",
+        workspaceLabel: label
+      }
+    ];
+    const event: BridgeEvent = {
+      id: `event-${this.sequence}`,
+      sessionId: "",
+      runId: "",
+      sequence: 0,
+      createdAt: this.createdAt,
+      payload: { kind: "agent_catalog", agents }
     };
     this.sequence += 1;
     for (const handler of this.handlers) {
