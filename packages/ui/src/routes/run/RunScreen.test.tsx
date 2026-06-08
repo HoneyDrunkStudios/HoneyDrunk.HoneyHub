@@ -139,6 +139,33 @@ describe("RunScreen", () => {
     expect(select.value).toBe("copilot.local");
   });
 
+  it("offers all routable backends when none are configured", () => {
+    render(<RunScreen client={new MockWireClient()} />);
+    const select = screen.getByLabelText("Backend") as HTMLSelectElement;
+    expect(Array.from(select.options).map((option) => option.value)).toEqual([
+      "claude.local",
+      "codex.local",
+      "copilot.local"
+    ]);
+  });
+
+  it("drops a pinned backend once it is no longer offered", () => {
+    const client = new MockWireClient();
+    const { rerender } = render(
+      <RunScreen client={client} availableBackends={["claude.local", "codex.local"]} />
+    );
+    const select = screen.getByLabelText("Backend") as HTMLSelectElement;
+    // Pin Claude explicitly.
+    fireEvent.change(select, { target: { value: "claude.local" } });
+    expect(select.value).toBe("claude.local");
+
+    // Reconfigure the allowlist to exclude Claude — the stale pin is dropped and the
+    // select falls back to an offered backend (never the unavailable Claude).
+    rerender(<RunScreen client={client} availableBackends={["codex.local", "copilot.local"]} />);
+    expect(select.value).not.toBe("claude.local");
+    expect(["codex.local", "copilot.local"]).toContain(select.value);
+  });
+
   it("stops an active run", async () => {
     startRun();
     await waitFor(() =>
