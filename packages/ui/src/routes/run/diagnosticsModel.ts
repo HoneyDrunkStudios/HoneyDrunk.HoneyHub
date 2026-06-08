@@ -52,15 +52,16 @@ function signalTokens(signal: UsageSignal): number | undefined {
 }
 
 function elapsedMs(messages: DispatchMessage[]): number | undefined {
-  if (messages.length < 2) {
+  // Use the min/max timestamp across all messages, not first/last: user messages
+  // are timestamped client-side and agent messages by the bridge, so order and
+  // clock skew can make positional first/last wrong.
+  const times = messages
+    .map((message) => Date.parse(message.createdAt))
+    .filter((time) => !Number.isNaN(time));
+  if (times.length < 2) {
     return undefined;
   }
-  const first = Date.parse(messages[0]?.createdAt ?? "");
-  const last = Date.parse(messages[messages.length - 1]?.createdAt ?? "");
-  if (Number.isNaN(first) || Number.isNaN(last) || last < first) {
-    return undefined;
-  }
-  return last - first;
+  return Math.max(...times) - Math.min(...times);
 }
 
 export function computeSessionDiagnostics(
@@ -97,7 +98,9 @@ export function computeSessionDiagnostics(
   }
 
   return {
-    provider: backend,
+    // Prefer the backend the usage signal actually reports (the routed backend);
+    // fall back to the session's configured backend before any usage arrives.
+    provider: latest?.backend ?? backend,
     model: latest?.modelLabel ?? "pending",
     fidelity: latest?.fidelity,
     sessionTokens,

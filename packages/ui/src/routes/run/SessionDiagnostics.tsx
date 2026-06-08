@@ -4,6 +4,7 @@ import type {
   UsageFidelity,
   UsageSignal
 } from "@honeydrunk/honeyhub-types";
+import { formatUsd } from "../../usageFormat";
 import { computeSessionDiagnostics } from "./diagnosticsModel";
 
 export interface SessionDiagnosticsProps {
@@ -12,15 +13,8 @@ export interface SessionDiagnosticsProps {
   usage: UsageSignal[];
 }
 
-function usdPrefix(fidelity: UsageFidelity | undefined): string {
-  if (fidelity === "estimated") return "~$";
-  if (fidelity === "derived") return "≈$";
-  return "$";
-}
-
-function formatUsd(usd: number | undefined, fidelity: UsageFidelity | undefined): string {
-  if (usd === undefined) return "—";
-  return `${usdPrefix(fidelity)}${usd.toFixed(4)}`;
+function formatUsdOrDash(usd: number | undefined, fidelity: UsageFidelity | undefined): string {
+  return usd === undefined ? "—" : formatUsd(usd, fidelity);
 }
 
 function formatTokens(tokens: number | undefined): string {
@@ -57,14 +51,14 @@ export function SessionDiagnostics({ backend, messages, usage }: SessionDiagnost
           <dt>Session usage</dt>
           <dd>
             {formatTokens(diagnostics.sessionTokens)} tok ·{" "}
-            {formatUsd(diagnostics.sessionUsd, diagnostics.fidelity)}
+            {formatUsdOrDash(diagnostics.sessionUsd, diagnostics.fidelity)}
           </dd>
         </div>
         <div>
           <dt>Last turn</dt>
           <dd>
             {formatTokens(diagnostics.lastTurnTokens)} tok ·{" "}
-            {formatUsd(diagnostics.lastTurnUsd, diagnostics.fidelity)}
+            {formatUsdOrDash(diagnostics.lastTurnUsd, diagnostics.fidelity)}
           </dd>
         </div>
         <div>
