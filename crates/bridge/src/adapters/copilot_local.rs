@@ -454,87 +454,87 @@ impl AgentBackendAdapter for CopilotLocalAdapter {
             events.extend(parsed.events);
         }
 
-        // Terminal transition on process exit (exactly once). If the CLI exited
-        // cleanly without a completion event carrying usage, synthesize the estimated
-        // usage signal from what we accumulated so a turn always reports its premium
-        // request (the real billing unit) — never silently dropping it.
-        let retired = if let Some(success) = run.child.poll_exit() {
-            // First drain the final lines the CLI flushed on exit (e.g. the
-            // `turn.completed` premium-request line) through the same accounting as
-            // the main loop, before retiring drops the channel.
-            for line in run.child.drain_remaining(std::time::Duration::from_secs(2)) {
-                let parsed = parse_line(
-                    &self.clock,
-                    &line,
-                    run_id,
-                    &session_id,
-                    input_chars,
-                    run.output_chars,
-                    &mut run.child.backend_session_id,
-                );
-                run.output_chars += parsed.output_chars;
-                if parsed.events.iter().any(|event| {
-                    matches!(event.payload, crate::wire::BridgeEventPayload::Usage { .. })
-                }) {
-                    run.usage_emitted = true;
-                }
-                events.extend(parsed.events);
-            }
-            let now = (self.clock)();
-            if success {
-                if !run.usage_emitted {
-                    run.usage_emitted = true;
-                    events.push(BridgeEvent::usage(
-                        Uuid::new_v4().to_string(),
-                        &session_id,
+        // On process exit, retire under the lock and take ownership of the run, then
+        // do the bounded tail drain and the child drop (reader-thread join) **off**
+        // the lock so neither blocks another run. The estimate accumulators travel on
+        // the owned `CopilotRun`, so the synthesize-if-needed logic runs off-lock too.
+        let exit = run.child.poll_exit();
+        let retired = if exit.is_some() { slot.retire() } else { None };
+        drop(guard);
+
+        if let Some(success) = exit {
+            if let Some(mut run) = retired {
+                // Drain the final lines the CLI flushed on exit (e.g. the
+                // `turn.completed` premium-request line) through the same accounting
+                // as the main loop, now that the channel is off the lock.
+                for line in run.child.drain_remaining(std::time::Duration::from_secs(2)) {
+                    let parsed = parse_line(
+                        &self.clock,
+                        &line,
                         run_id,
-                        0,
-                        now.clone(),
-                        estimated_usage_signal(
-                            UsageEstimate {
-                                premium_requests: 1,
-                                duration_ms: None,
-                                input_chars: run.input_chars,
-                                output_chars: run.output_chars,
-                                model: None,
-                            },
+                        &session_id,
+                        run.input_chars,
+                        run.output_chars,
+                        &mut run.child.backend_session_id,
+                    );
+                    run.output_chars += parsed.output_chars;
+                    if parsed.events.iter().any(|event| {
+                        matches!(event.payload, crate::wire::BridgeEventPayload::Usage { .. })
+                    }) {
+                        run.usage_emitted = true;
+                    }
+                    events.extend(parsed.events);
+                }
+
+                let now = (self.clock)();
+                if success {
+                    // If the turn ended without a completion event carrying usage,
+                    // synthesize the estimated signal so a turn always reports its
+                    // premium request (the real billing unit) — never silently dropped.
+                    if !run.usage_emitted {
+                        events.push(BridgeEvent::usage(
+                            Uuid::new_v4().to_string(),
                             &session_id,
                             run_id,
-                            &now,
-                        ),
+                            0,
+                            now.clone(),
+                            estimated_usage_signal(
+                                UsageEstimate {
+                                    premium_requests: 1,
+                                    duration_ms: None,
+                                    input_chars: run.input_chars,
+                                    output_chars: run.output_chars,
+                                    model: None,
+                                },
+                                &session_id,
+                                run_id,
+                                &now,
+                            ),
+                        ));
+                    }
+                    events.push(terminal_status(
+                        &session_id,
+                        run_id,
+                        &now,
+                        DispatchRunState::Finalizing,
+                    ));
+                    events.push(terminal_status(
+                        &session_id,
+                        run_id,
+                        &now,
+                        DispatchRunState::Completed,
+                    ));
+                } else {
+                    events.push(terminal_status(
+                        &session_id,
+                        run_id,
+                        &now,
+                        DispatchRunState::Failed,
                     ));
                 }
-                events.push(terminal_status(
-                    &session_id,
-                    run_id,
-                    &now,
-                    DispatchRunState::Finalizing,
-                ));
-                events.push(terminal_status(
-                    &session_id,
-                    run_id,
-                    &now,
-                    DispatchRunState::Completed,
-                ));
-            } else {
-                events.push(terminal_status(
-                    &session_id,
-                    run_id,
-                    &now,
-                    DispatchRunState::Failed,
-                ));
+                // `run` (and its child) drops here, off-lock.
             }
-            // Retire the finished turn so its child handle/threads/channel are freed;
-            // the captured vendor session id survives for a follow-up turn.
-            slot.retire()
-        } else {
-            None
-        };
-
-        // Release the runs lock before dropping the retired run: `ChildRun::drop`
-        // joins the stdout reader thread, which must not block other runs.
-        drop(guard);
-        drop(retired);
+        }
 
         Ok(events)
     }
