@@ -380,23 +380,35 @@ impl AgentBackendAdapter for ClaudeLocalAdapter {
             ));
         }
 
-        // Once the process has exited, emit a terminal status transition (exactly
-        // once) so the run does not sit in `running`/`needs_input` forever after
-        // the CLI finishes. A clean exit finalizes then completes; a non-zero exit
-        // fails. Then retire the run so the child handle/threads/channel are freed
-        // while the captured backend session id survives for a follow-up turn.
-        let retired = if let Some(success) = run.poll_exit() {
-            // Drain the final lines the CLI flushed on exit (the closing `result`
-            // line carries the exact tokens + USD) before retiring drops the channel.
-            for line in run.drain_remaining(std::time::Duration::from_secs(2)) {
-                events.extend(parse_line(
-                    &self.clock,
-                    &line,
-                    run_id,
-                    &session_id,
-                    &mut run.backend_session_id,
-                ));
+        // If the process has exited, retire the run (capturing the vendor session id,
+        // which was set early from the `system`/`result` events) and take ownership of
+        // the child. The remaining work — the bounded final-line drain and the child
+        // drop, which joins the stdout reader thread — then happens **off** the runs
+        // lock, so it never blocks another run's `stream`/`reply`/`stop`.
+        let exit = run.poll_exit();
+        let retired = if exit.is_some() { slot.retire() } else { None };
+        drop(guard);
+
+        if let Some(success) = exit {
+            if let Some(mut child) = retired {
+                // Drain the final lines the CLI flushed on exit (the closing `result`
+                // line carries the exact tokens + USD) before the child is dropped.
+                for line in child.drain_remaining(std::time::Duration::from_secs(2)) {
+                    events.extend(parse_line(
+                        &self.clock,
+                        &line,
+                        run_id,
+                        &session_id,
+                        &mut child.backend_session_id,
+                    ));
+                }
+                // `child` drops here, off-lock: reader-thread join (and kill, already
+                // a no-op since the process was reaped) happen without the lock held.
             }
+
+            // Emit the terminal transition (exactly once) after the tail usage line,
+            // so ordering is [..usage, finalizing, completed]. A clean exit finalizes
+            // then completes; a non-zero exit fails.
             let now = (self.clock)();
             if success {
                 events.push(terminal_status(
@@ -419,16 +431,7 @@ impl AgentBackendAdapter for ClaudeLocalAdapter {
                     DispatchRunState::Failed,
                 ));
             }
-            slot.retire()
-        } else {
-            None
-        };
-
-        // Release the runs lock before dropping the retired child: `ChildRun::drop`
-        // joins the stdout reader thread, which must not block other runs' access to
-        // the lock.
-        drop(guard);
-        drop(retired);
+        }
 
         Ok(events)
     }
