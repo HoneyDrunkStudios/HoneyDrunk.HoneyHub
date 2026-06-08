@@ -4,6 +4,7 @@ import {
   defaultClaudeCapabilities,
   oneShotCapabilities,
   wireProtocolVersion,
+  type Notification,
   type PairedDeviceView,
   type PairingGrant,
   type RunHandle,
@@ -74,6 +75,23 @@ test("pairing grants surface the token exactly once alongside a safe view", () =
 
   assert.equal(grant.token, "one-time-token");
   assert.equal("token" in grant.device, false);
+});
+
+test("notifications carry only state-only fields", () => {
+  const notification: Notification = {
+    id: "n1",
+    kind: "pr_opened",
+    sessionId: "s1",
+    runId: "r1",
+    backend: "claude.local",
+    link: "https://example.test/pr/1",
+    createdAt: "2026-06-07T12:00:00Z"
+  };
+
+  assert.equal(notification.kind, "pr_opened");
+  // No body/task/prompt/path field exists on the type.
+  assert.equal("body" in notification, false);
+  assert.equal("task" in notification, false);
 });
 
 test("run handles may carry adapter process metadata", () => {

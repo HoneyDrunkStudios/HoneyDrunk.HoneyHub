@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.5.0] - 2026-06-07
+
+- Added the local-first session store for packet 07: structured records in an embedded JSON document + separable per-run transcript files, with pin/prune retention (engine + window `[Provisional]`, nothing syncs off-device).
+- Added a state-only notification seam (ADR-0090 D7) — `needs_input`/`completed`/`failed`/`cancelled`/`PR opened`, carrying status/backend/repo/link only — mirrored into shared-types and surfaced as a PWA Notifications view.
+- Kept package versions aligned across the HoneyHub workspace.
+
 ## [0.4.0] - 2026-06-07
 
 - Added the `claude.local` backend adapter for packet 06: drives the official Claude Code CLI under the user's own local session (no subscription auth held or proxied), with same-process live reply, process-tree stop, session resume, exact tokens + USD usage, artifact detection, and honest failure when the CLI is unavailable.

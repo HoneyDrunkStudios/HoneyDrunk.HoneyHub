@@ -1,5 +1,9 @@
 # Changelog
 
+## [0.5.0] - 2026-06-07
+
+- Added a Notifications view (list + unread badge) surfacing state-only notifications, behind a third app tab.
+
 ## [0.4.0] - 2026-06-07
 
 - Updated workspace package version alignment for the Claude Code adapter release.

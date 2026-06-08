@@ -1,5 +1,9 @@
 # Changelog
 
+## [0.5.0] - 2026-06-07
+
+- Added state-only `Notification` + `NotificationKind` types (status/backend/repo/link only), mirroring the bridge notification seam.
+
 ## [0.4.0] - 2026-06-07
 
 - Added an `artifact` variant to `BridgeEventPayload`, mirroring the bridge's new artifact stream event.

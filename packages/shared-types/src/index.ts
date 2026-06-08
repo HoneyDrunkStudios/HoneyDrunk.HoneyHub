@@ -222,6 +222,28 @@ export interface PairingGrant {
   token: string;
 }
 
+// --- State-only notifications (ADR-0090 D7) ---
+// A notification carries status/backend/repo/link only — by shape it cannot hold
+// prompt text, code, secrets, stack traces, or full paths.
+
+export type NotificationKind =
+  | "needs_input"
+  | "completed"
+  | "failed"
+  | "cancelled"
+  | "pr_opened";
+
+export interface Notification {
+  id: string;
+  kind: NotificationKind;
+  sessionId: string;
+  runId: string;
+  backend: AgentBackend;
+  repo?: string;
+  link?: string;
+  createdAt: string;
+}
+
 export const defaultClaudeCapabilities: CapabilityFlags = {
   streaming_output: true,
   interactive_reply: true,

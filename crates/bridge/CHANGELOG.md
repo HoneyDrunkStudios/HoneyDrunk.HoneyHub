@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.5.0] - 2026-06-07
+
+- Added `store::LocalStore`, a local-first session store: structured records (sessions/runs/control events/artifacts/usage/policy hints) in an embedded JSON document, transcript bodies in separate per-run JSONL files, with pin/unpin and a `prune(cutoff)` that drops unpinned, terminal, old transcripts while keeping durable records. Engine + retention window are `[Provisional]`; nothing syncs off-device.
+- Added `notify` (ADR-0090 D7): a state-only `Notification` (status/backend/repo/link only, no field for prompt/code/path), derivation from run-state transitions (`needs_input`/`completed`/`failed`/`cancelled`) and from a persisted PR artifact (`PR opened`), and an in-app `NotificationCenter` transport seam.
+
 ## [0.4.0] - 2026-06-07
 
 - Added the `claude.local` adapter (`adapters::claude_local`): drives the official Claude Code CLI in `stream-json` mode as a long-lived child process under the user's own local session, never holding or proxying subscription auth.
