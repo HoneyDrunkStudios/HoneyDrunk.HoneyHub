@@ -1,34 +1,37 @@
-//! HoneyHub bridge host — exposes a `BridgeRuntime` to the PWA over the
-//! `honeyhub.bridge.v1` wire protocol on a local WebSocket.
+//! HoneyHub bridge host — serves the cockpit PWA and exposes a `BridgeRuntime` to
+//! it over the `honeyhub.bridge.v1` wire protocol, on one local origin.
 //!
 //! This is the transport that connects the browser cockpit to the Rust bridge
 //! (ADR-0091 D2/D5: the desktop shell hosts the bridge on localhost; mobile
-//! reaches the same host over a Tailscale tailnet). The transport mechanism is
-//! `[Provisional]` (ADR-0091 D5 / packet-04 README) — a localhost WebSocket here;
-//! it can move to Tauri IPC for the bundled-desktop case without changing the
-//! wire contract or the PWA's `WireClient` seam.
+//! reaches the same host over a Tailscale tailnet). It serves the built PWA as
+//! static assets and upgrades `/ws` to a WebSocket, so the page and the socket
+//! share an origin — the PWA derives the socket URL from its own location and
+//! auto-connects. The transport mechanism is `[Provisional]` (ADR-0091 D5); a
+//! Tauri shell can wrap this same local server in a native window unchanged.
 //!
 //! A client presents its pairing token (packet 05) as the `token` query parameter
-//! on the WebSocket URL; an unknown or revoked token is rejected at the handshake.
-//! After that, the client sends `ClientCommand` frames and receives `server_event`
-//! frames carrying `BridgeEvent`s. The host polls the runtime's pull-based stream
-//! on an interval and broadcasts new events to all connected clients.
+//! on the WebSocket URL; an unknown/revoked token is rejected at the handshake.
 
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
+use axum::extract::{Query, State};
+use axum::http::StatusCode;
+use axum::response::{IntoResponse, Response};
+use axum::routing::get;
+use axum::Router;
 use futures_util::{SinkExt, StreamExt};
 use honeyhub_bridge::clock::now_rfc3339;
 use honeyhub_bridge::{
     AgentBackendAdapter, BridgeError, BridgeEvent, ClientCommand, PairingRegistry, WireFrame,
 };
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::TcpListener;
 use tokio::sync::{broadcast, mpsc, Mutex};
-use tokio_tungstenite::tungstenite::handshake::server::{ErrorResponse, Request, Response};
-use tokio_tungstenite::tungstenite::http::StatusCode;
-use tokio_tungstenite::tungstenite::Message;
+use tower_http::services::ServeDir;
 
 /// Default poll cadence for draining the runtime's event stream.
 pub const DEFAULT_POLL_INTERVAL: Duration = Duration::from_millis(80);
@@ -37,53 +40,22 @@ pub const DEFAULT_POLL_INTERVAL: Duration = Duration::from_millis(80);
 /// of runs still worth polling, and a broadcast of events to every client.
 struct Host<A: AgentBackendAdapter> {
     runtime: Mutex<honeyhub_bridge::BridgeRuntime<A>>,
-    active_runs: Mutex<HashSet<String>>,
+    active_runs: Mutex<std::collections::HashSet<String>>,
     events: broadcast::Sender<BridgeEvent>,
 }
 
-/// Extract the `token` query parameter from a WebSocket upgrade request,
-/// percent-decoding the value so an encoded token still matches the registry.
-fn token_from_request(request: &Request) -> Option<String> {
-    let query = request.uri().query()?;
-    query.split('&').find_map(|pair| {
-        let (key, value) = pair.split_once('=')?;
-        if key == "token" {
-            Some(percent_decode(value))
-        } else {
-            None
-        }
-    })
+struct AppState<A: AgentBackendAdapter> {
+    host: Arc<Host<A>>,
+    registry: Arc<PairingRegistry>,
 }
 
-/// Minimal `application/x-www-form-urlencoded` value decode (`%XX` and `+`).
-fn percent_decode(input: &str) -> String {
-    let bytes = input.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut index = 0;
-    while index < bytes.len() {
-        match bytes[index] {
-            b'%' if index + 2 < bytes.len() => {
-                let hi = (bytes[index + 1] as char).to_digit(16);
-                let lo = (bytes[index + 2] as char).to_digit(16);
-                if let (Some(hi), Some(lo)) = (hi, lo) {
-                    out.push((hi * 16 + lo) as u8);
-                    index += 3;
-                } else {
-                    out.push(b'%');
-                    index += 1;
-                }
-            }
-            b'+' => {
-                out.push(b' ');
-                index += 1;
-            }
-            byte => {
-                out.push(byte);
-                index += 1;
-            }
+impl<A: AgentBackendAdapter> Clone for AppState<A> {
+    fn clone(&self) -> Self {
+        Self {
+            host: Arc::clone(&self.host),
+            registry: Arc::clone(&self.registry),
         }
     }
-    String::from_utf8_lossy(&out).into_owned()
 }
 
 /// Bind a listener for the host. Returns the listener so callers (and tests) can
@@ -92,13 +64,15 @@ pub async fn bind(addr: SocketAddr) -> std::io::Result<TcpListener> {
     TcpListener::bind(addr).await
 }
 
-/// Serve the bridge over the given listener until it errors. Connections are
-/// authenticated against `registry`; `runtime` drives the backend.
+/// Serve the cockpit and bridge over the given listener. `static_dir`, when set,
+/// is served as the PWA at `/` (the WebSocket lives at `/ws`); when `None`, only
+/// the WebSocket is served.
 pub async fn serve<A>(
     listener: TcpListener,
     runtime: honeyhub_bridge::BridgeRuntime<A>,
     registry: PairingRegistry,
     poll_interval: Duration,
+    static_dir: Option<PathBuf>,
 ) -> std::io::Result<()>
 where
     A: AgentBackendAdapter + Send + 'static,
@@ -106,13 +80,11 @@ where
     let (events_tx, _events_rx) = broadcast::channel::<BridgeEvent>(1024);
     let host = Arc::new(Host {
         runtime: Mutex::new(runtime),
-        active_runs: Mutex::new(HashSet::new()),
+        active_runs: Mutex::new(std::collections::HashSet::new()),
         events: events_tx,
     });
-    let registry = Arc::new(registry);
 
-    // Polling task: drain each active run's stream and broadcast new events.
-    let poll_handle = {
+    {
         let host = Arc::clone(&host);
         tokio::spawn(async move {
             let mut ticker = tokio::time::interval(poll_interval);
@@ -120,27 +92,39 @@ where
                 ticker.tick().await;
                 poll_active_runs(&host).await;
             }
-        })
-    };
-
-    loop {
-        match listener.accept().await {
-            Ok((stream, _peer)) => {
-                let host = Arc::clone(&host);
-                let registry = Arc::clone(&registry);
-                tokio::spawn(async move {
-                    if let Err(error) = handle_connection(stream, host, registry).await {
-                        eprintln!("bridge-host: connection ended: {error}");
-                    }
-                });
-            }
-            Err(error) => {
-                // Stop the polling task before returning so it does not run on.
-                poll_handle.abort();
-                return Err(error);
-            }
-        }
+        });
     }
+
+    let state = AppState {
+        host,
+        registry: Arc::new(registry),
+    };
+    let mut app = Router::new().route("/ws", get(ws_handler::<A>));
+    if let Some(dir) = static_dir {
+        app = app.fallback_service(ServeDir::new(dir).append_index_html_on_directories(true));
+    }
+    let app = app.with_state(state);
+
+    axum::serve(listener, app.into_make_service()).await
+}
+
+async fn ws_handler<A>(
+    upgrade: WebSocketUpgrade,
+    Query(params): Query<HashMap<String, String>>,
+    State(state): State<AppState<A>>,
+) -> Response
+where
+    A: AgentBackendAdapter + Send + 'static,
+{
+    // axum URL-decodes query values, so the token matches the registry as issued.
+    let authorized = params
+        .get("token")
+        .map(|token| state.registry.is_authorized(token))
+        .unwrap_or(false);
+    if !authorized {
+        return (StatusCode::UNAUTHORIZED, "invalid pairing token").into_response();
+    }
+    upgrade.on_upgrade(move |socket| handle_socket(socket, state.host))
 }
 
 async fn poll_active_runs<A: AgentBackendAdapter>(host: &Arc<Host<A>>) {
@@ -161,8 +145,6 @@ async fn poll_active_runs<A: AgentBackendAdapter>(host: &Arc<Host<A>>) {
                 }
             }
             Err(error) => {
-                // Stop polling this run, but say why rather than dropping it
-                // silently (e.g. the run was removed, or the adapter errored).
                 eprintln!(
                     "bridge-host: stream error for run {run_id} ({}): {}",
                     error.code, error.message
@@ -186,46 +168,14 @@ async fn poll_active_runs<A: AgentBackendAdapter>(host: &Arc<Host<A>>) {
     }
 }
 
-// The auth callback must return `Result<Response, ErrorResponse>` — a type
-// dictated by tokio-tungstenite's handshake API, so the large-Err lint does not
-// apply to a signature we control.
-#[allow(clippy::result_large_err)]
-async fn handle_connection<A>(
-    stream: TcpStream,
+async fn handle_socket<A: AgentBackendAdapter + Send + 'static>(
+    socket: WebSocket,
     host: Arc<Host<A>>,
-    registry: Arc<PairingRegistry>,
-) -> Result<(), tokio_tungstenite::tungstenite::Error>
-where
-    A: AgentBackendAdapter + Send + 'static,
-{
-    // Authenticate at the handshake: the pairing token rides the `token` query
-    // parameter; an unknown/revoked token is rejected before any frame flows.
-    let auth_registry = Arc::clone(&registry);
-    let ws = tokio_tungstenite::accept_hdr_async(
-        stream,
-        move |request: &Request, response: Response| {
-            let token = token_from_request(request);
-            let authorized = token
-                .as_deref()
-                .map(|token| auth_registry.is_authorized(token))
-                .unwrap_or(false);
-            if authorized {
-                Ok(response)
-            } else {
-                let mut error =
-                    ErrorResponse::new(Some("unauthorized: invalid pairing token".to_string()));
-                *error.status_mut() = StatusCode::UNAUTHORIZED;
-                Err(error)
-            }
-        },
-    )
-    .await?;
-
-    let (mut ws_sink, mut ws_stream) = ws.split();
+) {
+    let (mut sink, mut stream) = socket.split();
     let mut events_rx = host.events.subscribe();
     let (outbound_tx, mut outbound_rx) = mpsc::channel::<WireFrame>(256);
 
-    // Writer: server events (broadcast) + per-connection acks/errors/replays.
     let writer = tokio::spawn(async move {
         loop {
             tokio::select! {
@@ -233,14 +183,13 @@ where
                     match event {
                         Ok(event) => {
                             let frame = WireFrame::server_event(new_id(), event, now_rfc3339());
-                            if send_frame(&mut ws_sink, &frame).await.is_err() {
+                            if send_frame(&mut sink, &frame).await.is_err() {
                                 break;
                             }
                         }
                         Err(broadcast::error::RecvError::Lagged(_)) => {
-                            // This client fell behind and missed events; dropping
-                            // them would corrupt the transcript (partial tokens),
-                            // so fail fast and let the client reconnect + replay.
+                            // The client missed events; dropping them would corrupt
+                            // the transcript, so fail fast and let it reconnect.
                             let frame = WireFrame::error(
                                 new_id(),
                                 BridgeError::new(
@@ -249,7 +198,7 @@ where
                                 ),
                                 now_rfc3339(),
                             );
-                            let _ = send_frame(&mut ws_sink, &frame).await;
+                            let _ = send_frame(&mut sink, &frame).await;
                             break;
                         }
                         Err(broadcast::error::RecvError::Closed) => break,
@@ -258,7 +207,7 @@ where
                 frame = outbound_rx.recv() => {
                     match frame {
                         Some(frame) => {
-                            if send_frame(&mut ws_sink, &frame).await.is_err() {
+                            if send_frame(&mut sink, &frame).await.is_err() {
                                 break;
                             }
                         }
@@ -269,15 +218,12 @@ where
         }
     });
 
-    // Reader: parse client commands and drive the runtime.
-    while let Some(message) = ws_stream.next().await {
-        let message = message?;
+    while let Some(message) = stream.next().await {
+        let Ok(message) = message else { break };
         let text = match message {
             Message::Text(text) => text,
             Message::Close(_) => break,
-            Message::Ping(_) | Message::Pong(_) | Message::Binary(_) | Message::Frame(_) => {
-                continue
-            }
+            _ => continue,
         };
         let frame: WireFrame = match serde_json::from_str(text.as_str()) {
             Ok(frame) => frame,
@@ -298,7 +244,6 @@ where
     }
 
     writer.abort();
-    Ok(())
 }
 
 async fn handle_command<A: AgentBackendAdapter>(
@@ -330,8 +275,6 @@ async fn handle_command<A: AgentBackendAdapter>(
         }
     };
 
-    // Insert into the active set after releasing the runtime lock (poll never
-    // holds both locks at once, so there is no lock-ordering hazard).
     if let Some(run_id) = to_register {
         host.active_runs.lock().await.insert(run_id);
     }
@@ -353,8 +296,7 @@ async fn handle_command<A: AgentBackendAdapter>(
         }
         Err(error) => {
             // Tag the error with the originating frame id so the client can
-            // correlate it to the command it sent and surface the failure
-            // (e.g. a disallowed workspace root or backend).
+            // correlate it and surface the failure (e.g. a disallowed workspace).
             let mut error_frame = WireFrame::error(new_id(), error, now_rfc3339());
             error_frame.ack_frame_id = Some(frame_id.to_string());
             let _ = outbound_tx.send(error_frame).await;
@@ -362,20 +304,12 @@ async fn handle_command<A: AgentBackendAdapter>(
     }
 }
 
-async fn send_frame<S>(
-    sink: &mut S,
+async fn send_frame(
+    sink: &mut futures_util::stream::SplitSink<WebSocket, Message>,
     frame: &WireFrame,
-) -> Result<(), tokio_tungstenite::tungstenite::Error>
-where
-    S: SinkExt<Message, Error = tokio_tungstenite::tungstenite::Error> + Unpin,
-{
-    let text = serde_json::to_string(frame).map_err(|error| {
-        tokio_tungstenite::tungstenite::Error::Io(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            error,
-        ))
-    })?;
-    sink.send(Message::Text(text)).await
+) -> Result<(), axum::Error> {
+    let text = serde_json::to_string(frame).map_err(axum::Error::new)?;
+    sink.send(Message::Text(text.into())).await
 }
 
 fn new_id() -> String {

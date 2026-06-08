@@ -1,5 +1,9 @@
 # Changelog
 
+## [0.8.0] - 2026-06-08
+
+- Version alignment for the turnkey-local-cockpit release (no bridge code change).
+
 ## [0.7.0] - 2026-06-07
 
 - Added a public `clock` module (`now_rfc3339` + `format_rfc3339_utc`) so the adapter and the new bridge host stamp events with RFC3339 UTC timestamps without a date dependency; `default_event_clock` now uses it.

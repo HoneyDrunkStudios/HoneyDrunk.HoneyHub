@@ -22,6 +22,13 @@ export interface WireSocket {
   onClose(handler: () => void): void;
 }
 
+/** Derive the bridge WebSocket URL from the page's own location + a token, so a
+    PWA served by the bridge host (same origin) auto-connects to its `/ws`. */
+export function bridgeWsUrl(location: { protocol: string; host: string }, token: string): string {
+  const scheme = location.protocol === "https:" ? "wss" : "ws";
+  return `${scheme}://${location.host}/ws?token=${encodeURIComponent(token)}`;
+}
+
 export function browserSocket(url: string): WireSocket {
   const ws = new WebSocket(url);
   return {

@@ -1,5 +1,9 @@
 # Changelog
 
+## [0.8.0] - 2026-06-08
+
+- Updated workspace package version alignment for the turnkey-local-cockpit release.
+
 ## [0.7.0] - 2026-06-07
 
 - Updated workspace package version alignment for the bridge-host transport release.

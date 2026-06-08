@@ -1,5 +1,9 @@
 # Changelog
 
+## [0.8.0] - 2026-06-08
+
+- Auto-connect to the bridge when the page is served by the host (same origin with a `?token=` query): the app derives the `/ws` URL from its own location via `bridgeWsUrl` and connects on load, so launching the host is the only step. The manual Bridge URL / Connect control remains for the dev-server workflow.
+
 ## [0.7.0] - 2026-06-07
 
 - Added `WebSocketWireClient` (`wire/webSocketClient`) — a real transport behind the existing `WireClient` seam that talks to the bridge host over the `honeyhub.bridge.v1` WebSocket; queues commands until the socket opens and dispatches server events to subscribers.

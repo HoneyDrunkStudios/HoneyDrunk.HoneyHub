@@ -1,11 +1,11 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import type { Notification } from "@honeydrunk/honeyhub-types";
 import { BridgeSettings } from "./BridgeSettings";
 import { NotificationList } from "./NotificationList";
 import { RunScreen } from "./routes/run/RunScreen";
 import { emptyBridgeSettings, type BridgeSettingsState } from "./settingsModel";
 import { MockWireClient } from "./wire/mockClient";
-import { WebSocketWireClient } from "./wire/webSocketClient";
+import { bridgeWsUrl, WebSocketWireClient } from "./wire/webSocketClient";
 import type { WireClient } from "./wire/client";
 import "./styles.css";
 
@@ -34,6 +34,24 @@ export function App({ client }: AppProps = {}) {
   // surface itself is ready now.
   const [notifications] = useState<Notification[]>([]);
 
+  // When the bridge host serves this page (same origin, `?token=` in the URL),
+  // connect automatically so launching the host is the only step.
+  useEffect(() => {
+    if (client !== undefined) {
+      return;
+    }
+    const token = new URLSearchParams(window.location.search).get("token");
+    if (token === null || token.length === 0) {
+      return;
+    }
+    try {
+      setWireClient(WebSocketWireClient.connect(bridgeWsUrl(window.location, token)));
+      setConnected(true);
+    } catch {
+      // Leave the manual connect control available.
+    }
+  }, [client]);
+
   const onConnect = () => {
     const url = bridgeUrl.trim();
     if (url.length === 0) {
@@ -61,7 +79,7 @@ export function App({ client }: AppProps = {}) {
             aria-label="Bridge URL"
             value={bridgeUrl}
             onChange={(event) => setBridgeUrl(event.target.value)}
-            placeholder="ws://127.0.0.1:8765/?token=… (from the bridge host)"
+            placeholder="ws://127.0.0.1:8765/ws?token=… (from the bridge host)"
           />
           <button type="button" onClick={onConnect}>
             Connect

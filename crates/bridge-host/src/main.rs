@@ -8,11 +8,15 @@
 //! - `HONEYHUB_WORKSPACE_ROOTS`: comma-separated absolute workspace roots to allowlist (the bridge refuses launches outside them).
 //! - `HONEYHUB_CLAUDE_PROGRAM`: the Claude Code CLI program (default `claude`).
 //! - `HONEYHUB_CLAUDE_MODEL`: optional model passed to the CLI.
+//! - `HONEYHUB_STATIC_DIR`: directory of the built PWA to serve (default
+//!   `packages/ui/dist` when it exists). When served, open the printed http URL
+//!   and the cockpit auto-connects; otherwise only the WebSocket is exposed.
 //!
-//! On start it generates a pairing token and prints the WebSocket URL (including
-//! the token) for the PWA to connect with.
+//! On start it generates a pairing token and prints the URL (with the token) to
+//! open the cockpit with.
 
 use std::net::SocketAddr;
+use std::path::PathBuf;
 
 use honeyhub_bridge::adapters::{default_event_clock, ClaudeLocalAdapter};
 use honeyhub_bridge::{
@@ -50,10 +54,25 @@ async fn main() -> std::io::Result<()> {
     let grant = registry.pair("local-cockpit", honeyhub_bridge::clock::now_rfc3339());
     let token = grant.token;
 
+    // Serve the built PWA from HONEYHUB_STATIC_DIR, or packages/ui/dist if it
+    // exists, so the whole cockpit runs from one command on one origin.
+    let static_dir: Option<PathBuf> = match std::env::var("HONEYHUB_STATIC_DIR") {
+        Ok(dir) if !dir.trim().is_empty() => Some(PathBuf::from(dir)),
+        _ => {
+            let default_dir = PathBuf::from("packages/ui/dist");
+            default_dir.is_dir().then_some(default_dir)
+        }
+    };
+
     let listener = bind(addr).await?;
     let bound = listener.local_addr()?;
-    println!("HoneyHub bridge host listening on ws://{bound}");
-    println!("Cockpit URL: ws://{bound}/?token={token}");
+    if static_dir.is_some() {
+        println!("HoneyHub cockpit ready — open: http://{bound}/?token={token}");
+    } else {
+        println!(
+            "HoneyHub bridge host listening; connect the PWA to ws://{bound}/ws?token={token}"
+        );
+    }
     if std::env::var("HONEYHUB_WORKSPACE_ROOTS")
         .unwrap_or_default()
         .is_empty()
@@ -63,5 +82,12 @@ async fn main() -> std::io::Result<()> {
         );
     }
 
-    serve(listener, runtime, registry, DEFAULT_POLL_INTERVAL).await
+    serve(
+        listener,
+        runtime,
+        registry,
+        DEFAULT_POLL_INTERVAL,
+        static_dir,
+    )
+    .await
 }
