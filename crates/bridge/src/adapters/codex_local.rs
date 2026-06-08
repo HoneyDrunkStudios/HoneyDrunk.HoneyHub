@@ -368,7 +368,7 @@ impl AgentBackendAdapter for CodexLocalAdapter {
         // completes; a non-zero exit fails), then retire the run so the finished
         // child does not linger — the captured vendor session survives for a
         // follow-up turn.
-        if let Some(success) = run.poll_exit() {
+        let retired = if let Some(success) = run.poll_exit() {
             let now = (self.clock)();
             if success {
                 events.push(terminal_status(
@@ -391,8 +391,15 @@ impl AgentBackendAdapter for CodexLocalAdapter {
                     DispatchRunState::Failed,
                 ));
             }
-            slot.retire();
-        }
+            slot.retire()
+        } else {
+            None
+        };
+
+        // Release the runs lock before dropping the retired child: `ChildRun::drop`
+        // joins the stdout reader thread, which must not block other runs.
+        drop(guard);
+        drop(retired);
 
         Ok(events)
     }
