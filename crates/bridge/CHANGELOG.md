@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.13.0] - 2026-06-08
+
+- Added the `copilot.local` adapter (`adapters::copilot_local::CopilotLocalAdapter`): drives the official GitHub Copilot CLI under the user's own local `gh` token (ADR-0090 §3b), as a thin strategy over the shared `child_run` driver.
+- Token-level streaming: `assistant.message_delta` deltas surface as partial messages; `assistant.message_completed`/`turn.completed` emit a final message + the usage signal. Resume-based reply (interactive_reply false → follow-up-run path); the CLI-shape surface is isolated to `exec_command`.
+- Usage fidelity `estimated` (ADR-0092 D2): premium-requests + duration are the exact billing units (taken directly); token figures are estimated from a coarse text-size proxy with low confidence, and USD is absent (Copilot bills premium requests, not a token cost). A clean turn that ends without a completion event still synthesizes the estimated signal so a turn never silently drops its premium request.
+
 ## [0.12.0] - 2026-06-08
 
 - Added the `codex.local` adapter (`adapters::codex_local::CodexLocalAdapter`): drives the official Codex CLI's non-interactive `codex exec --json` mode under the user's own local session (ADR-0090 §3a). Built as a thin strategy over the shared `child_run` driver.
