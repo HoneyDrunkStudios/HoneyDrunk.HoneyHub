@@ -66,6 +66,20 @@ describe("computeSessionDiagnostics", () => {
     expect(diagnostics.elapsedMs).toBe(120_000);
   });
 
+  it("rolls aggregate fidelity up conservatively across mixed signals", () => {
+    const estimated: UsageSignal = { ...usage(50, 0.5), fidelity: "estimated" };
+    const exact: UsageSignal = { ...usage(60, 0.6), fidelity: "exact" };
+    const diagnostics = computeSessionDiagnostics({
+      backend: "claude.local",
+      messages: [message("m1", "x", "2026-06-08T12:00:00Z")],
+      usage: [estimated, exact]
+    });
+    // The aggregate is only as precise as its least-precise part...
+    expect(diagnostics.sessionFidelity).toBe("estimated");
+    // ...while the last turn reflects the latest signal's fidelity.
+    expect(diagnostics.fidelity).toBe("exact");
+  });
+
   it("flags a long session with a switch recommendation", () => {
     const diagnostics = computeSessionDiagnostics({
       backend: "claude.local",

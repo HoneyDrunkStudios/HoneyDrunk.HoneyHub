@@ -19,7 +19,10 @@ export interface SessionHealth {
 export interface SessionDiagnostics {
   provider: AgentBackend;
   model: string;
+  /** Fidelity of the latest turn (the current routing). */
   fidelity: UsageFidelity | undefined;
+  /** Conservative rollup across the whole session for the aggregate total. */
+  sessionFidelity: UsageFidelity | undefined;
   sessionTokens: number;
   sessionUsd: number | undefined;
   lastTurnTokens: number | undefined;
@@ -47,6 +50,22 @@ function signalTokens(signal: UsageSignal): number | undefined {
   }
   if (signal.inputTokens !== undefined || signal.outputTokens !== undefined) {
     return (signal.inputTokens ?? 0) + (signal.outputTokens ?? 0);
+  }
+  return undefined;
+}
+
+// Roll the session's fidelity up conservatively (ADR-0092 D2): a session total is
+// only as precise as its least-precise contributing signal, so an aggregate is
+// never rendered as exact when any part was estimated/derived.
+function rollupFidelity(usage: UsageSignal[]): UsageFidelity | undefined {
+  if (usage.some((signal) => signal.fidelity === "estimated")) {
+    return "estimated";
+  }
+  if (usage.some((signal) => signal.fidelity === "derived")) {
+    return "derived";
+  }
+  if (usage.some((signal) => signal.fidelity === "exact")) {
+    return "exact";
   }
   return undefined;
 }
@@ -103,6 +122,7 @@ export function computeSessionDiagnostics(
     provider: latest?.backend ?? backend,
     model: latest?.modelLabel ?? "pending",
     fidelity: latest?.fidelity,
+    sessionFidelity: rollupFidelity(usage),
     sessionTokens,
     sessionUsd,
     lastTurnTokens: latest === undefined ? undefined : signalTokens(latest),

@@ -51,7 +51,10 @@ export function SessionDiagnostics({ backend, messages, usage }: SessionDiagnost
           <dt>Session usage</dt>
           <dd>
             {formatTokens(diagnostics.sessionTokens)} tok ·{" "}
-            {formatUsdOrDash(diagnostics.sessionUsd, diagnostics.fidelity)}
+            {formatUsdOrDash(diagnostics.sessionUsd, diagnostics.sessionFidelity)}
+            {diagnostics.sessionFidelity !== undefined && (
+              <span className="fidelity-tag"> {diagnostics.sessionFidelity}</span>
+            )}
           </dd>
         </div>
         <div>
