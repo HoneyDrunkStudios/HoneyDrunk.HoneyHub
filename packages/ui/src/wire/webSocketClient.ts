@@ -41,8 +41,9 @@ export function browserSocket(url: string): WireSocket {
   };
 }
 
-/** Ignore frames larger than this — a guard against a buggy/hostile host. */
-const MAX_FRAME_BYTES = 1_000_000;
+/** Ignore frames longer than this (UTF-16 code units) — a guard against a
+    buggy/hostile host sending an enormous payload. */
+const MAX_FRAME_CHARS = 1_000_000;
 
 function frame(command: ClientCommand): WireFrame {
   return {
@@ -64,7 +65,7 @@ const DEFAULT_RESPONSE_TIMEOUT_MS = 15_000;
 
 export class WebSocketWireClient implements WireClient {
   private handlers = new Set<WireEventHandler>();
-  private queue: string[] = [];
+  private queue: Array<{ frameId: string; data: string }> = [];
   private open = false;
   private closed = false;
   private pending = new Map<string, Pending>();
@@ -74,11 +75,15 @@ export class WebSocketWireClient implements WireClient {
     private responseTimeoutMs: number = DEFAULT_RESPONSE_TIMEOUT_MS
   ) {
     this.socket.onOpen(() => {
-      // Flush queued frames before marking open so ordering is unambiguous.
+      // Flush queued frames before marking open so ordering is unambiguous, and
+      // skip any whose command already settled (timed out / rejected) while
+      // queued — so a failed command is not silently executed later.
       const queued = this.queue;
       this.queue = [];
-      for (const data of queued) {
-        this.socket.send(data);
+      for (const item of queued) {
+        if (this.pending.has(item.frameId)) {
+          this.socket.send(item.data);
+        }
       }
       this.open = true;
     });
@@ -104,7 +109,7 @@ export class WebSocketWireClient implements WireClient {
   }
 
   private receive(data: string): void {
-    if (data.length > MAX_FRAME_BYTES) {
+    if (data.length > MAX_FRAME_CHARS) {
       return;
     }
     let raw: unknown;
@@ -178,7 +183,7 @@ export class WebSocketWireClient implements WireClient {
       if (this.open) {
         this.socket.send(data);
       } else {
-        this.queue.push(data);
+        this.queue.push({ frameId: wireFrame.frameId, data });
       }
     });
   }

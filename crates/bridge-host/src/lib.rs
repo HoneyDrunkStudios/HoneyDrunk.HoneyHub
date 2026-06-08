@@ -237,7 +237,21 @@ where
                                 break;
                             }
                         }
-                        Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                        Err(broadcast::error::RecvError::Lagged(_)) => {
+                            // This client fell behind and missed events; dropping
+                            // them would corrupt the transcript (partial tokens),
+                            // so fail fast and let the client reconnect + replay.
+                            let frame = WireFrame::error(
+                                new_id(),
+                                BridgeError::new(
+                                    "stream_lagged",
+                                    "event stream lagged; reconnect to replay",
+                                ),
+                                now_rfc3339(),
+                            );
+                            let _ = send_frame(&mut ws_sink, &frame).await;
+                            break;
+                        }
                         Err(broadcast::error::RecvError::Closed) => break,
                     }
                 }
