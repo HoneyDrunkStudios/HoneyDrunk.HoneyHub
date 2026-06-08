@@ -46,12 +46,24 @@ function frame(command: ClientCommand): WireFrame {
   };
 }
 
+interface Pending {
+  resolve: () => void;
+  reject: (error: Error) => void;
+}
+
+/** How long to wait for the host's ack/error for a command before failing. */
+const DEFAULT_RESPONSE_TIMEOUT_MS = 15_000;
+
 export class WebSocketWireClient implements WireClient {
   private handlers = new Set<WireEventHandler>();
   private queue: string[] = [];
   private open = false;
+  private pending = new Map<string, Pending>();
 
-  constructor(private socket: WireSocket) {
+  constructor(
+    private socket: WireSocket,
+    private responseTimeoutMs: number = DEFAULT_RESPONSE_TIMEOUT_MS
+  ) {
     this.socket.onOpen(() => {
       this.open = true;
       for (const pending of this.queue) {
@@ -74,6 +86,20 @@ export class WebSocketWireClient implements WireClient {
     } catch {
       return;
     }
+    // Resolve/reject the command that this frame answers (host tags acks and
+    // command errors with the originating frame id), so launch-gate failures
+    // surface to the caller instead of being silently dropped.
+    if (parsed.kind === "ack" && parsed.ackFrameId !== undefined) {
+      this.settle(parsed.ackFrameId, undefined);
+      return;
+    }
+    if (parsed.kind === "error") {
+      const message = parsed.error?.message ?? "bridge error";
+      if (parsed.ackFrameId !== undefined) {
+        this.settle(parsed.ackFrameId, new Error(message));
+      }
+      return;
+    }
     if (parsed.kind === "server_event" && parsed.event !== undefined) {
       const event: BridgeEvent = parsed.event;
       for (const handler of this.handlers) {
@@ -82,13 +108,45 @@ export class WebSocketWireClient implements WireClient {
     }
   }
 
-  private dispatch(command: ClientCommand): void {
-    const data = JSON.stringify(frame(command));
-    if (this.open) {
-      this.socket.send(data);
-    } else {
-      this.queue.push(data);
+  private settle(frameId: string, error: Error | undefined): void {
+    const pending = this.pending.get(frameId);
+    if (pending === undefined) {
+      return;
     }
+    this.pending.delete(frameId);
+    if (error === undefined) {
+      pending.resolve();
+    } else {
+      pending.reject(error);
+    }
+  }
+
+  // Send a command and resolve when the host acks it (or reject on error/timeout).
+  private dispatch(command: ClientCommand): Promise<void> {
+    const wireFrame = frame(command);
+    return new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        if (this.pending.delete(wireFrame.frameId)) {
+          reject(new Error("the bridge did not respond"));
+        }
+      }, this.responseTimeoutMs);
+      this.pending.set(wireFrame.frameId, {
+        resolve: () => {
+          clearTimeout(timer);
+          resolve();
+        },
+        reject: (error) => {
+          clearTimeout(timer);
+          reject(error);
+        }
+      });
+      const data = JSON.stringify(wireFrame);
+      if (this.open) {
+        this.socket.send(data);
+      } else {
+        this.queue.push(data);
+      }
+    });
   }
 
   subscribe(handler: WireEventHandler): () => void {
@@ -103,15 +161,15 @@ export class WebSocketWireClient implements WireClient {
     if (runId === undefined) {
       throw new Error("WebSocketWireClient.start requires request.requestedRunId");
     }
-    this.dispatch({ kind: "start", request });
+    await this.dispatch({ kind: "start", request });
     return { runId };
   }
 
   async reply(runId: string, text: string): Promise<void> {
-    this.dispatch({ kind: "reply", runId, text });
+    await this.dispatch({ kind: "reply", runId, text });
   }
 
   async stop(runId: string): Promise<void> {
-    this.dispatch({ kind: "stop", runId });
+    await this.dispatch({ kind: "stop", runId });
   }
 }

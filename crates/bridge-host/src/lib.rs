@@ -120,7 +120,15 @@ async fn poll_active_runs<A: AgentBackendAdapter>(host: &Arc<Host<A>>) {
                     let _ = host.events.send(event);
                 }
             }
-            Err(_) => finished.push(run_id.clone()),
+            Err(error) => {
+                // Stop polling this run, but say why rather than dropping it
+                // silently (e.g. the run was removed, or the adapter errored).
+                eprintln!(
+                    "bridge-host: stream error for run {run_id} ({}): {}",
+                    error.code, error.message
+                );
+                finished.push(run_id.clone());
+            }
         }
         if runtime
             .run(&run_id)
@@ -290,9 +298,12 @@ async fn handle_command<A: AgentBackendAdapter>(
                 .await;
         }
         Err(error) => {
-            let _ = outbound_tx
-                .send(WireFrame::error(new_id(), error, now_rfc3339()))
-                .await;
+            // Tag the error with the originating frame id so the client can
+            // correlate it to the command it sent and surface the failure
+            // (e.g. a disallowed workspace root or backend).
+            let mut error_frame = WireFrame::error(new_id(), error, now_rfc3339());
+            error_frame.ack_frame_id = Some(frame_id.to_string());
+            let _ = outbound_tx.send(error_frame).await;
         }
     }
 }
