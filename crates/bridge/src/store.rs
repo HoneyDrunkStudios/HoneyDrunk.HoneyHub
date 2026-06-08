@@ -244,6 +244,22 @@ impl LocalStore {
     /// outside the structured document so they can be pinned/pruned separately and
     /// never leave the device.
     pub fn append_transcript(&mut self, message: &DispatchMessage) -> Result<(), StoreError> {
+        // Fail fast on an unknown session/run before writing anything: an orphan
+        // transcript file would never be scanned by `prune`, so raw transcript text
+        // could outlive the structured record. Also clear (and persist) the pruned
+        // flag if a previously pruned transcript re-appears.
+        let mut flipped = false;
+        {
+            let run = self.run_mut(&message.session_id, &message.run_id)?;
+            if run.transcript_pruned {
+                run.transcript_pruned = false;
+                flipped = true;
+            }
+        }
+        if flipped {
+            self.save()?;
+        }
+
         let path = self.transcript_path(&message.run_id);
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)
@@ -257,20 +273,6 @@ impl LocalStore {
             .open(&path)
             .map_err(|error| StoreError::io("open transcript file", error))?;
         writeln!(file, "{line}").map_err(|error| StoreError::io("append transcript", error))?;
-        // A re-appeared transcript clears the pruned flag; persist the flip so a
-        // restart does not report it as still pruned.
-        let mut flipped = false;
-        if let Some(stored) = self.data.sessions.get_mut(&message.session_id) {
-            if let Some(run) = stored.runs.get_mut(&message.run_id) {
-                if run.transcript_pruned {
-                    run.transcript_pruned = false;
-                    flipped = true;
-                }
-            }
-        }
-        if flipped {
-            self.save()?;
-        }
         Ok(())
     }
 

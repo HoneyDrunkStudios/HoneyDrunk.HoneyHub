@@ -105,6 +105,10 @@ pub fn notification_for_artifact(
         session_id: artifact.session_id.clone(),
         run_id: artifact.run_id.clone(),
         backend,
+        // `DispatchArtifact` only carries `repo_relative_path` (a path, not a repo
+        // identifier), and ADR-0090 D7 keeps notifications free of paths — so the
+        // repo field is intentionally omitted here. A repo identifier can be
+        // threaded in later if an adapter supplies one.
         repo: None,
         link: artifact.href.clone(),
         created_at: created_at.into(),
