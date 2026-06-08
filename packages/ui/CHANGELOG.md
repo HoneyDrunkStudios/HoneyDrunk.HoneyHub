@@ -1,5 +1,9 @@
 # Changelog
 
+## [0.10.0] - 2026-06-08
+
+- Added a per-session **Diagnostics** panel to the run screen: where the session was routed (provider · model + usage fidelity), token/cost usage for the whole session and the last turn, message count + elapsed time, and rules-based session-health recommendations (e.g. start a fresh session once it gets long). Cross-session suggestions remain a separate, later surface.
+
 ## [0.9.0] - 2026-06-08
 
 - Version alignment for the host auto-open + mobile release (no UI code change).

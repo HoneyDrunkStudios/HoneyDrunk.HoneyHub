@@ -11,7 +11,9 @@ a single codebase (ADR-0091 D2).
   run completes; stop a run; and see produced artifacts (branch/PR/draft) as links.
   Per-session usage renders via a **fidelity-aware** `UsageBadge` that visually
   distinguishes exact / derived / estimated and never shows an estimate as an exact
-  figure (ADR-0092 D2).
+  figure (ADR-0092 D2). A per-session **Diagnostics** panel shows where the session
+  was routed (provider · model), session + last-turn token/cost usage, message
+  count + elapsed time, and rules-based session-health recommendations.
 - **Bridge settings** (`BridgeSettings`) — pair/revoke devices and edit the
   workspace + backend allowlists.
 - **Notifications** (`NotificationList`) — state-only notifications (status/backend/

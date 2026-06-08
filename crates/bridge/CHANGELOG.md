@@ -1,5 +1,9 @@
 # Changelog
 
+## [0.10.0] - 2026-06-08
+
+- Version alignment for the session-diagnostics release (no bridge code change).
+
 ## [0.9.0] - 2026-06-08
 
 - Version alignment for the host auto-open + mobile release (no bridge code change).

@@ -7,6 +7,7 @@ import type {
   UsageSignal
 } from "@honeydrunk/honeyhub-types";
 import { UsageBadge } from "../../components/UsageBadge";
+import { SessionDiagnostics } from "./SessionDiagnostics";
 import type { WireClient } from "../../wire/client";
 
 export interface RunScreenProps {
@@ -241,6 +242,8 @@ export function RunScreen({ client, workspaceRoots = [] }: RunScreenProps) {
         </div>
       ) : (
         <>
+          <SessionDiagnostics backend="claude.local" messages={messages} usage={usage} />
+
           <ol className="transcript" aria-label="Transcript">
             {messages.map((message) => (
               <li key={message.id} className={`message role-${message.role}`}>
