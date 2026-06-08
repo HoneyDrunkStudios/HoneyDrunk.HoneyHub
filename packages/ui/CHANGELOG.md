@@ -1,5 +1,9 @@
 # Changelog
 
+## [0.9.0] - 2026-06-08
+
+- Version alignment for the host auto-open + mobile release (no UI code change).
+
 ## [0.8.0] - 2026-06-08
 
 - Auto-connect to the bridge when the page is served by the host (same origin with a `?token=` query): the app derives the `/ws` URL from its own location via `bridgeWsUrl` and connects on load, so launching the host is the only step. The manual Bridge URL / Connect control remains for the dev-server workflow.

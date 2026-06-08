@@ -1,5 +1,9 @@
 # Changelog
 
+## [0.9.0] - 2026-06-08
+
+- Version alignment for the host auto-open + mobile release (no bridge code change).
+
 ## [0.8.0] - 2026-06-08
 
 - Version alignment for the turnkey-local-cockpit release (no bridge code change).

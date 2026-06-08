@@ -59,8 +59,26 @@ single command runs the whole thing:
    ```
 
    It prints, e.g., `HoneyHub cockpit ready — open: http://127.0.0.1:8765/?token=<token>`.
-4. Open that URL. The cockpit loads and **auto-connects** to the bridge; start a
-   `claude.local` session and drive it.
+4. The cockpit opens in your browser and **auto-connects** to the bridge; start a
+   `claude.local` session and drive it. (Set `HONEYHUB_NO_BROWSER=1` to skip the
+   auto-open.)
+
+### From your phone (Tailscale)
+
+The same one binary serves mobile — no separate app (ADR-0091 D2). With the bridge
+host and your phone on one Tailscale tailnet:
+
+```powershell
+$env:HONEYHUB_BRIDGE_ADDR = "0.0.0.0:8765"   # listen on the tailnet, not just loopback
+$env:HONEYHUB_NO_BROWSER = "1"               # the phone opens it, not this machine
+$env:HONEYHUB_WORKSPACE_ROOTS = "C:\path\to\your\repo"
+cargo run -p honeyhub-bridge-host
+```
+
+From the phone's browser open `http://<this-machine's-tailnet-ip>:8765/?token=<token>`
+(the token is printed on start). The page auto-connects to the same bridge. The
+relay is Tailscale's encrypted WireGuard mesh — HoneyHub runs no middlebox and
+holds no vendor auth on the path (ADR-0091 D5 `[Firm]`).
 
 For UI development you can instead run the PWA dev server
 (`npm run dev -w @honeydrunk/honeyhub-ui`, served on `:5173`) and paste the host's
