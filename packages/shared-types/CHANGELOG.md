@@ -1,5 +1,9 @@
 # Changelog
 
+## [0.6.0] - 2026-06-07
+
+- Version alignment for the run-screen release (no type changes).
+
 ## [0.5.0] - 2026-06-07
 
 - Added state-only `Notification` + `NotificationKind` types (status/backend/repo/link only), mirroring the bridge notification seam.

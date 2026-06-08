@@ -37,7 +37,7 @@ export function NotificationList({ notifications }: NotificationListProps) {
                 <span className="notification-repo">{notification.repo}</span>
               )}
               {notification.link !== undefined && (
-                <a href={notification.link} target="_blank" rel="noreferrer">
+                <a href={notification.link} target="_blank" rel="noopener noreferrer">
                   open
                 </a>
               )}

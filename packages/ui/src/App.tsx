@@ -1,18 +1,29 @@
-import { useState } from "react";
-import type { DispatchRunState, Notification, UsageFidelity } from "@honeydrunk/honeyhub-types";
+import { useMemo, useState } from "react";
+import type { Notification } from "@honeydrunk/honeyhub-types";
 import { BridgeSettings } from "./BridgeSettings";
 import { NotificationList } from "./NotificationList";
+import { RunScreen } from "./routes/run/RunScreen";
+import { emptyBridgeSettings, type BridgeSettingsState } from "./settingsModel";
+import { MockWireClient } from "./wire/mockClient";
+import type { WireClient } from "./wire/client";
 import "./styles.css";
-
-const sampleState: DispatchRunState = "created";
-const sampleFidelity: UsageFidelity = "exact";
 
 type View = "run" | "settings" | "notifications";
 
-export function App() {
+export interface AppProps {
+  // Injectable so tests (and a future real WebSocket client) can supply their own
+  // transport; defaults to the offline mock that scripts a Claude Code exchange.
+  client?: WireClient;
+}
+
+export function App({ client }: AppProps = {}) {
   const [view, setView] = useState<View>("run");
-  // Notifications arrive from the bridge once the run-screen transport is wired
-  // (packet 08); the surface itself is ready now.
+  const wireClient = useMemo(() => client ?? new MockWireClient(), [client]);
+  // Bridge settings are owned here so the run screen can read the workspace
+  // allowlist the operator edits in Bridge settings.
+  const [settings, setSettings] = useState<BridgeSettingsState>(emptyBridgeSettings);
+  // Notifications arrive from the bridge once the transport surfaces them; the
+  // surface itself is ready now.
   const [notifications] = useState<Notification[]>([]);
 
   return (
@@ -22,15 +33,10 @@ export function App() {
           <p className="eyebrow">HoneyHub</p>
           <h1>Agent Cockpit</h1>
         </div>
-        <span className="status-pill">{sampleState}</span>
       </section>
 
       <nav className="view-tabs" aria-label="HoneyHub views">
-        <button
-          type="button"
-          aria-pressed={view === "run"}
-          onClick={() => setView("run")}
-        >
+        <button type="button" aria-pressed={view === "run"} onClick={() => setView("run")}>
           Run
         </button>
         <button
@@ -49,29 +55,14 @@ export function App() {
         </button>
       </nav>
 
-      {/* Both panels stay mounted; we toggle visibility so the bridge-settings
-          model (paired devices, in-progress allowlist edits) survives a tab
-          switch instead of being discarded on unmount. */}
-      <section
-        className="run-panel"
-        aria-labelledby="run-title"
-        hidden={view !== "run"}
-      >
-        <div>
-          <p className="eyebrow">Run</p>
-          <h2 id="run-title">No active session</h2>
-          <p className="body">
-            Pair a local bridge, choose an allowlisted workspace, and start a Claude Code run. Bridge wiring lands in the Phase 2 run screen.
-          </p>
-        </div>
-        <div className="usage-card" aria-label="Usage fidelity">
-          <span>Usage</span>
-          <strong>{sampleFidelity}</strong>
-        </div>
-      </section>
+      {/* Both panels stay mounted; visibility is toggled so in-progress state
+          survives a tab switch. */}
+      <div hidden={view !== "run"}>
+        <RunScreen client={wireClient} workspaceRoots={settings.workspaceRoots} />
+      </div>
 
       <div hidden={view !== "settings"}>
-        <BridgeSettings />
+        <BridgeSettings state={settings} onChange={setSettings} />
       </div>
 
       <div hidden={view !== "notifications"}>

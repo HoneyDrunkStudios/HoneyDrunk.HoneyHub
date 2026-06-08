@@ -259,6 +259,172 @@ h2 {
   font-size: 0.85rem;
 }
 
+.run-screen {
+  display: grid;
+  gap: 16px;
+  padding: 24px;
+  border: 1px solid #2b3541;
+  border-radius: 8px;
+  background: #151b22;
+}
+
+.run-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.run-status-group {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.run-start {
+  display: grid;
+  gap: 10px;
+  max-width: 64ch;
+}
+
+.run-start input,
+.run-start select,
+.run-start textarea {
+  padding: 8px 10px;
+  border: 1px solid #38434f;
+  border-radius: 6px;
+  background: #101820;
+  color: #eef2f6;
+  font: inherit;
+}
+
+.run-start button,
+.run-controls button {
+  justify-self: start;
+  padding: 8px 14px;
+  border: 1px solid #38434f;
+  border-radius: 6px;
+  background: #18212a;
+  color: #eef2f6;
+  cursor: pointer;
+}
+
+.run-backend {
+  color: #78d5d7;
+  font-size: 0.85rem;
+}
+
+.transcript {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.message {
+  display: grid;
+  gap: 4px;
+  padding: 10px 12px;
+  border: 1px solid #2b3541;
+  border-radius: 6px;
+  background: #101820;
+}
+
+.message.role-user {
+  background: #161d27;
+  border-color: #38434f;
+}
+
+.message.streaming {
+  opacity: 0.75;
+}
+
+.message-role {
+  color: #78d5d7;
+  font-size: 0.72rem;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.artifacts {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.artifact {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  padding: 8px 12px;
+  border: 1px solid #2b3541;
+  border-radius: 6px;
+  background: #101820;
+}
+
+.artifact-kind {
+  color: #b8c3cf;
+  font-size: 0.78rem;
+  text-transform: uppercase;
+}
+
+.run-controls {
+  display: flex;
+  gap: 16px;
+  align-items: end;
+  flex-wrap: wrap;
+}
+
+.reply-box {
+  display: grid;
+  gap: 6px;
+  flex: 1 1 280px;
+}
+
+.reply-box input {
+  padding: 8px 10px;
+  border: 1px solid #38434f;
+  border-radius: 6px;
+  background: #101820;
+  color: #eef2f6;
+}
+
+.run-controls .stop {
+  border-color: #ff9b9b;
+  color: #ff9b9b;
+}
+
+.usage-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 10px;
+  border: 1px solid #38434f;
+  border-radius: 999px;
+  background: #101820;
+}
+
+.usage-usd {
+  color: #7ee787;
+}
+
+.fidelity-tag {
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  color: #b8c3cf;
+}
+
+.usage-badge.fidelity-estimated .fidelity-tag {
+  color: #f8d86a;
+}
+
+.usage-badge.fidelity-derived .fidelity-tag {
+  color: #78d5d7;
+}
+
 @media (max-width: 720px) {
   .toolbar {
     align-items: flex-start;

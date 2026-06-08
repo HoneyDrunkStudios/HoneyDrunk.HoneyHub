@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.6.0] - 2026-06-07
+
+- Added the chat-shaped run screen (`routes/run/RunScreen`): start a `claude.local` session, watch the token-level stream + run state, reply to `needs_input` and follow up after completion, stop a run, and see artifacts as links.
+- Added a `WireClient` seam (`wire/client`) with a scripted `MockWireClient` (`wire/mockClient`) backing the offline demo and tests; the real WebSocket client lands with the bridge transport bringup.
+- Added a fidelity-aware `UsageBadge` (exact/derived/estimated visually distinct; never renders an estimate as exact — ADR-0092 D2).
+- Wired the run screen in as the default app view.
+
 ## [0.5.0] - 2026-06-07
 
 - Added a Notifications view (list + unread badge) surfacing state-only notifications, behind a third app tab.

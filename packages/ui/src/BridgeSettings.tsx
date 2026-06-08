@@ -16,12 +16,24 @@ import {
 export interface BridgeSettingsProps {
   initialState?: BridgeSettingsState;
   factory?: PairingFactory;
+  // Optional controlled state: when `state` + `onChange` are supplied the parent
+  // owns the settings (so the run screen can read the workspace allowlist);
+  // otherwise the component manages its own state.
+  state?: BridgeSettingsState;
+  onChange?: (next: BridgeSettingsState) => void;
 }
 
-export function BridgeSettings({ initialState, factory }: BridgeSettingsProps) {
-  const [state, setState] = useState<BridgeSettingsState>(
+export function BridgeSettings({
+  initialState,
+  factory,
+  state: controlledState,
+  onChange
+}: BridgeSettingsProps) {
+  const [internalState, setInternalState] = useState<BridgeSettingsState>(
     initialState ?? emptyBridgeSettings
   );
+  const state = controlledState ?? internalState;
+  const setState: (next: BridgeSettingsState) => void = onChange ?? setInternalState;
   const [deviceName, setDeviceName] = useState("");
   const [workspaceRoot, setWorkspaceRoot] = useState("");
   const [error, setError] = useState<string | undefined>(undefined);
@@ -87,7 +99,7 @@ export function BridgeSettings({ initialState, factory }: BridgeSettingsProps) {
               now. It is shown only once.
             </p>
             <code>{state.lastGrant.token}</code>
-            <button type="button" onClick={() => setState(acknowledgeGrant)}>
+            <button type="button" onClick={() => setState(acknowledgeGrant(state))}>
               Done
             </button>
           </div>

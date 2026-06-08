@@ -7,7 +7,7 @@ describe("App", () => {
     render(<App />);
 
     expect(screen.getByRole("heading", { name: "Agent Cockpit" })).toBeTruthy();
-    expect(screen.getByRole("heading", { name: "No active session" })).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "Start a session" })).toBeTruthy();
   });
 
   it("switches to the bridge settings view", () => {
