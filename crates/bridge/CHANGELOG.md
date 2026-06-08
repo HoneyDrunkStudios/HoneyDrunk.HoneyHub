@@ -1,5 +1,9 @@
 # Changelog
 
+## [0.7.0] - 2026-06-07
+
+- Added a public `clock` module (`now_rfc3339` + `format_rfc3339_utc`) so the adapter and the new bridge host stamp events with RFC3339 UTC timestamps without a date dependency; `default_event_clock` now uses it.
+
 ## [0.6.0] - 2026-06-07
 
 - Version alignment for the run-screen release (no bridge code change).

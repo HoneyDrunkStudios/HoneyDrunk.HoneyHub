@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.7.0] - 2026-06-07
+
+- Added the bridge **transport bringup** (ADR-0091 D2/D5): a new `crates/bridge-host` WebSocket server exposes the `BridgeRuntime` to the PWA over the `honeyhub.bridge.v1` protocol (pairing-token auth, command handling, event streaming), and a `WebSocketWireClient` + a toolbar Connect control let the run screen drive a live bridge instead of the offline mock. The README documents running a real Claude Code session end-to-end. WebSocket transport is `[Provisional]`; the bundled-desktop Tauri-IPC and mobile-Tailscale paths slot behind the same `WireClient` seam.
+- Added a shared RFC3339 `clock` module in the bridge crate used by the adapter and host.
+- Kept package versions aligned across the HoneyHub workspace at 0.7.0.
+
 ## [0.6.0] - 2026-06-07
 
 - Added the minimal chat-shaped run screen for packet 08 — the Phase 2 integration capstone: start a Claude Code session, watch the live stream + run state, reply to `needs_input`, follow up after completion, stop, and see artifact links, with fidelity-aware usage display. Built on a `WireClient` seam with a scripted mock for tests/offline demo (the real WebSocket transport lands with the bridge bringup).

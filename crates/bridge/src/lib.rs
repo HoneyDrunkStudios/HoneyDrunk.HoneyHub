@@ -1,6 +1,7 @@
 pub mod adapter;
 pub mod adapters;
 pub mod artifact;
+pub mod clock;
 pub mod core;
 pub mod notify;
 pub mod pairing;

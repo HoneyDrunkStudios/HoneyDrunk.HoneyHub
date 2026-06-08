@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.7.0] - 2026-06-07
+
+- Added `WebSocketWireClient` (`wire/webSocketClient`) — a real transport behind the existing `WireClient` seam that talks to the bridge host over the `honeyhub.bridge.v1` WebSocket; queues commands until the socket opens and dispatches server events to subscribers.
+- Added a toolbar **Bridge URL / Connect** control that swaps the run screen from the offline mock to a live bridge connection (paste the cockpit URL the host prints).
+
 ## [0.6.0] - 2026-06-07
 
 - Added the chat-shaped run screen (`routes/run/RunScreen`): start a `claude.local` session, watch the token-level stream + run state, reply to `needs_input` and follow up after completion, stop a run, and see artifacts as links.
