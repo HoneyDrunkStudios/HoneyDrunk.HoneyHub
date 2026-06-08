@@ -11,5 +11,5 @@
 pub mod child_run;
 pub mod claude_local;
 
-pub use child_run::{default_event_clock, ChildRun, EventClock};
+pub use child_run::{default_event_clock, ChildRun, EventClock, RunSlot};
 pub use claude_local::ClaudeLocalAdapter;

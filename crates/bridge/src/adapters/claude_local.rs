@@ -20,7 +20,7 @@
 use crate::adapter::{
     AgentBackend, AgentBackendAdapter, BridgeError, CapabilityFlags, RunHandle, StartRunRequest,
 };
-use crate::adapters::child_run::{ChildRun, EventClock};
+use crate::adapters::child_run::{ChildRun, EventClock, RunSlot};
 use crate::artifact::{ArtifactKind, DispatchArtifact};
 use crate::session::{
     DispatchMessage, DispatchMessageRole, DispatchRunState, UsageConfidence, UsageFidelity,
@@ -39,7 +39,7 @@ pub struct ClaudeLocalAdapter {
     program: String,
     model: Option<String>,
     clock: EventClock,
-    runs: Mutex<HashMap<String, ChildRun>>,
+    runs: Mutex<HashMap<String, RunSlot>>,
 }
 
 impl ClaudeLocalAdapter {
@@ -54,7 +54,7 @@ impl ClaudeLocalAdapter {
         }
     }
 
-    fn lock_runs(&self) -> Result<MutexGuard<'_, HashMap<String, ChildRun>>, BridgeError> {
+    fn lock_runs(&self) -> Result<MutexGuard<'_, HashMap<String, RunSlot>>, BridgeError> {
         self.runs
             .lock()
             .map_err(|_| BridgeError::new("lock_poisoned", "claude adapter lock was poisoned"))
@@ -349,7 +349,7 @@ impl AgentBackendAdapter for ClaudeLocalAdapter {
         // fails, dropping `run` here kills and reaps the child (no orphan).
         write_user_line(&mut run, &request.task)?;
 
-        self.lock_runs()?.insert(run_id.clone(), run);
+        self.lock_runs()?.insert(run_id.clone(), RunSlot::live(run));
 
         Ok(RunHandle {
             run_id,
@@ -359,9 +359,13 @@ impl AgentBackendAdapter for ClaudeLocalAdapter {
 
     fn stream(&self, run_id: &str) -> Result<Vec<BridgeEvent>, BridgeError> {
         let mut guard = self.lock_runs()?;
-        let run = guard
+        let slot = guard
             .get_mut(run_id)
             .ok_or_else(|| BridgeError::new("run_not_found", format!("run {run_id} not found")))?;
+        // A retired (completed) run has nothing left to stream.
+        let Some(run) = slot.as_live_mut() else {
+            return Ok(Vec::new());
+        };
 
         let lines = run.drain_lines();
         let session_id = run.session_id.clone();
@@ -379,7 +383,8 @@ impl AgentBackendAdapter for ClaudeLocalAdapter {
         // Once the process has exited, emit a terminal status transition (exactly
         // once) so the run does not sit in `running`/`needs_input` forever after
         // the CLI finishes. A clean exit finalizes then completes; a non-zero exit
-        // fails.
+        // fails. Then retire the run so the child handle/threads/channel are freed
+        // while the captured backend session id survives for a follow-up turn.
         if let Some(success) = run.poll_exit() {
             let now = (self.clock)();
             if success {
@@ -403,6 +408,7 @@ impl AgentBackendAdapter for ClaudeLocalAdapter {
                     DispatchRunState::Failed,
                 ));
             }
+            slot.retire();
         }
 
         Ok(events)
@@ -410,22 +416,27 @@ impl AgentBackendAdapter for ClaudeLocalAdapter {
 
     fn reply(&self, run_id: &str, text: &str) -> Result<(), BridgeError> {
         let mut guard = self.lock_runs()?;
-        let run = guard
+        let slot = guard
             .get_mut(run_id)
             .ok_or_else(|| BridgeError::new("run_not_found", format!("run {run_id} not found")))?;
+        let run = slot.as_live_mut().ok_or_else(|| {
+            BridgeError::new("reply_unavailable", format!("run {run_id} has completed"))
+        })?;
         write_user_line(run, text)
     }
 
     fn stop(&self, run_id: &str) -> Result<(), BridgeError> {
         // Remove the run so its child, reader thread, and channel are released (no
-        // per-stopped-run leak). Killing the tree before drop covers the Windows
+        // per-stopped-run leak). Killing the tree (idempotently) covers the Windows
         // case where `Child::kill` alone would miss child processes; the `ChildRun`
-        // drop then reaps and joins.
-        let mut run = self
+        // drop then joins the reader. A retired run has no live child to kill.
+        let mut slot = self
             .lock_runs()?
             .remove(run_id)
             .ok_or_else(|| BridgeError::new("run_not_found", format!("run {run_id} not found")))?;
-        run.close_and_kill();
+        if let Some(run) = slot.as_live_mut() {
+            run.close_and_kill();
+        }
         Ok(())
     }
 
@@ -440,7 +451,7 @@ impl AgentBackendAdapter for ClaudeLocalAdapter {
         )?;
         let process_id = run.process_id();
 
-        self.lock_runs()?.insert(run_id.clone(), run);
+        self.lock_runs()?.insert(run_id.clone(), RunSlot::live(run));
 
         Ok(RunHandle {
             run_id,

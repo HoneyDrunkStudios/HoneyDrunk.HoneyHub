@@ -2,7 +2,10 @@
 
 ## [0.11.0] - 2026-06-08
 
-- Extracted the shared child-process driver into `adapters::child_run` (`ChildRun`): spawn-with-piped-stdio, stderr drain, stdout reader thread, process-tree kill, reap, and one-time exit detection now live in one place. `claude.local` is now a thin strategy over it (command + capability flags + `stream-json` parsing + same-process reply framing), so the upcoming `codex.local` / `copilot.local` adapters reuse the mechanics rather than copying them. `EventClock` / `default_event_clock` moved to `child_run` and are re-exported unchanged. No behavior change; the full `fake_claude` lifecycle integration test still passes.
+- Extracted the shared child-process driver into `adapters::child_run` (`ChildRun`): spawn-with-piped-stdio, stderr drain, stdout reader thread, process-tree kill, reap, and one-time exit detection now live in one place. `claude.local` is now a thin strategy over it (command + capability flags + `stream-json` parsing + same-process reply framing), so the upcoming `codex.local` / `copilot.local` adapters reuse the mechanics rather than copying them. `EventClock` / `default_event_clock` moved to `child_run` and are re-exported unchanged. The full `fake_claude` lifecycle integration test still passes.
+- Made the kill path idempotent: a `reaped` flag set by `poll_exit`/`close_and_kill` stops `Drop` from re-signalling an already-reaped (and possibly recycled) pid — closing a latent double-kill in the original `stop` + `Drop` sequence.
+- A spawn failure now names the exact program (`failed to launch backend CLI '<program>'`), actionable when several local adapters coexist.
+- Added `RunSlot` (`Live`/`Done`): a completed run **retires** to a lightweight record that keeps only the captured vendor `backend_session_id`, dropping the child handle, reader thread, and channel. This frees a long-lived host from accumulating finished runs while still letting a follow-up turn resume the session. `claude.local` adopts it; the new adapters use it from the start.
 
 ## [0.10.0] - 2026-06-08
 
