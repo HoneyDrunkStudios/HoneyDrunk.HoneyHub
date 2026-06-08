@@ -110,7 +110,10 @@ export function summarizeUsage(signals: UsageSignal[], sessionCount: number): Us
     if (signal.totalUsd !== undefined) {
       rollup.totalUsd = (rollup.totalUsd ?? 0) + signal.totalUsd;
     }
-    if (signal.premiumRequests !== undefined) {
+    // Estimated-only billing unit: only accumulate onto an estimated rollup, so a
+    // stray count on an exact/derived signal never leaks into a per-backend row
+    // (mirrors the Rust aggregator's root-cause guard).
+    if (signal.premiumRequests !== undefined && signal.fidelity === "estimated") {
       rollup.premiumRequests = (rollup.premiumRequests ?? 0) + signal.premiumRequests;
     }
   }

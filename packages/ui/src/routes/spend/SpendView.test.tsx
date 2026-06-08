@@ -46,6 +46,20 @@ describe("SpendView", () => {
     );
   });
 
+  it("shows a generic error and not the loading copy when the request fails", async () => {
+    const client = new MockWireClient();
+    client.requestUsageSummary = () => Promise.reject(new Error("ws://127.0.0.1/secret path leaked"));
+
+    render(<SpendView client={client} active />);
+
+    const alert = await screen.findByRole("alert");
+    // Generic, no raw host detail leaked.
+    expect(alert.textContent).toBe("could not load spend");
+    expect(alert.textContent).not.toContain("secret");
+    // Not stuck on the loading placeholder after a failure.
+    expect(screen.queryByText("Loading your spend…")).toBeNull();
+  });
+
   it("does not query the host while inactive", () => {
     let calls = 0;
     const client = new MockWireClient();

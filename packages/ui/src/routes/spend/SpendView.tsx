@@ -74,7 +74,13 @@ export function SpendView({ client, active }: SpendViewProps) {
       )}
 
       {summary === undefined ? (
-        <p className="spend-empty">Loading your spend…</p>
+        // No summary yet: show the loading copy only while a request is in flight,
+        // so a failed load (error shown above) doesn't read as still-loading.
+        loading ? (
+          <p className="spend-empty">Loading your spend…</p>
+        ) : error === undefined ? (
+          <p className="spend-empty">No spend data yet.</p>
+        ) : null
       ) : !hasSpend(summary) ? (
         <p className="spend-empty">No usage recorded yet. Run an agent and it shows up here.</p>
       ) : (

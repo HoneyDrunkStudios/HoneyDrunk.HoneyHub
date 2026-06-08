@@ -92,6 +92,10 @@ describe("summarizeUsage", () => {
       1
     );
     expect(summary.totalPremiumRequests).toBe(2);
+    // And the exact rollup's per-backend field stays absent (no leak into the row).
+    expect(
+      summary.rollups.find((r) => r.backend === "claude.local")?.premiumRequests
+    ).toBeUndefined();
   });
 
   it("reports no grounded total when only estimated activity exists", () => {

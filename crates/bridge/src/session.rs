@@ -224,7 +224,13 @@ impl UsageSummary {
             if let Some(usd) = signal.total_usd {
                 rollup.total_usd = Some(rollup.total_usd.unwrap_or(0.0) + usd);
             }
-            if let Some(premium) = signal.premium_requests {
+            // Premium requests are an estimated-backend unit: only accumulate them
+            // onto an estimated rollup, so a stray count on an exact/derived signal
+            // never leaks into a per-backend row (the rollup is keyed by fidelity,
+            // so this is the root-cause guard the `total` filter mirrors).
+            if let (Some(premium), UsageFidelity::Estimated) =
+                (signal.premium_requests, &signal.fidelity)
+            {
                 rollup.premium_requests = Some(rollup.premium_requests.unwrap_or(0) + premium);
             }
             rollup.duration_ms += signal.duration_ms.unwrap_or(0);
@@ -726,6 +732,14 @@ mod tests {
         ];
         let summary = UsageSummary::from_signals(&signals, 1);
         assert_eq!(summary.total_premium_requests, 2);
+        // The exact rollup must not carry the stray premium-request count in its
+        // per-rollup field either (not just the total).
+        let claude = summary
+            .rollups
+            .iter()
+            .find(|rollup| rollup.backend == AgentBackend::ClaudeLocal)
+            .expect("claude rollup");
+        assert_eq!(claude.premium_requests, None);
     }
 
     #[test]
