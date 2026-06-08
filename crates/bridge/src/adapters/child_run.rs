@@ -52,23 +52,23 @@ pub struct ChildRun {
     /// Set once the process exit has been observed and its terminal status events
     /// emitted, so a later poll does not emit them again.
     finished: bool,
-    /// Set once the child has been reaped — either by an observed exit (`poll_exit`)
-    /// or an explicit `close_and_kill`. Guards against a second kill: re-signalling a
-    /// reaped pid risks hitting a recycled process (group), so `Drop` skips the kill
-    /// when the child is already reaped.
-    reaped: bool,
+    /// Set once the process tree has been signalled (by `close_and_kill` or `Drop`).
+    /// Guards against a *second* signal — re-killing could hit a recycled pid/group —
+    /// while still guaranteeing the tree is killed exactly once before the reader is
+    /// joined.
+    killed: bool,
 }
 
 impl Drop for ChildRun {
     fn drop(&mut self) {
-        // Closing stdin signals EOF; tearing down the process tree + reaping
-        // prevents a zombie, and the reader thread ends once stdout closes. Only
-        // kill if the child has not already been reaped (see `reaped`) — a double
-        // kill could signal a recycled pid.
+        // Closing stdin signals EOF on the child's input. Then kill the process tree
+        // once: this is what makes the reader-thread join below *bounded* — even if
+        // the direct CLI has already exited, a descendant that inherited stdout could
+        // still hold the pipe open and leave the reader blocked on `read` forever;
+        // killing the group forces stdout to EOF so the reader ends. `kill_tree_once`
+        // is idempotent, so a prior `close_and_kill` is not double-signalled.
         self.stdin.take();
-        if !self.reaped {
-            kill_process_tree(&mut self.child);
-        }
+        self.kill_tree_once();
         if let Some(reader) = self.reader.take() {
             let _ = reader.join();
         }
@@ -158,8 +158,18 @@ impl ChildRun {
             reader: Some(reader),
             backend_session_id,
             finished: false,
-            reaped: false,
+            killed: false,
         })
+    }
+
+    /// Kill the process tree exactly once (idempotent). Forces any stdout the child
+    /// or its descendants hold open to close, so the reader thread reaches EOF and a
+    /// later `join` is bounded.
+    fn kill_tree_once(&mut self) {
+        if !self.killed {
+            kill_process_tree(&mut self.child);
+            self.killed = true;
+        }
     }
 
     /// The OS process id, captured at spawn so it survives `try_wait`/reaping.
@@ -236,24 +246,20 @@ impl ChildRun {
         match self.child.try_wait() {
             Ok(Some(status)) => {
                 self.finished = true;
-                // `try_wait` reaped the child; mark it so `Drop` does not re-signal a
-                // potentially recycled pid.
-                self.reaped = true;
+                // Note: observing the *direct* child's exit does not mark the tree as
+                // killed — a descendant could still hold stdout open, so `Drop` still
+                // kills the group once to guarantee the reader reaches EOF.
                 Some(status.success())
             }
             _ => None,
         }
     }
 
-    /// Close stdin and kill the whole process tree, reaping the child. Idempotent:
-    /// once reaped, it does nothing (and `Drop` likewise skips the kill). Used by
-    /// `stop`.
+    /// Close stdin and kill the whole process tree (once). Idempotent — a subsequent
+    /// `Drop` will not re-signal. Used by `stop`.
     pub fn close_and_kill(&mut self) {
         self.stdin.take();
-        if !self.reaped {
-            kill_process_tree(&mut self.child);
-            self.reaped = true;
-        }
+        self.kill_tree_once();
     }
 }
 
@@ -310,6 +316,16 @@ impl RunSlot {
                 }
             }
             RunSlot::Done { .. } => None,
+        }
+    }
+
+    /// Record a vendor session id discovered *after* retirement — e.g. parsed from a
+    /// final line drained off-lock once the run was already a `Done` husk — so a
+    /// later follow-up resume sees it. Only updates a retired slot, and only when a
+    /// non-`None` id is supplied (never clobbers a known id with `None`).
+    pub fn set_done_backend_session_id(&mut self, id: Option<String>) {
+        if let (RunSlot::Done { backend_session_id }, Some(id)) = (&mut *self, id) {
+            *backend_session_id = Some(id);
         }
     }
 }
@@ -371,6 +387,21 @@ mod tests {
             backend_session_id: Some("vendor-1".to_string()),
         };
         assert_eq!(slot.backend_session_id(), Some("vendor-1"));
+    }
+
+    #[test]
+    fn done_slot_accepts_a_session_id_discovered_after_retirement() {
+        // A vendor session id that only appears in a line drained off-lock (after the
+        // run was retired to `Done`) must still reach the slot so a follow-up resume
+        // sees it.
+        let mut slot = RunSlot::Done {
+            backend_session_id: None,
+        };
+        slot.set_done_backend_session_id(Some("vendor-tail".to_string()));
+        assert_eq!(slot.backend_session_id(), Some("vendor-tail"));
+        // Never clobbers a known id with None.
+        slot.set_done_backend_session_id(None);
+        assert_eq!(slot.backend_session_id(), Some("vendor-tail"));
     }
 
     #[test]

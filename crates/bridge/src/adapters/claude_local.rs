@@ -390,6 +390,7 @@ impl AgentBackendAdapter for ClaudeLocalAdapter {
         drop(guard);
 
         if let Some(success) = exit {
+            let mut tail_session_id = None;
             if let Some(mut child) = retired {
                 // Drain the final lines the CLI flushed on exit (the closing `result`
                 // line carries the exact tokens + USD) before the child is dropped.
@@ -402,8 +403,21 @@ impl AgentBackendAdapter for ClaudeLocalAdapter {
                         &mut child.backend_session_id,
                     ));
                 }
-                // `child` drops here, off-lock: reader-thread join (and kill, already
-                // a no-op since the process was reaped) happen without the lock held.
+                // The vendor session id is normally captured early (the `system`
+                // event), but if it only arrived in this drained tail, carry it back
+                // to the retired slot below so a later resume still sees it.
+                tail_session_id = child.backend_session_id.clone();
+                // `child` drops here, off-lock: reader-thread join (and the one-time
+                // tree kill that forces stdout EOF) happen without the lock held.
+            }
+
+            // Sync any tail-discovered vendor session id into the retired `Done` slot.
+            if tail_session_id.is_some() {
+                if let Ok(mut guard) = self.lock_runs() {
+                    if let Some(slot) = guard.get_mut(run_id) {
+                        slot.set_done_backend_session_id(tail_session_id);
+                    }
+                }
             }
 
             // Emit the terminal transition (exactly once) after the tail usage line,

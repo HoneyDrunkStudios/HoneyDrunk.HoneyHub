@@ -3,10 +3,11 @@
 ## [0.15.0] - 2026-06-08
 
 - Extracted the shared child-process driver into `adapters::child_run` (`ChildRun`): spawn-with-piped-stdio, stderr drain, stdout reader thread, process-tree kill, reap, and one-time exit detection now live in one place. `claude.local` is now a thin strategy over it (command + capability flags + `stream-json` parsing + same-process reply framing), so the `codex.local` / `copilot.local` adapters reuse the mechanics rather than copying them. `EventClock` / `default_event_clock` moved to `child_run` and are re-exported unchanged.
-- Made the kill path idempotent: a `reaped` flag set by `poll_exit`/`close_and_kill` stops `Drop` from re-signalling an already-reaped (and possibly recycled) pid.
+- Made the kill path idempotent and the reader join **bounded**: a `killed`-once flag lets `Drop` kill the process tree exactly once (never double-signalling a recycled pid) *and* guarantees it forces stdout to EOF before joining the reader thread — so a descendant that inherited and kept stdout open after the direct CLI exited can no longer leave `Drop` blocked forever on `reader.join()`.
 - A spawn failure now names the exact program (`failed to launch backend CLI '<program>'`).
 - Added `RunSlot` (`Live`/`Done`): a completed run **retires** to a lightweight record that keeps only the captured vendor `backend_session_id`, dropping the child handle, reader thread, and channel — freeing a long-lived host from accumulating finished runs while still letting a follow-up turn resume the session.
 - Added `ChildRun::drain_remaining(timeout)`: a bounded, timeout-aware (`recv_timeout`) final drain of the stdout the child flushed on exit, so the closing `result`/usage line (exact tokens + USD) is never lost when the channel is dropped on retirement. `stream()` retires under the runs lock (capturing the early-set vendor session id), then performs the tail drain and the child drop (which joins the reader thread) **off** the lock, so neither the bounded drain nor the join blocks another run's `stream`/`reply`/`stop`.
+- If the vendor session id only appears in a line drained from that off-lock tail (rather than the early init event), it is written back into the retired `Done` slot (`RunSlot::set_done_backend_session_id`) so a later follow-up resume still sees it.
 
 ## [0.14.0] - 2026-06-08
 
