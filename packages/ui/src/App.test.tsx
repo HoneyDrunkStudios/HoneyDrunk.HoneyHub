@@ -26,4 +26,12 @@ describe("App", () => {
 
     expect(await screen.findByRole("heading", { name: "Your spend" })).toBeTruthy();
   });
+
+  it("switches to the coaching view", async () => {
+    render(<App />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Coaching" }));
+
+    expect(await screen.findByRole("heading", { name: "Coaching" })).toBeTruthy();
+  });
 });

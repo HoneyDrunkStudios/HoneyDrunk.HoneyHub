@@ -276,6 +276,15 @@ async fn handle_command<A: AgentBackendAdapter>(
                     summary,
                 )]))
             }
+            ClientCommand::CoachingHints => {
+                let now = now_rfc3339();
+                let hints = runtime.coaching_hints(&now);
+                Ok(Some(vec![BridgeEvent::coaching_hints(
+                    new_id(),
+                    now,
+                    hints,
+                )]))
+            }
             ClientCommand::Resume { .. } => Err(BridgeError::new(
                 "unsupported_command",
                 "resume is not driven by the host runtime yet",

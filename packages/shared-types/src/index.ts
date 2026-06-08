@@ -204,7 +204,8 @@ export type ClientCommand =
   | { kind: "stop"; runId: string }
   | { kind: "resume"; sessionIdOrTranscript: string }
   | { kind: "reconnect"; request: ReconnectRequest }
-  | { kind: "usage_summary" };
+  | { kind: "usage_summary" }
+  | { kind: "coaching_hints" };
 
 export interface ReconnectRequest {
   sessionId: string;
@@ -242,7 +243,8 @@ export type BridgeEventPayload =
   | { kind: "policy_hint"; hint: PolicyHint }
   | { kind: "status"; status: BridgeStatusEvent }
   | { kind: "artifact"; artifact: DispatchArtifact }
-  | { kind: "usage_summary"; summary: UsageSummary };
+  | { kind: "usage_summary"; summary: UsageSummary }
+  | { kind: "coaching_hints"; hints: PolicyHint[] };
 
 export interface BridgeStatusEvent {
   state: DispatchRunState;

@@ -174,6 +174,45 @@ test("usage summary keeps fidelities separate and grounds only measured spend", 
   assert.equal(summary.totalPremiumRequests, 1);
 });
 
+test("coaching_hints is a fieldless query and a hint-bearing event", () => {
+  const query: WireFrame = {
+    protocol: wireProtocolVersion,
+    frameId: "frame-cq",
+    kind: "client_command",
+    createdAt: "2026-06-07T12:00:00Z",
+    command: { kind: "coaching_hints" }
+  };
+  assert.equal(query.command?.kind, "coaching_hints");
+
+  const event: WireFrame = {
+    protocol: wireProtocolVersion,
+    frameId: "frame-ce",
+    kind: "server_event",
+    createdAt: "2026-06-07T12:00:00Z",
+    event: {
+      id: "e1",
+      sessionId: "",
+      runId: "",
+      sequence: 0,
+      createdAt: "2026-06-07T12:00:00Z",
+      payload: {
+        kind: "coaching_hints",
+        hints: [
+          {
+            id: "coach:s1:stale_session",
+            sessionId: "s1",
+            code: "stale_session",
+            severity: "warning",
+            message: "This session is large.",
+            createdAt: "2026-06-07T12:00:00Z"
+          }
+        ]
+      }
+    }
+  };
+  assert.equal(event.event?.payload.kind, "coaching_hints");
+});
+
 test("usage_summary is a fieldless client command and a payload-bearing event", () => {
   const query: WireFrame = {
     protocol: wireProtocolVersion,

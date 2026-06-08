@@ -1,10 +1,11 @@
-use crate::adapter::{AgentBackendAdapter, BridgeError, RunHandle, StartRunRequest};
+use crate::adapter::{AgentBackend, AgentBackendAdapter, BridgeError, RunHandle, StartRunRequest};
 use crate::artifact::DispatchArtifact;
+use crate::coaching::{coach, CoachingSnapshot};
 use crate::pairing::{BackendAllowlist, WorkspaceAllowlist};
 use crate::process::{ProcessExitStatus, ProcessHandle};
 use crate::session::{
     DispatchControlEvent, DispatchControlEventKind, DispatchMessage, DispatchRun,
-    DispatchRunRecord, DispatchRunState, DispatchSession, UsageSignal, UsageSummary,
+    DispatchRunRecord, DispatchRunState, DispatchSession, PolicyHint, UsageSignal, UsageSummary,
 };
 use crate::wire::{BridgeEvent, BridgeEventPayload, ReconnectRequest};
 use std::collections::HashMap;
@@ -492,6 +493,13 @@ where
                     "a backend stream must not emit a device-wide usage summary",
                 ));
             }
+            BridgeEventPayload::CoachingHints { .. } => {
+                // Likewise device-wide and host-synthesized — never adapter-streamed.
+                return Err(BridgeError::new(
+                    "event_unexpected_coaching_hints",
+                    "a backend stream must not emit device-wide coaching hints",
+                ));
+            }
         }
 
         Ok(())
@@ -520,6 +528,102 @@ where
             }
         }
         UsageSummary::from_signals(&signals, sessions.len() as u64)
+    }
+
+    /// Run the rules-based session coach (ADR-0092 D4) over **every** session this
+    /// runtime holds and return all advisory hints, stamped `now`. This is the
+    /// cross-session coaching surface (packet 09 §3e) — the structured, wire-borne
+    /// counterpart to the per-session inline diagnostics. Each session's snapshot is
+    /// built from its runs' transcripts (non-partial message count) and recorded
+    /// usage; `elapsed_minutes` is `None` (the crate stays clock-free and idle
+    /// wall-time is a weak staleness signal — the token/message thresholds carry the
+    /// `stale_session` rule). Pure given `now`; `coach` itself is deterministic.
+    pub fn coaching_hints(&self, now: &str) -> Vec<PolicyHint> {
+        struct LatestRun {
+            /// `(started_at, run_id)` of the chosen anchor run, kept as the max so the
+            /// selection is deterministic regardless of `HashMap` iteration order.
+            key: (Option<String>, String),
+            /// Settled (non-partial) message count of **that** run's transcript.
+            message_count: usize,
+        }
+        struct SessionAggregate {
+            backend: AgentBackend,
+            latest: Option<LatestRun>,
+            usage: Vec<UsageSignal>,
+        }
+
+        let mut sessions: std::collections::BTreeMap<String, SessionAggregate> =
+            std::collections::BTreeMap::new();
+        for managed in self.runs.values() {
+            let aggregate = sessions
+                .entry(managed.session.id.clone())
+                .or_insert_with(|| SessionAggregate {
+                    backend: managed.session.backend.clone(),
+                    latest: None,
+                    usage: Vec::new(),
+                });
+            // Usage is per-turn (each run emits its own signal), so it sums across the
+            // session's runs.
+            for event in &managed.event_log {
+                if let BridgeEventPayload::Usage { signal } = &event.payload {
+                    aggregate.usage.push(signal.clone());
+                }
+            }
+            // Anchor a hint to the session's **latest** run, chosen deterministically:
+            // the run with the greatest `(started_at, run_id)`. This relies on the
+            // system-wide invariant that timestamps are normalized RFC3339 **UTC**
+            // strings (`...Z`, fixed `now_rfc3339` format), which then sort
+            // lexicographically in chronological order — the same invariant
+            // `store::prune` and `replay_events` already depend on. The `run_id` breaks
+            // ties, so the order is total and the pick is stable for a given runtime
+            // state. (`self.runs` is a `HashMap` whose order is unspecified, so a "last
+            // one wins" pick would instead attach persisted hints to different runs
+            // between identical calls.) The message count is read from **only** that
+            // latest run: `reply()` carries the prior transcript into each follow-up
+            // run, so the latest run already holds the full cumulative history — summing
+            // every run's transcript would double-count the carried messages and trip
+            // `stale_session` too early on resume-based backends.
+            let candidate = (
+                managed.record.run.started_at.clone(),
+                managed.record.run.id.clone(),
+            );
+            let replace = match &aggregate.latest {
+                None => true,
+                Some(current) => candidate > current.key,
+            };
+            if replace {
+                let message_count = managed
+                    .transcript
+                    .iter()
+                    .filter(|message| message.is_partial != Some(true))
+                    .count();
+                aggregate.latest = Some(LatestRun {
+                    key: candidate,
+                    message_count,
+                });
+            }
+        }
+
+        let mut hints = Vec::new();
+        for (session_id, aggregate) in &sessions {
+            let snapshot = CoachingSnapshot {
+                session_id,
+                run_id: aggregate
+                    .latest
+                    .as_ref()
+                    .map(|latest| latest.key.1.as_str()),
+                backend: aggregate.backend.clone(),
+                message_count: aggregate
+                    .latest
+                    .as_ref()
+                    .map_or(0, |latest| latest.message_count),
+                elapsed_minutes: None,
+                usage: &aggregate.usage,
+                now,
+            };
+            hints.extend(coach(&snapshot));
+        }
+        hints
     }
 
     pub fn replay_events(
@@ -1442,5 +1546,178 @@ mod tests {
         assert_eq!(summary.rollups[0].total_tokens, 50);
         let grounded = summary.grounded_total_usd.expect("grounded usd present");
         assert!((grounded - 0.25).abs() < 1e-9, "grounded was {grounded}");
+    }
+
+    #[test]
+    fn coaching_hints_flag_a_stale_session_and_are_empty_with_no_runs() {
+        let (allowlist_root, workspace_root) = workspace_paths();
+        // A large-context (high-token) usage signal trips the stale_session rule.
+        let usage = UsageSignal {
+            id: "usage-1".to_string(),
+            session_id: "session-1".to_string(),
+            run_id: "run-fixed".to_string(),
+            backend: AgentBackend::ClaudeLocal,
+            fidelity: crate::session::UsageFidelity::Exact,
+            model_label: None,
+            input_tokens: Some(200_000),
+            output_tokens: Some(0),
+            total_tokens: Some(200_000),
+            total_usd: Some(0.5),
+            premium_requests: None,
+            duration_ms: None,
+            confidence: None,
+            recorded_at: "2026-06-08T12:00:00Z".to_string(),
+        };
+        let adapter = FakeAdapter::new(CapabilityFlags::claude_local()).with_stream_events(vec![
+            BridgeEvent::usage(
+                "event-usage",
+                "session-1",
+                "run-fixed",
+                1,
+                "2026-06-08T12:00:00Z",
+                usage,
+            ),
+        ]);
+        let mut runtime = BridgeRuntime::new(
+            adapter,
+            WorkspaceAllowlist::new(vec![allowlist_root]),
+            BackendAllowlist::new(vec![AgentBackend::ClaudeLocal]),
+        );
+
+        // No runs yet → no advisories (not an error).
+        assert!(runtime.coaching_hints("2026-06-08T12:00:00Z").is_empty());
+
+        let mut start = request(&workspace_root);
+        start.requested_run_id = Some("run-fixed".to_string());
+        let handle = runtime
+            .start(start, "2026-06-08T12:00:00Z")
+            .expect("run starts");
+        runtime
+            .stream_events(&handle.run_id)
+            .expect("usage event applies");
+
+        let hints = runtime.coaching_hints("2026-06-08T12:05:00Z");
+        assert!(
+            hints.iter().any(|hint| hint.code == "stale_session"),
+            "expected a stale_session advisory, got {:?}",
+            hints.iter().map(|h| &h.code).collect::<Vec<_>>()
+        );
+        // Advisory-only posture: never a Block severity.
+        assert!(hints
+            .iter()
+            .all(|hint| hint.severity != crate::session::PolicyHintSeverity::Block));
+        // The hint is stamped with the supplied `now`.
+        let stale = hints.iter().find(|h| h.code == "stale_session").unwrap();
+        assert_eq!(stale.created_at, "2026-06-08T12:05:00Z");
+        assert_eq!(stale.session_id, "session-1");
+    }
+
+    #[test]
+    fn coaching_hints_anchor_the_latest_run_deterministically() {
+        // A session with two runs: the hint must anchor to the latest run (greatest
+        // started_at) regardless of HashMap order, and be identical across calls.
+        let (allowlist_root, workspace_root) = workspace_paths();
+        let usage = UsageSignal {
+            id: "usage-1".to_string(),
+            session_id: "session-1".to_string(),
+            run_id: "run-late".to_string(),
+            backend: AgentBackend::ClaudeLocal,
+            fidelity: crate::session::UsageFidelity::Exact,
+            model_label: None,
+            input_tokens: Some(200_000),
+            output_tokens: Some(0),
+            total_tokens: Some(200_000),
+            total_usd: Some(0.5),
+            premium_requests: None,
+            duration_ms: None,
+            confidence: None,
+            recorded_at: "2026-06-08T12:05:00Z".to_string(),
+        };
+        let adapter = FakeAdapter::new(CapabilityFlags::claude_local()).with_stream_events(vec![
+            BridgeEvent::usage(
+                "event-usage",
+                "session-1",
+                "run-late",
+                1,
+                "2026-06-08T12:05:00Z",
+                usage,
+            ),
+        ]);
+        let mut runtime = BridgeRuntime::new(
+            adapter,
+            WorkspaceAllowlist::new(vec![allowlist_root]),
+            BackendAllowlist::new(vec![AgentBackend::ClaudeLocal]),
+        );
+
+        let mut early = request(&workspace_root);
+        early.requested_run_id = Some("run-early".to_string());
+        runtime
+            .start(early, "2026-06-08T12:00:00Z")
+            .expect("early run starts");
+        let mut late = request(&workspace_root);
+        late.requested_run_id = Some("run-late".to_string());
+        runtime
+            .start(late, "2026-06-08T12:05:00Z")
+            .expect("late run starts");
+        runtime
+            .stream_events("run-late")
+            .expect("usage applies to the late run");
+
+        let first = runtime.coaching_hints("2026-06-08T12:10:00Z");
+        let second = runtime.coaching_hints("2026-06-08T12:10:00Z");
+        assert_eq!(first, second, "coaching hints must be deterministic");
+        let stale = first
+            .iter()
+            .find(|hint| hint.code == "stale_session")
+            .expect("a stale_session advisory");
+        // The later-started run is the anchor, not whichever HashMap yields last.
+        assert_eq!(stale.run_id.as_deref(), Some("run-late"));
+    }
+
+    #[test]
+    fn coaching_message_count_uses_latest_run_not_the_carried_forward_sum() {
+        // A resume-based reply carries the prior transcript into each follow-up run,
+        // so the latest run already holds the cumulative history. Counting every run's
+        // transcript would double-count and trip stale_session too early. Two runs of
+        // 20 settled messages each: summed (40) would be stale; latest-only (20) is not.
+        let (allowlist_root, workspace_root) = workspace_paths();
+        let adapter = FakeAdapter::new(CapabilityFlags::claude_local());
+        let mut runtime = BridgeRuntime::new(
+            adapter,
+            WorkspaceAllowlist::new(vec![allowlist_root]),
+            BackendAllowlist::new(vec![AgentBackend::ClaudeLocal]),
+        );
+        let messages = |run: &str| -> Vec<DispatchMessage> {
+            (0..20)
+                .map(|index| DispatchMessage {
+                    id: format!("{run}-m{index}"),
+                    session_id: "session-1".to_string(),
+                    run_id: run.to_string(),
+                    role: DispatchMessageRole::Agent,
+                    body: "x".to_string(),
+                    created_at: "2026-06-08T12:00:00Z".to_string(),
+                    is_partial: Some(false),
+                })
+                .collect()
+        };
+
+        let mut early = request(&workspace_root);
+        early.requested_run_id = Some("run-early".to_string());
+        early.transcript = messages("run-early");
+        runtime
+            .start(early, "2026-06-08T12:00:00Z")
+            .expect("early run starts");
+        let mut late = request(&workspace_root);
+        late.requested_run_id = Some("run-late".to_string());
+        late.transcript = messages("run-late");
+        runtime
+            .start(late, "2026-06-08T12:05:00Z")
+            .expect("late run starts");
+
+        let hints = runtime.coaching_hints("2026-06-08T12:10:00Z");
+        assert!(
+            !hints.iter().any(|hint| hint.code == "stale_session"),
+            "message_count must use the latest run only, not the carried-forward sum"
+        );
     }
 }

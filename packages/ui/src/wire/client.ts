@@ -24,6 +24,9 @@ export interface WireClient {
       a `usage_summary` server event via `subscribe` (this resolves on the host's
       ack, not with the summary itself), so the caller listens for the event. */
   requestUsageSummary(): Promise<void>;
+  /** Ask the host for the cross-session coaching advisories. The answer arrives as
+      a `coaching_hints` server event via `subscribe` (this resolves on the ack). */
+  requestCoachingHints(): Promise<void>;
   /** Subscribe to bridge events; returns an unsubscribe function. */
   subscribe(handler: WireEventHandler): () => void;
 }

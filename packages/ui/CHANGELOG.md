@@ -1,5 +1,9 @@
 # Changelog
 
+## [0.12.0] - 2026-06-08
+
+- Added a **Coaching** tab: the cross-session coaching surface (ADR-0092 D4 / packet 09 §3e). It asks the host for the rules-based advisories (start a fresh session, watch a high-cost session, estimated figures are approximate) across every session on the device and renders them severity-first (warnings before info), each with a short title and the full guidance. States the advisory-only, local posture up front; shows an empty state when sessions look healthy; queries the host only while active. Added `requestCoachingHints` to the `WireClient` seam (WebSocket + offline mock).
+
 ## [0.11.0] - 2026-06-08
 
 - Added a **Spend** tab: a device-wide "your spend" view that asks the host for a usage summary and renders measured dollars (Claude exact + Codex rate-derived) as the headline, with Copilot's premium-request activity shown separately so an estimate is never read as a measured cost. Per-backend rollups show cost (fidelity-prefixed), tokens, and turns; an empty state shows until the first run records usage. States the local-only posture up front; the tab only queries the host while it is active. Added `requestUsageSummary` to the `WireClient` seam (WebSocket + offline mock).

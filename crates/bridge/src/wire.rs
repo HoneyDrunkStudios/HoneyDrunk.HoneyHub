@@ -130,6 +130,10 @@ pub enum ClientCommand {
     /// read-only query carrying no fields; the host answers with a single
     /// [`BridgeEventPayload::UsageSummary`] server event followed by an ack.
     UsageSummary,
+    /// Request the cross-session coaching advisories (ADR-0092 D4 / packet 09 §3e).
+    /// A read-only query carrying no fields; the host answers with a single
+    /// [`BridgeEventPayload::CoachingHints`] server event followed by an ack.
+    CoachingHints,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -279,6 +283,24 @@ impl BridgeEvent {
             payload: BridgeEventPayload::UsageSummary { summary },
         }
     }
+
+    /// A device-wide coaching-advisories event. Like the usage summary it spans every
+    /// session (each hint carries its own `session_id`), so the envelope's
+    /// `session_id`/`run_id` are empty and `sequence` is `0`.
+    pub fn coaching_hints(
+        id: impl Into<String>,
+        created_at: impl Into<String>,
+        hints: Vec<PolicyHint>,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            session_id: String::new(),
+            run_id: String::new(),
+            sequence: 0,
+            created_at: created_at.into(),
+            payload: BridgeEventPayload::CoachingHints { hints },
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -291,6 +313,7 @@ pub enum BridgeEventPayload {
     Status { status: BridgeStatusEvent },
     Artifact { artifact: DispatchArtifact },
     UsageSummary { summary: UsageSummary },
+    CoachingHints { hints: Vec<PolicyHint> },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -433,6 +456,15 @@ mod tests {
         assert_eq!(
             serde_json::to_value(command).expect("command serializes"),
             json!({ "kind": "usage_summary" })
+        );
+    }
+
+    #[test]
+    fn serializes_coaching_hints_query_as_fieldless_tagged_command() {
+        let command = ClientCommand::CoachingHints;
+        assert_eq!(
+            serde_json::to_value(command).expect("command serializes"),
+            json!({ "kind": "coaching_hints" })
         );
     }
 
@@ -618,6 +650,28 @@ mod tests {
                         }],
                         1,
                     ),
+                ),
+                created_at,
+            ),
+            WireFrame::client_command(
+                "frame-coaching-query",
+                ClientCommand::CoachingHints,
+                created_at,
+            ),
+            WireFrame::server_event(
+                "frame-coaching-hints",
+                BridgeEvent::coaching_hints(
+                    "event-coaching-hints",
+                    created_at,
+                    vec![PolicyHint {
+                        id: "coach:session-1:stale_session".to_string(),
+                        session_id: "session-1".to_string(),
+                        run_id: Some("run-1".to_string()),
+                        code: "stale_session".to_string(),
+                        severity: PolicyHintSeverity::Warning,
+                        message: "This session is large.".to_string(),
+                        created_at: created_at.to_string(),
+                    }],
                 ),
                 created_at,
             ),

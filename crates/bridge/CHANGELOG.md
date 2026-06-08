@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.19.0] - 2026-06-08
+
+- Wired the rules-based session coach (`coaching::coach`, added in 0.14.0) into a device-wide surface (ADR-0092 D4 / packet 09 §3e): `BridgeRuntime::coaching_hints(now)` runs the coach over **every** session the runtime holds and returns all advisory `PolicyHint`s. Each session's snapshot is built from its runs' transcripts (settled, non-partial message count) and recorded usage; `elapsed_minutes` is `None` (the crate stays clock-free and idle wall-time is a weak staleness signal — the token/message thresholds carry the `stale_session` rule). Advisory only — never a `Block` severity.
+- Wire (`honeyhub.bridge.v1`): a fieldless `ClientCommand::CoachingHints` query and a device-scoped `BridgeEventPayload::CoachingHints` server event (`BridgeEvent::coaching_hints`, empty session/run ids, sequence 0). The host answers the query by computing `coaching_hints(now)` and emitting the event, then acks. A `CoachingHints` payload seen in an adapter's run stream is rejected (`event_unexpected_coaching_hints`) — host-synthesized, never streamed.
+
 ## [0.18.0] - 2026-06-08
 
 - Added the device-wide **usage summary** ("your spend") aggregator (ADR-0092 D2 cost view): `UsageSummary::from_signals(signals, session_count)` rolls raw `UsageSignal`s up per `(backend, fidelity)`, keeping the three fidelities (`exact`/`derived`/`estimated`) in **separate** rollups so a measured cost is never summed with an estimate. The headline `grounded_total_usd` sums **exact + derived USD only** — estimated backends (Copilot bills premium requests, not a token cost) are excluded so a guess can't inflate it — and is `None` (not `0.00`) when no grounded signal carried a cost. Pure over its inputs, so the live runtime and a future persistent store share one summarization path.
