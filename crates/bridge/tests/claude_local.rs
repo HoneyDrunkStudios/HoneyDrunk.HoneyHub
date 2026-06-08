@@ -1,3 +1,4 @@
+#![cfg(feature = "test-fixtures")]
 //! Integration test for the `claude.local` adapter against a **live duplex** fake
 //! `claude` binary (`src/bin/fake_claude.rs`). The fake reacts to stdin replies
 //! and terminates on kill, so this exercises the real process mechanism —

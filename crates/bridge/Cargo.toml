@@ -5,6 +5,32 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[features]
+# Test-only: gates the fake CLI fixtures (and the integration tests that drive them)
+# so they are NOT built as product binary targets in a normal/release build
+# (Grid invariant 16 — test code must not ship in a runtime package). Enable with
+# `--features test-fixtures` to build the fixtures + run the live-process integration
+# tests; CI passes it for the test/clippy steps but not the product `build`.
+test-fixtures = []
+
+# The fake CLI fixtures are live-duplex stand-ins used only by the integration tests
+# (via `CARGO_BIN_EXE_*`). `required-features` keeps them out of the default binary
+# surface so they cannot ship as product binaries.
+[[bin]]
+name = "fake_claude"
+path = "src/bin/fake_claude.rs"
+required-features = ["test-fixtures"]
+
+[[bin]]
+name = "fake_codex"
+path = "src/bin/fake_codex.rs"
+required-features = ["test-fixtures"]
+
+[[bin]]
+name = "fake_copilot"
+path = "src/bin/fake_copilot.rs"
+required-features = ["test-fixtures"]
+
 [dependencies]
 serde = { version = "1.0.185", features = ["derive"] }
 serde_json = "1.0"

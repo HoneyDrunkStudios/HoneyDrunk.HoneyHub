@@ -1,3 +1,4 @@
+#![cfg(feature = "test-fixtures")]
 //! Integration test for the `copilot.local` adapter against a fake `copilot` binary
 //! (`src/bin/fake_copilot.rs`). Copilot is token-level streaming and resume-based,
 //! reporting premium-requests + duration rather than tokens, so this drives the real
@@ -86,7 +87,10 @@ fn partial_message_bodies(events: &[BridgeEvent]) -> Vec<String> {
 
 #[test]
 fn drives_fake_copilot_through_token_streaming_lifecycle() {
-    let workspace = std::env::temp_dir().to_string_lossy().to_string();
+    // Isolated per-test workspace (not the shared global temp root) so concurrent
+    // tests cannot interfere.
+    let workspace_dir = tempfile::tempdir().expect("temp workspace");
+    let workspace = workspace_dir.path().to_string_lossy().to_string();
     let adapter = CopilotLocalAdapter::new(fake_program(), fixed_clock());
 
     adapter

@@ -41,11 +41,16 @@ jobs:
       - name: Check Rust formatting
         run: cargo fmt --check
 
+      # Product build: NO test-fixtures feature, so the fake CLI fixtures are not
+      # built as binary targets (Grid invariant 16 — they cannot ship as product
+      # binaries).
       - name: Build Rust workspace
         run: cargo build --workspace
 
+      # Tests + lint enable test-fixtures so the fake CLIs are built and the
+      # live-process integration tests run.
       - name: Test Rust workspace
-        run: cargo test --workspace
+        run: cargo test --workspace --features honeyhub-bridge/test-fixtures
 
       - name: Lint Rust workspace
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: cargo clippy --workspace --all-targets --features honeyhub-bridge/test-fixtures -- -D warnings
