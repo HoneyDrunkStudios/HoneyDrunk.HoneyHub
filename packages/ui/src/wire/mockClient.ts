@@ -218,8 +218,9 @@ export class MockWireClient implements WireClient {
     // A fixed scripted-demo label (the host derives one from the root's basename or a
     // hash; the mock keeps it constant so it never diverges for a rootless root).
     const label = "demo";
-    // Mirror the host id shape: an opaque hash of the name (the real ids are FNV-hashed),
-    // so demos/tests don't depend on a format the host never produces.
+    // Fixed opaque demo ids. The real host derives the id by FNV-hashing the agent name;
+    // the mock just hard-codes distinct 16-hex constants (it isn't a hash of these names)
+    // so the offline catalog is stable without reimplementing the host's hash.
     const agents: AgentDefinition[] = [
       {
         id: "00000000000000a1",

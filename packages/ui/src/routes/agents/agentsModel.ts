@@ -16,10 +16,14 @@ export function sortAgents(agents: AgentDefinition[]): AgentDefinition[] {
     .sort((left, right) => compare(left.name, right.name) || compare(left.id, right.id));
 }
 
-/** Order an agent's backend bindings in cockpit order so the badges/rows never reorder. */
+/** Order an agent's backend bindings in cockpit order so the badges/rows never reorder.
+    Ties (e.g. multiple unknown backends sharing the last rank) break on the backend
+    string, so ordering is deterministic regardless of Array.sort stability. */
 export function sortBackends(backends: AgentBackendBinding[]): AgentBackendBinding[] {
   return [...backends].sort(
-    (left, right) => backendRank(left.backend) - backendRank(right.backend)
+    (left, right) =>
+      backendRank(left.backend) - backendRank(right.backend) ||
+      compare(left.backend, right.backend)
   );
 }
 
