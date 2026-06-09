@@ -523,7 +523,7 @@ where
     /// within the workspace allowlist. With `Some(root)` it scans that one root (which
     /// **must** be allowlisted — discovery never reads outside the allowlist); with
     /// `None` it scans **every** allowlisted root. Best-effort per root (a missing
-    /// `.claude/agents`/`.github` folder is simply empty).
+    /// `.claude/agents`/`.copilot/agents` folder is simply empty).
     ///
     /// Results are filtered to the **backend allowlist**: an agent is only surfaced as
     /// a runnable dispatch target if its backend is one the bridge is actually allowed
@@ -1773,10 +1773,10 @@ mod tests {
         .expect("write agent");
         // A Copilot agent in the same workspace; the backend allowlist below does NOT
         // include copilot.local, so discovery must not surface it as runnable.
-        let github_dir = std::path::Path::new(&workspace_root).join(".github");
-        fs::create_dir_all(&github_dir).expect("github dir");
+        let copilot_dir = std::path::Path::new(&workspace_root).join(".copilot/agents");
+        fs::create_dir_all(&copilot_dir).expect("copilot agents dir");
         fs::write(
-            github_dir.join("release-agent.md"),
+            copilot_dir.join("release.md"),
             "---\nname: Release Agent\n---\nbody\n",
         )
         .expect("write copilot agent");

@@ -1,5 +1,9 @@
 # Changelog
 
+## [0.21.0] - 2026-06-09
+
+- Agent discovery (§3f-bis): Copilot agents are now discovered from **`.copilot/agents/*.md`** (Copilot's real convention — every markdown file in the folder is an agent), replacing the earlier `.github/`-files-named-`*agent*` heuristic. Both sources are now the same shape (a folder where every `*.md` is a definition), so the `FileMatch` distinction is gone. Claude (`.claude/agents/*.md`) and the read-only / allowlist-gated / no-path-leak / symlink-containment posture are unchanged.
+
 ## [0.20.0] - 2026-06-08
 
 - Added local **agent-definition discovery** (`agents` module / packet 09 §3f-bis): `discover_agents_in_root` reads the user's own agent definitions out of a workspace root and returns `AgentDefinition`s (metadata only — name/description/model/source, never the prompt body). Two operator-decided sources, table-driven: `.claude/agents/*.md` (every markdown file → `claude.local`) and `.github/` files whose name contains "agent" (→ `copilot.local`). Codex has no folder-of-agents convention and is not scanned. Best-effort (a missing folder/unreadable file is skipped); frontmatter parsing is a tiny dependency-free `key: value` reader; results are deterministically ordered; a large file is listed by name without parsing.

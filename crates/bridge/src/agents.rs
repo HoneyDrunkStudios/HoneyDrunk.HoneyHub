@@ -3,12 +3,10 @@
 //! Reads the user's **own** agent definitions out of an allowlisted workspace root
 //! and surfaces them as runnable dispatch targets. **Read-only** — it never authors
 //! or mutates a definition, and it surfaces only metadata (name / description /
-//! model / source), never the prompt body. Two sources (operator-decided
-//! conventions):
-//!  - `.claude/agents/*.md` — Claude Code subagents (**every** markdown file in the
-//!    folder is one), backend `claude.local`.
-//!  - `.github/` files whose **filename contains "agent"** (case-insensitive) —
-//!    Copilot agents, backend `copilot.local`.
+//! model / source), never the prompt body. Two sources, each a folder of agent
+//! definitions where **every markdown file is one** (operator-decided conventions):
+//!  - `.claude/agents/*.md` — Claude Code subagents, backend `claude.local`.
+//!  - `.copilot/agents/*.md` — Copilot agents, backend `copilot.local`.
 //!
 //! Codex has no folder-of-agents convention, so it is deliberately not scanned. The
 //! source set is table-driven, so a future source is a one-line addition. The
@@ -42,19 +40,10 @@ pub struct AgentDefinition {
     pub workspace_label: String,
 }
 
-/// How a source decides which files in its folder are agent definitions.
-enum FileMatch {
-    /// Every `*.md` file is a definition (the `.claude/agents` convention).
-    AllMarkdown,
-    /// Only files whose name contains "agent" (the Copilot `.github` convention).
-    NameContainsAgent,
-}
-
 struct AgentSource {
-    /// Folder relative to the workspace root.
+    /// Folder relative to the workspace root; every `*.md` file in it is a definition.
     subdir: &'static str,
     backend: AgentBackend,
-    file_match: FileMatch,
 }
 
 /// Don't read a candidate file larger than this for frontmatter — an agent
@@ -66,12 +55,10 @@ fn sources() -> [AgentSource; 2] {
         AgentSource {
             subdir: ".claude/agents",
             backend: AgentBackend::ClaudeLocal,
-            file_match: FileMatch::AllMarkdown,
         },
         AgentSource {
-            subdir: ".github",
+            subdir: ".copilot/agents",
             backend: AgentBackend::CopilotLocal,
-            file_match: FileMatch::NameContainsAgent,
         },
     ]
 }
@@ -110,12 +97,7 @@ pub fn discover_agents_in_root(workspace_root: &str) -> Vec<AgentDefinition> {
             let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
                 continue;
             };
-            let lower = file_name.to_ascii_lowercase();
-            let matches = match source.file_match {
-                FileMatch::AllMarkdown => lower.ends_with(".md"),
-                FileMatch::NameContainsAgent => lower.contains("agent"),
-            };
-            if !matches {
+            if !file_name.to_ascii_lowercase().ends_with(".md") {
                 continue;
             }
             if let Some(definition) = build_definition(&path, file_name, &source, workspace_root) {
@@ -325,31 +307,44 @@ mod tests {
     }
 
     #[test]
-    fn discovers_only_agent_named_copilot_files_in_github() {
+    fn discovers_copilot_agents_from_dot_copilot_agents() {
         let root = temp_root();
         write(
-            &root.join(".github/copilot-agent.md"),
+            &root.join(".copilot/agents/build-agent.md"),
             "---\nname: Build Agent\ndescription: Runs the build\n---\nbody\n",
         );
-        write(&root.join(".github/My-Agent.prompt.md"), "no frontmatter\n");
-        // Not an agent file — must be ignored.
+        // A markdown file with no frontmatter still lists, named from the filename.
+        write(&root.join(".copilot/agents/release.md"), "no frontmatter\n");
+        // A non-markdown file in the folder is ignored.
+        write(&root.join(".copilot/agents/notes.txt"), "not an agent\n");
+        // `.github` is NOT a copilot agents source — anything here is ignored.
         write(
-            &root.join(".github/copilot-instructions.md"),
-            "instructions\n",
+            &root.join(".github/copilot-agent.md"),
+            "---\nname: Nope\n---\n",
         );
-        write(&root.join(".github/workflows/ci.yml"), "name: ci\n");
 
         let agents = discover_agents_in_root(root.to_str().unwrap());
         let copilot: Vec<_> = agents
             .iter()
             .filter(|a| a.backend == AgentBackend::CopilotLocal)
             .collect();
-        assert_eq!(copilot.len(), 2, "only the two *agent* files match");
+        assert_eq!(
+            copilot.len(),
+            2,
+            "both .copilot/agents markdown files match"
+        );
         assert!(copilot.iter().any(|a| a.name == "Build Agent"));
-        // The non-agent files are excluded.
-        assert!(!agents
-            .iter()
-            .any(|a| a.source_path.contains("instructions")));
+        assert!(copilot.iter().any(|a| a.name == "release"));
+        assert_eq!(
+            copilot[0]
+                .source_path
+                .split('/')
+                .take(2)
+                .collect::<Vec<_>>(),
+            vec![".copilot", "agents"]
+        );
+        // Nothing was discovered from `.github`.
+        assert!(!agents.iter().any(|a| a.source_path.starts_with(".github")));
 
         let _ = fs::remove_dir_all(&root);
     }
