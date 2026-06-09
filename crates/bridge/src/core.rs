@@ -38,8 +38,9 @@ where
     workspace_allowlist: WorkspaceAllowlist,
     backend_allowlist: BackendAllowlist,
     /// Parent of the user-global agent folders (`~/.claude/agents`, `~/.copilot/agents`).
-    /// Resolved from the environment by default; `None` disables global agent discovery.
-    /// Injectable so tests pin it to a temp dir instead of the developer's real home.
+    /// **`None` by default** — global discovery is opt-in, since that path is outside the
+    /// workspace allowlist (ADR-0090); the host enables it explicitly via
+    /// [`BridgeRuntime::with_global_home`]. Injectable so tests pin it to a temp dir.
     global_home: Option<PathBuf>,
     runs: HashMap<String, ManagedRun>,
 }

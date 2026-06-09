@@ -59,7 +59,12 @@ async fn main() -> std::io::Result<()> {
     let scan_global =
         std::env::var_os("HONEYHUB_GLOBAL_AGENTS").is_some_and(|value| !value.is_empty());
     if scan_global {
-        runtime = runtime.with_global_home(user_home());
+        match user_home() {
+            Some(home) => runtime = runtime.with_global_home(Some(home)),
+            None => eprintln!(
+                "warning: HONEYHUB_GLOBAL_AGENTS is set, but HOME/USERPROFILE is unset; user-global agent discovery remains disabled"
+            ),
+        }
     }
 
     // Pairing: issue a token the PWA presents on connect.
