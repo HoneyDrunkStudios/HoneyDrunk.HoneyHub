@@ -1,7 +1,5 @@
 use crate::adapter::{AgentBackend, AgentBackendAdapter, BridgeError, RunHandle, StartRunRequest};
-use crate::agents::{
-    discover_raw_global_in, discover_raw_in_root, merge_agents, user_home, AgentDefinition,
-};
+use crate::agents::{discover_raw_global_in, discover_raw_in_root, merge_agents, AgentDefinition};
 use crate::artifact::DispatchArtifact;
 use crate::coaching::{coach, CoachingSnapshot};
 use crate::pairing::{BackendAllowlist, WorkspaceAllowlist};
@@ -59,14 +57,20 @@ where
             adapter,
             workspace_allowlist,
             backend_allowlist,
-            global_home: user_home(),
+            // Global discovery is **opt-in, off by default**: reading the user-global
+            // `~/.claude/agents` / `~/.copilot/agents` is outside the workspace allowlist,
+            // so the runtime does not do it unless the host explicitly enables it via
+            // `with_global_home` (ADR-0090 keeps discovery within configured roots).
+            global_home: None,
             runs: HashMap::new(),
         }
     }
 
-    /// Override the user-global agent home (the parent of `~/.claude/agents` /
-    /// `~/.copilot/agents`). Production resolves it from the environment; tests pin it to a
-    /// temp dir for determinism. `None` disables global agent discovery entirely.
+    /// Opt **in** to user-global agent discovery by setting the home directory whose
+    /// `~/.claude/agents` / `~/.copilot/agents` folders should be scanned (resolve it
+    /// dependency-free with [`user_home`]). This reads outside the workspace allowlist —
+    /// the user's own home config — so it is deliberately not enabled by default; the host
+    /// turns it on explicitly. `None` (the default) disables it. Tests pin it to a temp dir.
     pub fn with_global_home(mut self, global_home: Option<PathBuf>) -> Self {
         self.global_home = global_home;
         self
@@ -540,11 +544,13 @@ where
     /// `None` it scans **every** allowlisted root. Best-effort per root (a missing
     /// `.claude/agents`/`.copilot/agents` folder is simply empty).
     ///
-    /// Always scans the **user-global** folders (`~/.claude/agents`, `~/.copilot/agents`)
-    /// too — those are the user's own home config and available regardless of workspace —
-    /// reading the home once. A **project** definition shadows a **global** one within a
-    /// backend; definitions dedupe by **name** into one entry runnable on the set of
-    /// backends that define it (see [`merge_agents`]).
+    /// When (and only when) user-global discovery is **opted in** via
+    /// [`Self::with_global_home`], it also scans the **user-global** folders
+    /// (`~/.claude/agents`, `~/.copilot/agents`) once — the user's own home config, read
+    /// outside the workspace allowlist by explicit configuration (off by default). A
+    /// **project** definition shadows a **global** one within a backend; definitions dedupe
+    /// by **name** into one entry runnable on the set of backends that define it (see
+    /// [`merge_agents`]).
     ///
     /// Results are filtered before merging to the backends this runtime can **actually
     /// launch** — its single adapter's backend, and only when that backend is allowlisted

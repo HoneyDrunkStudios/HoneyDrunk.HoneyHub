@@ -13,6 +13,10 @@
 //!   and the cockpit auto-connects; otherwise only the WebSocket is exposed.
 //! - `HONEYHUB_NO_BROWSER`: set to skip auto-opening the cockpit in a browser
 //!   (e.g. headless, or reaching the host from another device over a tailnet).
+//! - `HONEYHUB_GLOBAL_AGENTS`: set (to a non-empty value) to **opt in** to discovering
+//!   user-global agents from `~/.claude/agents` / `~/.copilot/agents`. Off by default:
+//!   that reads outside the workspace allowlist (the user's own home config), so it is
+//!   only enabled when the operator explicitly asks for it.
 //!
 //! On start it generates a pairing token, prints the URL (with the token), and —
 //! when serving the PWA — opens it in the default browser.
@@ -22,7 +26,7 @@ use std::path::PathBuf;
 
 use honeyhub_bridge::adapters::{default_event_clock, ClaudeLocalAdapter};
 use honeyhub_bridge::{
-    AgentBackend, BackendAllowlist, BridgeIdentity, BridgeRuntime, PairingRegistry,
+    user_home, AgentBackend, BackendAllowlist, BridgeIdentity, BridgeRuntime, PairingRegistry,
     WorkspaceAllowlist,
 };
 use honeyhub_bridge_host::{bind, serve, DEFAULT_POLL_INTERVAL};
@@ -49,7 +53,14 @@ async fn main() -> std::io::Result<()> {
     let model = std::env::var("HONEYHUB_CLAUDE_MODEL").ok();
     let adapter = ClaudeLocalAdapter::new(program, model, default_event_clock());
 
-    let runtime = BridgeRuntime::new(adapter, workspace_allowlist, backend_allowlist);
+    let mut runtime = BridgeRuntime::new(adapter, workspace_allowlist, backend_allowlist);
+    // Opt in to user-global agent discovery only when explicitly enabled (off by default;
+    // it reads outside the workspace allowlist — the user's own home config).
+    let scan_global =
+        std::env::var_os("HONEYHUB_GLOBAL_AGENTS").is_some_and(|value| !value.is_empty());
+    if scan_global {
+        runtime = runtime.with_global_home(user_home());
+    }
 
     // Pairing: issue a token the PWA presents on connect.
     let mut registry = PairingRegistry::new(BridgeIdentity::new("honeyhub-bridge-host"));

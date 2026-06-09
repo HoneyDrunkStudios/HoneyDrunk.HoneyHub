@@ -13,9 +13,10 @@ export interface AgentsViewProps {
 
 /**
  * The agents catalog (packet 09 §3f-bis): the user's own agent definitions,
- * auto-discovered from `.claude/agents/` (Claude) and `.copilot/agents/` (Copilot) — in
- * both the per-workspace repo folders (within the workspace allowlist) and the user-global
- * home folders — and surfaced as runnable dispatch targets. Read-only — it never authors
+ * auto-discovered from `.claude/agents/` (Claude) and `.copilot/agents/` (Copilot) — the
+ * per-workspace repo folders (within the workspace allowlist) and, when the host opts in,
+ * the user-global home folders — and surfaced as runnable dispatch targets. Read-only — it
+ * never authors
  * or mutates a definition. Definitions are deduped by **name** into one row runnable on
  * the set of backends that define it; each backend shows as a badge with its own metadata.
  * It asks the host to discover when the tab becomes active and listens for the
@@ -66,8 +67,8 @@ export function AgentsView({ client, active }: AgentsViewProps) {
       </header>
       <p className="agents-scope">
         Discovered from your own <code>.claude/agents/</code> and <code>.copilot/agents/</code>{" "}
-        folders — both your allowlisted workspaces and your user-global config. Read-only —
-        nothing here is changed.
+        folders in your allowlisted workspaces (and your user-global config, when the host
+        enables it). Read-only — nothing here is changed.
       </p>
 
       {error !== undefined && (

@@ -11,12 +11,15 @@
 //! Codex has no folder-of-agents convention, so it is deliberately not scanned. The
 //! source set is table-driven, so a future source is a one-line addition.
 //!
-//! Two **scopes** are scanned: the per-workspace **project** folders
+//! Two **scopes** can be scanned: the per-workspace **project** folders
 //! (`<root>/.claude/agents`, `<root>/.copilot/agents`) and the user-global **global**
-//! folders under the home directory (`~/.claude/agents`, `~/.copilot/agents`). Global is
-//! the user's own home config (intentional, and read once regardless of how many
-//! workspaces exist). Within a backend, **a project definition shadows a global one**
-//! (mirroring Claude's project-overrides-user precedence).
+//! folders under the home directory (`~/.claude/agents`, `~/.copilot/agents`). The project
+//! scope is always scanned within the workspace allowlist; the global scope is **opt-in,
+//! off by default** — it reads the user's own home config, which is outside the workspace
+//! allowlist, so the runtime only scans it when the host explicitly enables it (ADR-0090
+//! keeps discovery within configured roots unless deliberately widened). Within a backend,
+//! **a project definition shadows a global one** (mirroring Claude's project-overrides-user
+//! precedence).
 //!
 //! Definitions are deduped by **name** into **one entry runnable on multiple backends**
 //! (operator-decided): an [`AgentDefinition`] is a name plus the set of backends that
