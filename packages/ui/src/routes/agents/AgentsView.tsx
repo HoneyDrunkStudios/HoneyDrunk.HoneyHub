@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useState } from "react";
 import type { AgentDefinition } from "@honeydrunk/honeyhub-types";
 import type { WireClient } from "../../wire/client";
-import { groupAgents } from "./agentsModel";
+import { backendLabel } from "../../backends";
+import { sortAgents } from "./agentsModel";
 
 export interface AgentsViewProps {
   client: WireClient;
@@ -12,11 +13,13 @@ export interface AgentsViewProps {
 
 /**
  * The agents catalog (packet 09 §3f-bis): the user's own agent definitions,
- * auto-discovered from `.claude/agents/` (Claude) and `.github/` (Copilot) within
- * the workspace allowlist, surfaced as runnable dispatch targets. Read-only — it
- * never authors or mutates a definition. It asks the host to discover when the tab
- * becomes active, listens for the `agent_catalog` event, and lists the agents
- * grouped by backend.
+ * auto-discovered from `.claude/agents/` (Claude) and `.copilot/agents/` (Copilot) — in
+ * both the per-workspace repo folders (within the workspace allowlist) and the user-global
+ * home folders — and surfaced as runnable dispatch targets. Read-only — it never authors
+ * or mutates a definition. Definitions are deduped by **name** into one row runnable on
+ * the set of backends that define it; each backend shows as a badge with its own metadata.
+ * It asks the host to discover when the tab becomes active and listens for the
+ * `agent_catalog` event.
  */
 export function AgentsView({ client, active }: AgentsViewProps) {
   const [agents, setAgents] = useState<AgentDefinition[] | undefined>(undefined);
@@ -51,7 +54,7 @@ export function AgentsView({ client, active }: AgentsViewProps) {
     }
   }, [active, refresh]);
 
-  const groups = agents === undefined ? undefined : groupAgents(agents);
+  const ordered = agents === undefined ? undefined : sortAgents(agents);
 
   return (
     <section className="agents" aria-label="Agents">
@@ -62,8 +65,9 @@ export function AgentsView({ client, active }: AgentsViewProps) {
         </button>
       </header>
       <p className="agents-scope">
-        Discovered from your own <code>.claude/agents/</code> and <code>.github/</code> files,
-        within your allowlisted workspaces. Read-only — nothing here is changed.
+        Discovered from your own <code>.claude/agents/</code> and <code>.copilot/agents/</code>{" "}
+        folders — both your allowlisted workspaces and your user-global config. Read-only —
+        nothing here is changed.
       </p>
 
       {error !== undefined && (
@@ -72,42 +76,52 @@ export function AgentsView({ client, active }: AgentsViewProps) {
         </p>
       )}
 
-      {groups === undefined ? (
+      {ordered === undefined ? (
         loading ? (
           <p className="agents-empty">Discovering agents…</p>
         ) : error === undefined ? (
           <p className="agents-empty">No agents discovered yet.</p>
         ) : null
-      ) : groups.length === 0 ? (
+      ) : ordered.length === 0 ? (
         <p className="agents-empty">
-          No agent definitions found. Add one under <code>.claude/agents/</code> in an
-          allowlisted workspace and refresh.
+          No agent definitions found. Add one under <code>.claude/agents/</code> or{" "}
+          <code>.copilot/agents/</code> (in an allowlisted workspace or your home) and refresh.
         </p>
       ) : (
-        groups.map((group) => (
-          <div key={group.backend} className="agents-group">
-            <h3 className="agents-group-label">{group.label}</h3>
-            <ul className="agents-list">
-              {group.agents.map((agent) => (
-                <li key={agent.id} className="agent-card">
-                  <div className="agent-card-head">
-                    <span className="agent-name">{agent.name}</span>
-                    {agent.model !== undefined && (
-                      <span className="agent-model">{agent.model}</span>
+        <ul className="agents-list">
+          {ordered.map((agent) => (
+            <li key={agent.id} className="agent-card">
+              <div className="agent-card-head">
+                <span className="agent-name">{agent.name}</span>
+                <span className="agent-backends">
+                  {agent.backends.map((binding) => (
+                    <span key={binding.backend} className="agent-backend-badge">
+                      {backendLabel(binding.backend)}
+                    </span>
+                  ))}
+                </span>
+              </div>
+              <ul className="agent-bindings">
+                {agent.backends.map((binding) => (
+                  <li key={binding.backend} className="agent-binding">
+                    <span className="agent-binding-backend">{backendLabel(binding.backend)}</span>
+                    {binding.model !== undefined && (
+                      <span className="agent-model">{binding.model}</span>
                     )}
-                  </div>
-                  {agent.description !== "" && (
-                    <p className="agent-description">{agent.description}</p>
-                  )}
-                  <p className="agent-source">
-                    <span className="agent-workspace">{agent.workspaceLabel}</span>
-                    <span className="agent-path">{agent.sourcePath}</span>
-                  </p>
-                </li>
-              ))}
-            </ul>
-          </div>
-        ))
+                    {binding.description !== "" && (
+                      <p className="agent-description">{binding.description}</p>
+                    )}
+                    <p className="agent-source">
+                      <span className="agent-scope">{binding.scope}</span>
+                      <span className="agent-workspace">{binding.workspaceLabel}</span>
+                      <span className="agent-path">{binding.sourcePath}</span>
+                    </p>
+                  </li>
+                ))}
+              </ul>
+            </li>
+          ))}
+        </ul>
       )}
     </section>
   );

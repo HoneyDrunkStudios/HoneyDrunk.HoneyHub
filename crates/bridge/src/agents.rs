@@ -1,142 +1,294 @@
 //! Local agent-definition discovery (ADR-0090 / packet 09 §3f-bis).
 //!
-//! Reads the user's **own** agent definitions out of an allowlisted workspace root
-//! and surfaces them as runnable dispatch targets. **Read-only** — it never authors
-//! or mutates a definition, and it surfaces only metadata (name / description /
-//! model / source), never the prompt body. Two sources, each a folder of agent
-//! definitions where **every markdown file is one** (operator-decided conventions):
+//! Reads the user's **own** agent definitions and surfaces them as runnable dispatch
+//! targets. **Read-only** — it never authors or mutates a definition, and it surfaces
+//! only metadata (name / description / model / source), never the prompt body. Each
+//! source is a folder where **every markdown file is one definition** (operator-decided
+//! conventions):
 //!  - `.claude/agents/*.md` — Claude Code subagents, backend `claude.local`.
 //!  - `.copilot/agents/*.md` — Copilot agents, backend `copilot.local`.
 //!
 //! Codex has no folder-of-agents convention, so it is deliberately not scanned. The
-//! source set is table-driven, so a future source is a one-line addition. The
-//! caller (the runtime) enforces the workspace allowlist before discovery runs.
+//! source set is table-driven, so a future source is a one-line addition.
+//!
+//! Two **scopes** are scanned: the per-workspace **project** folders
+//! (`<root>/.claude/agents`, `<root>/.copilot/agents`) and the user-global **global**
+//! folders under the home directory (`~/.claude/agents`, `~/.copilot/agents`). Global is
+//! the user's own home config (intentional, and read once regardless of how many
+//! workspaces exist). Within a backend, **a project definition shadows a global one**
+//! (mirroring Claude's project-overrides-user precedence).
+//!
+//! Definitions are deduped by **name** into **one entry runnable on multiple backends**
+//! (operator-decided): an [`AgentDefinition`] is a name plus the set of backends that
+//! define it, each carrying the winning definition's metadata for that backend. So a
+//! `reviewer` defined in both `.claude/agents` and `.copilot/agents` is one entry listing
+//! both backends; the caller chooses the backend at dispatch time.
 
 use crate::adapter::AgentBackend;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
-/// A discovered, runnable agent definition. Carries metadata only — the prompt body
-/// stays on disk (it is sensitive by default, ADR-0090 D11). **No absolute local
-/// path crosses the wire:** `source_path` is workspace-relative, `workspace_label`
-/// is the root's final component (for disambiguation), and `id` hashes the root
-/// rather than embedding it.
+/// Where a definition was found: a per-workspace repo folder, or the user-global home
+/// folder. Repo shadows global within a backend.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum AgentScope {
+    Project,
+    Global,
+}
+
+/// One backend a discovered agent can run on, carrying the metadata of the **winning**
+/// definition for that backend (a project definition beats a global one). Metadata only
+/// — the prompt body stays on disk (it is sensitive by default, ADR-0090 D11). **No
+/// absolute local path crosses the wire:** `source_path` is relative to its scan root and
+/// `workspace_label` is a basename (or the constant `"global"`), never an absolute path.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct AgentDefinition {
-    /// Stable across discoveries: a hash of the workspace root + the relative source
-    /// path. Opaque — it does not reveal the absolute path.
-    pub id: String,
-    pub name: String,
-    pub description: String,
+pub struct AgentBackendBinding {
     pub backend: AgentBackend,
+    pub description: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
-    /// Path relative to the workspace root (e.g. `.claude/agents/reviewer.md`).
+    /// Path relative to the scan root (e.g. `.claude/agents/reviewer.md`). For a global
+    /// definition it is relative to the user's home, never the absolute home path.
     pub source_path: String,
-    /// The workspace root's final path component (e.g. `HoneyDrunk.HoneyHub`), to tell
-    /// apart same-named agents from different workspaces — **not** the absolute path.
+    pub scope: AgentScope,
+    /// For a **project** binding: the workspace root's final path component (e.g.
+    /// `HoneyDrunk.HoneyHub`), to disambiguate same-named agents across workspaces. For a
+    /// **global** binding: the constant [`GLOBAL_LABEL`] — the home directory's basename
+    /// is the username, which must never be leaked.
     pub workspace_label: String,
 }
 
-struct AgentSource {
-    /// Folder relative to the workspace root; every `*.md` file in it is a definition.
+/// A discovered, runnable agent — identified by **name** and runnable on the **set of
+/// backends** that define it (operator-decided one-entry-per-name model). Metadata only.
+/// **No absolute local path crosses the wire:** `id` is an opaque hash of the name and
+/// every per-backend path is relative.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentDefinition {
+    /// Stable, opaque id derived from the name (the dedupe key). Reveals no path.
+    pub id: String,
+    pub name: String,
+    /// The backends this agent can run on, ordered by backend. Always non-empty.
+    pub backends: Vec<AgentBackendBinding>,
+}
+
+/// A single discovered file, before cross-name / cross-backend dedupe.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RawAgent {
+    pub name: String,
+    pub backend: AgentBackend,
+    pub description: String,
+    pub model: Option<String>,
+    pub source_path: String,
+    pub scope: AgentScope,
+    pub workspace_label: String,
+}
+
+/// The `workspace_label` used for every global-scope binding. The home directory's
+/// basename is the username, so a constant is used instead — the no-path-leak posture
+/// must hold for global definitions too.
+pub const GLOBAL_LABEL: &str = "global";
+
+struct SubdirSource {
+    /// Folder relative to the scan root; every `*.md` file in it is a definition.
     subdir: &'static str,
     backend: AgentBackend,
 }
 
-/// Don't read a candidate file larger than this for frontmatter — an agent
-/// definition is small; a huge file is skipped for parsing (still listed by name).
+/// Don't read a candidate file larger than this for frontmatter — an agent definition is
+/// small; a huge file is skipped for parsing (still listed by name).
 const MAX_DEFINITION_BYTES: u64 = 64 * 1024;
 
-fn sources() -> [AgentSource; 2] {
+fn sources() -> [SubdirSource; 2] {
     [
-        AgentSource {
+        SubdirSource {
             subdir: ".claude/agents",
             backend: AgentBackend::ClaudeLocal,
         },
-        AgentSource {
+        SubdirSource {
             subdir: ".copilot/agents",
             backend: AgentBackend::CopilotLocal,
         },
     ]
 }
 
-/// Discover every agent definition under `workspace_root`. **Best-effort**: an
-/// unreadable source folder or file is skipped, never fatal. Results are ordered
-/// deterministically by `(backend, name, id)`. The caller enforces the allowlist.
-pub fn discover_agents_in_root(workspace_root: &str) -> Vec<AgentDefinition> {
-    let root = Path::new(workspace_root);
-    let mut found = Vec::new();
+/// Resolve the user's home directory dependency-free: `HOME` (unix) then `USERPROFILE`
+/// (Windows). `None` when neither is set (global scanning is then simply skipped).
+pub fn user_home() -> Option<PathBuf> {
+    std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(PathBuf::from)
+        .filter(|path| !path.as_os_str().is_empty())
+}
 
+/// Discover the raw **project** (repo) candidates under one workspace root. Best-effort:
+/// an unreadable source folder or file is skipped, never fatal. The caller enforces the
+/// workspace allowlist before calling this.
+pub fn discover_raw_in_root(workspace_root: &str) -> Vec<RawAgent> {
+    let root = Path::new(workspace_root);
+    let label = workspace_label(workspace_root);
+    let mut found = Vec::new();
     for source in sources() {
         let dir = root.join(source.subdir);
-        // The source folder itself must stay inside the allowlisted root: if it (or an
-        // ancestor) is a symlink that escapes the workspace, don't even *list* it —
-        // listing leaks external filenames/metadata, which the per-file check below
-        // (it only gates reads) would not prevent.
-        if !is_within_root(&dir, workspace_root) {
-            continue;
-        }
-        let Ok(entries) = fs::read_dir(&dir) else {
-            continue;
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if !path.is_file() {
-                continue;
-            }
-            // Stay inside the allowlisted workspace: a symlinked agent file could
-            // resolve to a target *outside* the root, so require the canonical path to
-            // remain within the canonical root. An in-workspace symlink still resolves
-            // within the root and is fine; only an escaping one is dropped.
-            if !is_within_root(&path, workspace_root) {
-                continue;
-            }
-            let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
-                continue;
-            };
-            if !file_name.to_ascii_lowercase().ends_with(".md") {
-                continue;
-            }
-            if let Some(definition) = build_definition(&path, file_name, &source, workspace_root) {
-                found.push(definition);
-            }
-        }
+        scan_dir(
+            &dir,
+            root,
+            source.subdir,
+            &source.backend,
+            AgentScope::Project,
+            &label,
+            &mut found,
+        );
     }
-
-    found.sort_by(|left, right| {
-        (&left.backend, &left.name, &left.id).cmp(&(&right.backend, &right.name, &right.id))
-    });
     found
 }
 
-/// True when `path` resolves (canonically) to a location inside `workspace_root`.
+/// Discover the raw **global** (user) candidates under `home` (the parent of
+/// `.claude/agents` / `.copilot/agents`). Scanned once, independent of any workspace.
+/// Best-effort, same as the project scan. Containment is checked against `home`, so a
+/// symlink in a global agents folder cannot surface a file from outside the home tree.
+pub fn discover_raw_global_in(home: &Path) -> Vec<RawAgent> {
+    let mut found = Vec::new();
+    for source in sources() {
+        let dir = home.join(source.subdir);
+        scan_dir(
+            &dir,
+            home,
+            source.subdir,
+            &source.backend,
+            AgentScope::Global,
+            GLOBAL_LABEL,
+            &mut found,
+        );
+    }
+    found
+}
+
+/// Dedupe raw candidates into **one entry per name**, each runnable on the set of
+/// backends that define it. Within a `(name, backend)`, a **project** definition shadows
+/// a **global** one; further ties break deterministically by workspace label then source
+/// path, so the metadata surfaced for a backend is always the same winning definition's.
+/// Backends within an entry, and entries themselves, are deterministically ordered.
+pub fn merge_agents(mut raws: Vec<RawAgent>) -> Vec<AgentDefinition> {
+    // Sort by precedence so that, per (name, backend), the first candidate is the winner:
+    // project before global, then label, then path. Name/backend lead so equal keys group.
+    raws.sort_by(|left, right| {
+        left.name
+            .cmp(&right.name)
+            .then_with(|| left.backend.cmp(&right.backend))
+            .then_with(|| scope_rank(left.scope).cmp(&scope_rank(right.scope)))
+            .then_with(|| left.workspace_label.cmp(&right.workspace_label))
+            .then_with(|| left.source_path.cmp(&right.source_path))
+    });
+
+    // name -> (backend -> winning binding). BTreeMaps keep names and backends ordered.
+    let mut by_name: BTreeMap<String, BTreeMap<AgentBackend, AgentBackendBinding>> =
+        BTreeMap::new();
+    for raw in raws {
+        let backends = by_name.entry(raw.name.clone()).or_default();
+        // First writer wins: candidates are pre-sorted by precedence, so a later same
+        // (name, backend) entry (a shadowed project dup or a global fallback) is ignored.
+        backends
+            .entry(raw.backend.clone())
+            .or_insert_with(|| AgentBackendBinding {
+                backend: raw.backend.clone(),
+                description: raw.description.clone(),
+                model: raw.model.clone(),
+                source_path: raw.source_path.clone(),
+                scope: raw.scope,
+                workspace_label: raw.workspace_label.clone(),
+            });
+    }
+
+    by_name
+        .into_iter()
+        .map(|(name, backends)| AgentDefinition {
+            id: fnv64_hex(name.as_bytes()),
+            name,
+            // `into_values` yields in `AgentBackend` order (the BTreeMap key order).
+            backends: backends.into_values().collect(),
+        })
+        .collect()
+}
+
+/// Convenience for a single project root: discover its raw candidates and merge them into
+/// the one-entry-per-name shape. (The runtime combines multiple roots + the global scope
+/// and applies the backend allowlist itself before merging.)
+pub fn discover_agents_in_root(workspace_root: &str) -> Vec<AgentDefinition> {
+    merge_agents(discover_raw_in_root(workspace_root))
+}
+
+fn scan_dir(
+    dir: &Path,
+    containment_root: &Path,
+    subdir: &str,
+    backend: &AgentBackend,
+    scope: AgentScope,
+    workspace_label: &str,
+    out: &mut Vec<RawAgent>,
+) {
+    // The source folder itself must stay inside the containment root: if it (or an
+    // ancestor) is a symlink that escapes the root, don't even *list* it — listing leaks
+    // external filenames/metadata, which the per-file check below (it only gates reads)
+    // would not prevent.
+    if !is_within_root(dir, containment_root) {
+        return;
+    }
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        // Stay inside the containment root: a symlinked agent file could resolve to a
+        // target *outside* the root, so require the canonical path to remain within the
+        // canonical root. An in-root symlink still resolves within the root and is fine;
+        // only an escaping one is dropped.
+        if !is_within_root(&path, containment_root) {
+            continue;
+        }
+        let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        if !file_name.to_ascii_lowercase().ends_with(".md") {
+            continue;
+        }
+        if let Some(raw) = build_raw(&path, file_name, subdir, backend, scope, workspace_label) {
+            out.push(raw);
+        }
+    }
+}
+
+/// True when `path` resolves (canonically) to a location inside `containment_root`.
 /// Resolving both sides defeats a symlink that would otherwise surface a file from
-/// outside the allowlisted workspace. A path that cannot be canonicalized is treated
-/// as outside (excluded) rather than risk surfacing it.
-fn is_within_root(path: &Path, workspace_root: &str) -> bool {
-    match (
-        path.canonicalize(),
-        Path::new(workspace_root).canonicalize(),
-    ) {
+/// outside the root. A path that cannot be canonicalized is treated as outside (excluded)
+/// rather than risk surfacing it.
+fn is_within_root(path: &Path, containment_root: &Path) -> bool {
+    match (path.canonicalize(), containment_root.canonicalize()) {
         (Ok(real_path), Ok(real_root)) => real_path.starts_with(real_root),
         _ => false,
     }
 }
 
-fn build_definition(
+fn build_raw(
     path: &Path,
     file_name: &str,
-    source: &AgentSource,
-    workspace_root: &str,
-) -> Option<AgentDefinition> {
+    subdir: &str,
+    backend: &AgentBackend,
+    scope: AgentScope,
+    workspace_label: &str,
+) -> Option<RawAgent> {
     // Relative source path (no absolute prefix leaked): `<subdir>/<file_name>`.
-    let relative = format!("{}/{}", source.subdir, file_name);
+    let relative = format!("{subdir}/{file_name}");
 
-    // Parse frontmatter only when the file is small enough; otherwise list it by
-    // name. A read failure means we still list the file from its name.
+    // Parse frontmatter only when the file is small enough; otherwise list it by name. A
+    // read failure means we still list the file from its name.
     let content = match fs::metadata(path) {
         Ok(meta) if meta.len() <= MAX_DEFINITION_BYTES => fs::read_to_string(path).ok(),
         _ => None,
@@ -146,27 +298,28 @@ fn build_definition(
         .map(parse_frontmatter)
         .unwrap_or((None, None, None));
 
-    let name = name.unwrap_or_else(|| humanize_stem(file_name));
-    let description = description.unwrap_or_default();
-
-    Some(AgentDefinition {
-        // Hash the root into the id so it stays unique per (workspace, file) without
-        // embedding the absolute path.
-        id: format!("{}:{}", workspace_hash(workspace_root), relative),
-        name,
-        description,
-        backend: source.backend.clone(),
+    Some(RawAgent {
+        name: name.unwrap_or_else(|| humanize_stem(file_name)),
+        backend: backend.clone(),
+        description: description.unwrap_or_default(),
         model,
         source_path: relative,
-        workspace_label: workspace_label(workspace_root),
+        scope,
+        workspace_label: workspace_label.to_string(),
     })
 }
 
-/// The workspace root's final path component, for disambiguating same-named agents
-/// across workspaces without exposing the absolute path. When the root has no final
-/// component (a bare `/` or drive root), fall back to an **opaque hash-derived**
-/// label rather than the raw absolute root — so the no-absolute-path posture holds
-/// even for those roots.
+fn scope_rank(scope: AgentScope) -> u8 {
+    match scope {
+        AgentScope::Project => 0,
+        AgentScope::Global => 1,
+    }
+}
+
+/// The workspace root's final path component, for disambiguating same-named agents across
+/// workspaces without exposing the absolute path. When the root has no final component (a
+/// bare `/` or drive root), fall back to an **opaque hash-derived** label rather than the
+/// raw absolute root — so the no-absolute-path posture holds even for those roots.
 fn workspace_label(workspace_root: &str) -> String {
     let candidate = normalized_root(workspace_root);
     Path::new(candidate)
@@ -176,10 +329,9 @@ fn workspace_label(workspace_root: &str) -> String {
         .unwrap_or_else(|| format!("workspace-{}", &workspace_hash(workspace_root)[..8]))
 }
 
-/// Normalize a root for label/id derivation by trimming trailing separators, so
-/// semantically identical roots (`/work` and `/work/`) yield the same label and id.
-/// Keeps the original when trimming empties it (e.g. `/`), so the hash fallback in
-/// `workspace_label` still applies.
+/// Normalize a root for label derivation by trimming trailing separators, so
+/// semantically identical roots (`/work` and `/work/`) yield the same label. Keeps the
+/// original when trimming empties it (e.g. `/`), so the hash fallback still applies.
 fn normalized_root(workspace_root: &str) -> &str {
     let trimmed = workspace_root.trim_end_matches(['/', '\\']);
     if trimmed.is_empty() {
@@ -189,20 +341,25 @@ fn normalized_root(workspace_root: &str) -> &str {
     }
 }
 
-/// A stable, opaque id for a workspace root (FNV-1a 64-bit, dependency-free and
-/// deterministic) so the agent id can be unique per workspace without revealing the
-/// absolute path. Hashes the **normalized** root, so `/work` and `/work/` match.
+/// A stable, opaque id for a workspace root (FNV-1a 64-bit over the **normalized** root),
+/// used only for the rootless-root label fallback. Dependency-free and deterministic.
 fn workspace_hash(workspace_root: &str) -> String {
+    fnv64_hex(normalized_root(workspace_root).as_bytes())
+}
+
+/// FNV-1a 64-bit over arbitrary bytes, as zero-padded hex. Dependency-free, deterministic
+/// — used for the opaque agent id (over the name) and the workspace label fallback.
+fn fnv64_hex(bytes: &[u8]) -> String {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-    for byte in normalized_root(workspace_root).as_bytes() {
+    for byte in bytes {
         hash ^= u64::from(*byte);
         hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
     }
     format!("{hash:016x}")
 }
 
-/// A filename stem turned into a human label: drop the extension, swap `-`/`_` for
-/// spaces (`code-reviewer.md` -> `code reviewer`).
+/// A filename stem turned into a human label: drop the extension, swap `-`/`_` for spaces
+/// (`code-reviewer.md` -> `code reviewer`).
 fn humanize_stem(file_name: &str) -> String {
     let stem = Path::new(file_name)
         .file_stem()
@@ -212,9 +369,9 @@ fn humanize_stem(file_name: &str) -> String {
 }
 
 /// Pull `name` / `description` / `model` out of a leading `---`-delimited YAML
-/// frontmatter block. Deliberately tiny (the crate stays dependency-free): it reads
-/// simple `key: value` lines and ignores everything else. Returns `None`s when there
-/// is no frontmatter.
+/// frontmatter block. Deliberately tiny (the crate stays dependency-free): it reads simple
+/// `key: value` lines and ignores everything else. Returns `None`s when there is no
+/// frontmatter.
 fn parse_frontmatter(content: &str) -> (Option<String>, Option<String>, Option<String>) {
     let trimmed = content.trim_start_matches(['\u{feff}', '\n', '\r', ' ', '\t']);
     let Some(rest) = trimmed.strip_prefix("---") else {
@@ -242,8 +399,8 @@ fn parse_frontmatter(content: &str) -> (Option<String>, Option<String>, Option<S
     (name, description, model)
 }
 
-/// `key: value` -> the cleaned `value` (surrounding quotes stripped), or `None` if
-/// the line is a different key or has an empty value.
+/// `key: value` -> the cleaned `value` (surrounding quotes stripped), or `None` if the
+/// line is a different key or has an empty value.
 fn field(line: &str, key: &str) -> Option<String> {
     let rest = line.strip_prefix(key)?.strip_prefix(':')?;
     let value = rest.trim().trim_matches(['"', '\'']).trim();
@@ -268,6 +425,11 @@ mod tests {
         fs::write(path, contents).expect("write file");
     }
 
+    /// Find the single binding for a backend in a merged definition.
+    fn binding(agent: &AgentDefinition, backend: AgentBackend) -> Option<&AgentBackendBinding> {
+        agent.backends.iter().find(|b| b.backend == backend)
+    }
+
     #[test]
     fn discovers_claude_subagents_with_frontmatter() {
         let root = temp_root();
@@ -285,23 +447,27 @@ mod tests {
         assert_eq!(agents.len(), 2);
 
         let reviewer = agents.iter().find(|a| a.name == "Code Reviewer").unwrap();
-        assert_eq!(reviewer.backend, AgentBackend::ClaudeLocal);
-        assert_eq!(reviewer.description, "Reviews diffs against the Grid");
-        assert_eq!(reviewer.model.as_deref(), Some("claude-opus"));
-        assert_eq!(reviewer.source_path, ".claude/agents/code-reviewer.md");
-        // No absolute path leaks anywhere on the wire shape: not the source path, not
-        // the id (it hashes the root), and the label is just the root's basename.
+        // One entry, runnable on exactly the one backend that defines it.
+        assert_eq!(reviewer.backends.len(), 1);
+        let claude = binding(reviewer, AgentBackend::ClaudeLocal).unwrap();
+        assert_eq!(claude.description, "Reviews diffs against the Grid");
+        assert_eq!(claude.model.as_deref(), Some("claude-opus"));
+        assert_eq!(claude.source_path, ".claude/agents/code-reviewer.md");
+        assert_eq!(claude.scope, AgentScope::Project);
+        // No absolute path leaks anywhere on the wire shape: not the source path, not the
+        // id (it hashes the name), and the label is just the root's basename.
         let root_str = root.to_str().unwrap();
-        assert!(!reviewer.source_path.contains(root_str));
+        assert!(!claude.source_path.contains(root_str));
         assert!(!reviewer.id.contains(root_str));
         assert_eq!(
-            reviewer.workspace_label,
+            claude.workspace_label,
             root.file_name().unwrap().to_str().unwrap()
         );
 
         let scratch = agents.iter().find(|a| a.name == "scratch helper").unwrap();
-        assert_eq!(scratch.description, "");
-        assert_eq!(scratch.model, None);
+        let scratch_claude = binding(scratch, AgentBackend::ClaudeLocal).unwrap();
+        assert_eq!(scratch_claude.description, "");
+        assert_eq!(scratch_claude.model, None);
 
         let _ = fs::remove_dir_all(&root);
     }
@@ -326,7 +492,7 @@ mod tests {
         let agents = discover_agents_in_root(root.to_str().unwrap());
         let copilot: Vec<_> = agents
             .iter()
-            .filter(|a| a.backend == AgentBackend::CopilotLocal)
+            .filter(|a| binding(a, AgentBackend::CopilotLocal).is_some())
             .collect();
         assert_eq!(
             copilot.len(),
@@ -335,8 +501,10 @@ mod tests {
         );
         assert!(copilot.iter().any(|a| a.name == "Build Agent"));
         assert!(copilot.iter().any(|a| a.name == "release"));
+        let build = agents.iter().find(|a| a.name == "Build Agent").unwrap();
+        let build_copilot = binding(build, AgentBackend::CopilotLocal).unwrap();
         assert_eq!(
-            copilot[0]
+            build_copilot
                 .source_path
                 .split('/')
                 .take(2)
@@ -344,9 +512,131 @@ mod tests {
             vec![".copilot", "agents"]
         );
         // Nothing was discovered from `.github`.
-        assert!(!agents.iter().any(|a| a.source_path.starts_with(".github")));
+        assert!(!agents.iter().any(|a| a.name == "Nope"));
 
         let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn one_name_in_two_backends_is_a_single_multi_backend_entry() {
+        let root = temp_root();
+        write(
+            &root.join(".claude/agents/reviewer.md"),
+            "---\nname: Reviewer\ndescription: Claude reviewer\nmodel: claude-opus\n---\nbody\n",
+        );
+        write(
+            &root.join(".copilot/agents/reviewer.md"),
+            "---\nname: Reviewer\ndescription: Copilot reviewer\n---\nbody\n",
+        );
+
+        let agents = discover_agents_in_root(root.to_str().unwrap());
+        // ONE entry by name, runnable on BOTH backends.
+        assert_eq!(agents.len(), 1);
+        let reviewer = &agents[0];
+        assert_eq!(reviewer.name, "Reviewer");
+        assert_eq!(reviewer.backends.len(), 2);
+        // Backends are ordered (claude before copilot) and each carries its own metadata.
+        assert_eq!(reviewer.backends[0].backend, AgentBackend::ClaudeLocal);
+        assert_eq!(reviewer.backends[0].description, "Claude reviewer");
+        assert_eq!(reviewer.backends[0].model.as_deref(), Some("claude-opus"));
+        assert_eq!(reviewer.backends[1].backend, AgentBackend::CopilotLocal);
+        assert_eq!(reviewer.backends[1].description, "Copilot reviewer");
+        assert_eq!(reviewer.backends[1].model, None);
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn global_definitions_are_discovered_and_scoped() {
+        let home = temp_root();
+        write(
+            &home.join(".claude/agents/global-helper.md"),
+            "---\nname: Global Helper\ndescription: A user-global agent\n---\nbody\n",
+        );
+
+        let agents = merge_agents(discover_raw_global_in(&home));
+        assert_eq!(agents.len(), 1);
+        let helper = &agents[0];
+        assert_eq!(helper.name, "Global Helper");
+        let claude = binding(helper, AgentBackend::ClaudeLocal).unwrap();
+        assert_eq!(claude.scope, AgentScope::Global);
+        // A global binding labels itself with the constant, never the home basename
+        // (which is the username).
+        assert_eq!(claude.workspace_label, GLOBAL_LABEL);
+        assert_eq!(claude.source_path, ".claude/agents/global-helper.md");
+
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn project_shadows_global_within_a_backend() {
+        let root = temp_root();
+        let home = temp_root();
+        // Same name + backend in both scopes; the project one must win.
+        write(
+            &root.join(".claude/agents/reviewer.md"),
+            "---\nname: Reviewer\ndescription: PROJECT reviewer\n---\nbody\n",
+        );
+        write(
+            &home.join(".claude/agents/reviewer.md"),
+            "---\nname: Reviewer\ndescription: GLOBAL reviewer\n---\nbody\n",
+        );
+
+        let mut raws = discover_raw_in_root(root.to_str().unwrap());
+        raws.extend(discover_raw_global_in(&home));
+        let agents = merge_agents(raws);
+
+        assert_eq!(agents.len(), 1);
+        let reviewer = &agents[0];
+        assert_eq!(
+            reviewer.backends.len(),
+            1,
+            "one backend, deduped across scopes"
+        );
+        let claude = binding(reviewer, AgentBackend::ClaudeLocal).unwrap();
+        assert_eq!(
+            claude.description, "PROJECT reviewer",
+            "project shadows global"
+        );
+        assert_eq!(claude.scope, AgentScope::Project);
+
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn project_and_global_on_different_backends_merge_into_one_entry() {
+        // A name defined on claude in the project and on copilot globally → one entry,
+        // two backends, each keeping its own scope.
+        let root = temp_root();
+        let home = temp_root();
+        write(
+            &root.join(".claude/agents/helper.md"),
+            "---\nname: Helper\ndescription: project claude\n---\nbody\n",
+        );
+        write(
+            &home.join(".copilot/agents/helper.md"),
+            "---\nname: Helper\ndescription: global copilot\n---\nbody\n",
+        );
+
+        let mut raws = discover_raw_in_root(root.to_str().unwrap());
+        raws.extend(discover_raw_global_in(&home));
+        let agents = merge_agents(raws);
+
+        assert_eq!(agents.len(), 1);
+        let helper = &agents[0];
+        assert_eq!(helper.backends.len(), 2);
+        assert_eq!(
+            binding(helper, AgentBackend::ClaudeLocal).unwrap().scope,
+            AgentScope::Project
+        );
+        assert_eq!(
+            binding(helper, AgentBackend::CopilotLocal).unwrap().scope,
+            AgentScope::Global
+        );
+
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(&home);
     }
 
     #[test]
@@ -355,7 +645,12 @@ mod tests {
         fs::create_dir_all(&root).expect("root");
         let agents = discover_agents_in_root(root.to_str().unwrap());
         assert!(agents.is_empty());
+        // A missing global home folder is likewise empty, not an error.
+        let home = temp_root();
+        fs::create_dir_all(&home).expect("home");
+        assert!(merge_agents(discover_raw_global_in(&home)).is_empty());
         let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(&home);
     }
 
     #[test]
@@ -366,13 +661,11 @@ mod tests {
             "HoneyDrunk.HoneyHub"
         );
         assert_eq!(workspace_label("/home/user/work/"), "work");
-        // Semantically identical roots hash the same (stable id, no duplicate catalog
-        // entries) and label the same.
-        assert_eq!(workspace_hash("/work"), workspace_hash("/work/"));
+        // Semantically identical roots label the same.
         assert_eq!(workspace_label("/work"), workspace_label("/work/"));
-        // A root with no final component must NOT serialize the raw absolute root —
-        // it falls back to an opaque, hash-derived label. (`/` and `""` are rootless
-        // on every platform; a backslash is not a separator off Windows.)
+        // A root with no final component must NOT serialize the raw absolute root — it
+        // falls back to an opaque, hash-derived label. (`/` and `""` are rootless on every
+        // platform; a backslash is not a separator off Windows.)
         for rootless in ["/", ""] {
             let label = workspace_label(rootless);
             assert_ne!(label, rootless, "must not echo the raw root {rootless:?}");

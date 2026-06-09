@@ -1,36 +1,32 @@
-import type { AgentBackend, AgentDefinition } from "@honeydrunk/honeyhub-types";
-import { backendLabel } from "../../backends";
+import type { AgentBackend, AgentBackendBinding, AgentDefinition } from "@honeydrunk/honeyhub-types";
 
 // Pure helpers for the agents catalog (packet 09 §3f-bis). The host discovers the
-// definitions; these only group + order them for display.
-
-export interface AgentGroup {
-  backend: AgentBackend;
-  label: string;
-  agents: AgentDefinition[];
-}
+// definitions and dedupes them by name into one entry runnable on the set of backends
+// that define it; these only order them (and their backends) for display.
 
 // Display order mirrors the rest of the cockpit (Claude, Codex, Copilot).
 const BACKEND_ORDER: AgentBackend[] = ["claude.local", "codex.local", "copilot.local"];
 
-/** Group discovered agents by backend in a stable order; within a group, sort by
-    name then id so the list never reorders between identical catalogs. */
-export function groupAgents(agents: AgentDefinition[]): AgentGroup[] {
-  const byBackend = new Map<AgentBackend, AgentDefinition[]>();
-  for (const agent of agents) {
-    const list = byBackend.get(agent.backend) ?? [];
-    list.push(agent);
-    byBackend.set(agent.backend, list);
-  }
-  return BACKEND_ORDER.filter((backend) => byBackend.has(backend)).map((backend) => ({
-    backend,
-    label: backendLabel(backend),
-    // Code-point comparison (not localeCompare) so the order is locale-independent
-    // and matches the host's byte-order sort — the list never reorders by environment.
-    agents: [...(byBackend.get(backend) ?? [])].sort(
-      (left, right) => compare(left.name, right.name) || compare(left.id, right.id)
-    )
-  }));
+/** Order discovered agents for display: by name, then id, so the list never reorders
+    between identical catalogs. Code-point comparison (not localeCompare) so the order is
+    locale-independent and matches the host's byte-order sort. */
+export function sortAgents(agents: AgentDefinition[]): AgentDefinition[] {
+  return [...agents]
+    .map((agent) => ({ ...agent, backends: sortBackends(agent.backends) }))
+    .sort((left, right) => compare(left.name, right.name) || compare(left.id, right.id));
+}
+
+/** Order an agent's backend bindings in cockpit order so the badges/rows never reorder. */
+export function sortBackends(backends: AgentBackendBinding[]): AgentBackendBinding[] {
+  return [...backends].sort(
+    (left, right) => backendRank(left.backend) - backendRank(right.backend)
+  );
+}
+
+function backendRank(backend: AgentBackend): number {
+  const index = BACKEND_ORDER.indexOf(backend);
+  // An unknown backend sorts last (stable) rather than to the front.
+  return index === -1 ? BACKEND_ORDER.length : index;
 }
 
 function compare(left: string, right: string): number {

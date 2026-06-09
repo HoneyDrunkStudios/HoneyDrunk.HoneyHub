@@ -1,5 +1,7 @@
 use crate::adapter::{AgentBackend, AgentBackendAdapter, BridgeError, RunHandle, StartRunRequest};
-use crate::agents::{discover_agents_in_root, AgentDefinition};
+use crate::agents::{
+    discover_raw_global_in, discover_raw_in_root, merge_agents, user_home, AgentDefinition,
+};
 use crate::artifact::DispatchArtifact;
 use crate::coaching::{coach, CoachingSnapshot};
 use crate::pairing::{BackendAllowlist, WorkspaceAllowlist};
@@ -37,6 +39,10 @@ where
     adapter: A,
     workspace_allowlist: WorkspaceAllowlist,
     backend_allowlist: BackendAllowlist,
+    /// Parent of the user-global agent folders (`~/.claude/agents`, `~/.copilot/agents`).
+    /// Resolved from the environment by default; `None` disables global agent discovery.
+    /// Injectable so tests pin it to a temp dir instead of the developer's real home.
+    global_home: Option<PathBuf>,
     runs: HashMap<String, ManagedRun>,
 }
 
@@ -53,8 +59,17 @@ where
             adapter,
             workspace_allowlist,
             backend_allowlist,
+            global_home: user_home(),
             runs: HashMap::new(),
         }
+    }
+
+    /// Override the user-global agent home (the parent of `~/.claude/agents` /
+    /// `~/.copilot/agents`). Production resolves it from the environment; tests pin it to a
+    /// temp dir for determinism. `None` disables global agent discovery entirely.
+    pub fn with_global_home(mut self, global_home: Option<PathBuf>) -> Self {
+        self.global_home = global_home;
+        self
     }
 
     pub fn start(
@@ -525,29 +540,43 @@ where
     /// `None` it scans **every** allowlisted root. Best-effort per root (a missing
     /// `.claude/agents`/`.copilot/agents` folder is simply empty).
     ///
-    /// Results are filtered to the **backend allowlist**: an agent is only surfaced as
-    /// a runnable dispatch target if its backend is one the bridge is actually allowed
-    /// to launch (the same gate `start` enforces), so the catalog never advertises an
-    /// agent that could not be run.
+    /// Always scans the **user-global** folders (`~/.claude/agents`, `~/.copilot/agents`)
+    /// too — those are the user's own home config and available regardless of workspace —
+    /// reading the home once. A **project** definition shadows a **global** one within a
+    /// backend; definitions dedupe by **name** into one entry runnable on the set of
+    /// backends that define it (see [`merge_agents`]).
+    ///
+    /// Results are filtered to the **backend allowlist** before merging: a backend is
+    /// dropped from an entry if the bridge is not allowed to launch it (the same gate
+    /// `start` enforces), and an entry is dropped only if no allowed backend remains — so
+    /// the catalog never advertises an agent that could not be run.
     pub fn discover_agents(
         &self,
         workspace_root: Option<&str>,
     ) -> Result<Vec<AgentDefinition>, BridgeError> {
-        let mut discovered = match workspace_root {
+        let mut raws = match workspace_root {
             Some(root) => {
                 self.ensure_workspace_allowed(root)?;
-                discover_agents_in_root(root)
+                discover_raw_in_root(root)
             }
             None => {
                 let mut all = Vec::new();
                 for root in self.workspace_allowlist.roots() {
-                    all.extend(discover_agents_in_root(root));
+                    all.extend(discover_raw_in_root(root));
                 }
                 all
             }
         };
-        discovered.retain(|agent| self.backend_allowlist.allows(&agent.backend));
-        Ok(discovered)
+        // The global scope is not gated by the workspace allowlist (it is the user's own
+        // home), and is read once independent of how many workspaces were scanned.
+        if let Some(home) = &self.global_home {
+            raws.extend(discover_raw_global_in(home));
+        }
+        // Filter per-backend on the raw candidates: a name surviving on only its allowed
+        // backends becomes an entry listing just those; a name with no allowed backend
+        // produces no entry at all.
+        raws.retain(|raw| self.backend_allowlist.allows(&raw.backend));
+        Ok(merge_agents(raws))
     }
 
     /// A device-wide "your spend" summary over every run this runtime holds. Usage
@@ -1784,12 +1813,16 @@ mod tests {
         let adapter = FakeAdapter::new(CapabilityFlags::claude_local());
         // Allowlist the workspace root itself, so both the scoped and the scan-all
         // paths look in the folder that holds the agent. Only claude.local is in the
-        // backend allowlist.
+        // backend allowlist. Pin the global home to an empty temp dir so the developer's
+        // real `~/.claude/agents` can never leak into the assertions.
+        let empty_home = std::env::temp_dir().join(format!("honeyhub-home-{}", Uuid::new_v4()));
+        fs::create_dir_all(&empty_home).expect("empty home");
         let runtime = BridgeRuntime::new(
             adapter,
             WorkspaceAllowlist::new(vec![workspace_root.clone()]),
             BackendAllowlist::new(vec![AgentBackend::ClaudeLocal]),
-        );
+        )
+        .with_global_home(Some(empty_home.clone()));
 
         // Scanning the allowlisted root finds the Claude agent — and filters out the
         // Copilot one, whose backend is not in the allowlist (can't be launched).
@@ -1802,7 +1835,8 @@ mod tests {
             "copilot agent filtered by backend allowlist"
         );
         assert_eq!(scoped[0].name, "Reviewer");
-        assert_eq!(scoped[0].backend, AgentBackend::ClaudeLocal);
+        assert_eq!(scoped[0].backends.len(), 1);
+        assert_eq!(scoped[0].backends[0].backend, AgentBackend::ClaudeLocal);
 
         // Scanning every allowlisted root finds it too.
         assert_eq!(runtime.discover_agents(None).expect("scans all").len(), 1);
@@ -1812,5 +1846,62 @@ mod tests {
             .discover_agents(Some("/etc"))
             .expect_err("non-allowlisted root is refused");
         assert_eq!(error.code, "workspace_not_allowed");
+
+        let _ = fs::remove_dir_all(&empty_home);
+    }
+
+    #[test]
+    fn discover_agents_includes_the_user_global_scope() {
+        let (_, workspace_root) = workspace_paths();
+        // A project Claude agent in the allowlisted workspace.
+        let project_dir = std::path::Path::new(&workspace_root).join(".claude/agents");
+        fs::create_dir_all(&project_dir).expect("project agent dir");
+        fs::write(
+            project_dir.join("project-only.md"),
+            "---\nname: Project Only\n---\nbody\n",
+        )
+        .expect("write project agent");
+
+        // A user-global Claude agent under a pinned temp home (not the real home).
+        let home = std::env::temp_dir().join(format!("honeyhub-home-{}", Uuid::new_v4()));
+        let global_dir = home.join(".claude/agents");
+        fs::create_dir_all(&global_dir).expect("global agent dir");
+        fs::write(
+            global_dir.join("global-only.md"),
+            "---\nname: Global Only\n---\nbody\n",
+        )
+        .expect("write global agent");
+
+        let runtime = BridgeRuntime::new(
+            FakeAdapter::new(CapabilityFlags::claude_local()),
+            WorkspaceAllowlist::new(vec![workspace_root.clone()]),
+            BackendAllowlist::new(vec![AgentBackend::ClaudeLocal]),
+        )
+        .with_global_home(Some(home.clone()));
+
+        // The global scope is scanned even when discovery is scoped to one workspace root.
+        let scoped = runtime
+            .discover_agents(Some(&workspace_root))
+            .expect("scoped scan");
+        assert!(scoped.iter().any(|a| a.name == "Project Only"));
+        let global = scoped
+            .iter()
+            .find(|a| a.name == "Global Only")
+            .expect("global agent surfaced");
+        assert_eq!(
+            global.backends[0].scope,
+            crate::agents::AgentScope::Global,
+            "the global definition is tagged global scope"
+        );
+
+        // Disabling the global home drops the global agent but keeps the project one.
+        let no_global = runtime
+            .with_global_home(None)
+            .discover_agents(Some(&workspace_root))
+            .expect("scoped scan without global");
+        assert!(no_global.iter().any(|a| a.name == "Project Only"));
+        assert!(!no_global.iter().any(|a| a.name == "Global Only"));
+
+        let _ = fs::remove_dir_all(&home);
     }
 }

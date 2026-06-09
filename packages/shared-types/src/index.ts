@@ -165,20 +165,37 @@ export interface UsageSummary {
   totalPremiumRequests: number;
 }
 
+/** Where a definition was found: a per-workspace repo folder, or the user-global home
+ *  folder. A project definition shadows a global one within a backend. */
+export type AgentScope = "project" | "global";
+
 /**
- * A discovered, runnable agent definition (packet 09 §3f-bis). Metadata only — the
- * prompt body stays on disk. No absolute local path crosses the wire: `sourcePath`
- * is workspace-relative, `workspaceLabel` is the root's final component (for
- * disambiguation), and `id` hashes the root rather than embedding it.
+ * One backend a discovered agent can run on, carrying the winning definition's
+ * metadata for that backend (a project definition beats a global one). Metadata only —
+ * the prompt body stays on disk. No absolute local path crosses the wire: `sourcePath`
+ * is relative to its scan root and `workspaceLabel` is a basename (or the constant
+ * `"global"`), never an absolute path.
+ */
+export interface AgentBackendBinding {
+  backend: AgentBackend;
+  description: string;
+  model?: string;
+  sourcePath: string;
+  scope: AgentScope;
+  workspaceLabel: string;
+}
+
+/**
+ * A discovered, runnable agent (packet 09 §3f-bis), identified by **name** and runnable
+ * on the **set of backends** that define it (one-entry-per-name model). Metadata only.
+ * No absolute local path crosses the wire: `id` is an opaque hash of the name and every
+ * per-backend path is relative.
  */
 export interface AgentDefinition {
   id: string;
   name: string;
-  description: string;
-  backend: AgentBackend;
-  model?: string;
-  sourcePath: string;
-  workspaceLabel: string;
+  /** The backends this agent can run on, ordered by backend. Always non-empty. */
+  backends: AgentBackendBinding[];
 }
 
 export type PolicyHintSeverity = "info" | "warning" | "block";

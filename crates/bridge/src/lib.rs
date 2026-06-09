@@ -18,7 +18,10 @@ pub use adapter::{
 pub use adapters::{
     default_event_clock, ClaudeLocalAdapter, CodexLocalAdapter, CopilotLocalAdapter, EventClock,
 };
-pub use agents::{discover_agents_in_root, AgentDefinition};
+pub use agents::{
+    discover_agents_in_root, discover_raw_global_in, discover_raw_in_root, merge_agents, user_home,
+    AgentBackendBinding, AgentDefinition, AgentScope, RawAgent, GLOBAL_LABEL,
+};
 pub use artifact::{ArtifactKind, DispatchArtifact};
 pub use coaching::{coach, CoachingSnapshot};
 pub use core::{BridgeRuntime, ManagedRun, ReplyOutcome};
