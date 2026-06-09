@@ -108,10 +108,16 @@ jobs:
         with:
           tool: cargo-llvm-cov
 
-      # Rust coverage for the workspace → lcov.info (test-fixtures so the integration
-      # tests run, matching the build job's test step).
+      # Rust coverage from the library unit tests only (`--lib`). The live-process
+      # integration tests (tests/*.rs) spawn and KILL child CLIs (process-tree stop),
+      # and an instrumented child that is killed mid-write leaves a corrupt `.profraw`
+      # that fails `llvm-profdata merge`. `--lib` covers the core logic (agents/core/
+      # wire/coaching/usage — where the analyzed source lives) without spawning, and so
+      # needs no test-fixtures. The full integration suite still runs in the `build` job.
       - name: Collect Rust coverage
-        run: cargo llvm-cov --workspace --features honeyhub-bridge/test-fixtures --lcov --output-path coverage/rust.lcov
+        run: |
+          mkdir -p coverage
+          cargo llvm-cov --workspace --lib --lcov --output-path coverage/rust.lcov
 
       - name: SonarQube Cloud scan
         uses: SonarSource/sonarqube-scan-action@v8.2.0 # pinned to the latest release
