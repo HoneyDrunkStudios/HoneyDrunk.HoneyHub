@@ -246,14 +246,17 @@ fn scan_dir(
     };
     for entry in entries.flatten() {
         let path = entry.path();
-        if !path.is_file() {
-            continue;
-        }
-        // Stay inside the containment root: a symlinked agent file could resolve to a
-        // target *outside* the root, so require the canonical path to remain within the
+        // Containment FIRST, before any metadata/`is_file` stat: those follow symlinks, so
+        // checking the file type first would let an escaping symlink's *target* (outside
+        // the root) be stat'd before we reject it. A symlinked agent file could resolve to
+        // a target outside the root, so require the canonical path to remain within the
         // canonical root. An in-root symlink still resolves within the root and is fine;
         // only an escaping one is dropped.
         if !is_within_root(&path, containment_root) {
+            continue;
+        }
+        // Safe to stat now: the path resolves within the containment root.
+        if !path.is_file() {
             continue;
         }
         let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
