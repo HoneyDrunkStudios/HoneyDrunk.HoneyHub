@@ -29,6 +29,21 @@ function backendRank(backend: AgentBackend): number {
   return index === -1 ? BACKEND_ORDER.length : index;
 }
 
+const encoder = new TextEncoder();
+
+// Compare by UTF-8 bytes, not JS `<`/`>` (which order by UTF-16 code units). The host
+// (Rust) sorts agent names/ids by their underlying UTF-8 bytes (`str::cmp` / a
+// `BTreeMap<String, _>`), so for non-BMP names the two would otherwise diverge — this
+// keeps the cockpit's order byte-for-byte identical to the host's.
 function compare(left: string, right: string): number {
-  return left < right ? -1 : left > right ? 1 : 0;
+  const leftBytes = encoder.encode(left);
+  const rightBytes = encoder.encode(right);
+  const limit = Math.min(leftBytes.length, rightBytes.length);
+  for (let i = 0; i < limit; i += 1) {
+    const delta = leftBytes[i]! - rightBytes[i]!;
+    if (delta !== 0) {
+      return delta;
+    }
+  }
+  return leftBytes.length - rightBytes.length;
 }

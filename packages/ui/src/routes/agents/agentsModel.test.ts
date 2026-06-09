@@ -41,13 +41,17 @@ describe("sortBackends", () => {
   it("orders bindings Claude, Codex, Copilot and puts unknown backends last", () => {
     const ordered = sortBackends([
       binding("copilot.local"),
+      // A backend the cockpit order doesn't know — exercises the `index === -1`
+      // fallback so it can't regress unnoticed.
+      binding("custom.local" as AgentBackend),
       binding("codex.local"),
       binding("claude.local")
     ]);
     expect(ordered.map((b) => b.backend)).toEqual([
       "claude.local",
       "codex.local",
-      "copilot.local"
+      "copilot.local",
+      "custom.local"
     ]);
   });
 });

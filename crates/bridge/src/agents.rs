@@ -119,10 +119,13 @@ fn sources() -> [SubdirSource; 2] {
 /// Resolve the user's home directory dependency-free: `HOME` (unix) then `USERPROFILE`
 /// (Windows). `None` when neither is set (global scanning is then simply skipped).
 pub fn user_home() -> Option<PathBuf> {
+    // Filter each var for emptiness *before* the fallback: a `HOME` set to `""` must not
+    // short-circuit `or_else` (that would disable global discovery instead of trying
+    // `USERPROFILE`).
     std::env::var_os("HOME")
-        .or_else(|| std::env::var_os("USERPROFILE"))
+        .filter(|value| !value.is_empty())
+        .or_else(|| std::env::var_os("USERPROFILE").filter(|value| !value.is_empty()))
         .map(PathBuf::from)
-        .filter(|path| !path.as_os_str().is_empty())
 }
 
 /// Discover the raw **project** (repo) candidates under one workspace root. Best-effort:

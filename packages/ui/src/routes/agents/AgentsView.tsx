@@ -113,7 +113,12 @@ export function AgentsView({ client, active }: AgentsViewProps) {
                     )}
                     <p className="agent-source">
                       <span className="agent-scope">{binding.scope}</span>
-                      <span className="agent-workspace">{binding.workspaceLabel}</span>
+                      {/* For a global binding the label is just the constant "global",
+                          which duplicates the scope — only render it when it adds info
+                          (a project binding's workspace basename). */}
+                      {binding.workspaceLabel !== binding.scope && (
+                        <span className="agent-workspace">{binding.workspaceLabel}</span>
+                      )}
                       <span className="agent-path">{binding.sourcePath}</span>
                     </p>
                   </li>
