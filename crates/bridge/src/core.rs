@@ -546,10 +546,11 @@ where
     /// backend; definitions dedupe by **name** into one entry runnable on the set of
     /// backends that define it (see [`merge_agents`]).
     ///
-    /// Results are filtered to the **backend allowlist** before merging: a backend is
-    /// dropped from an entry if the bridge is not allowed to launch it (the same gate
-    /// `start` enforces), and an entry is dropped only if no allowed backend remains — so
-    /// the catalog never advertises an agent that could not be run.
+    /// Results are filtered before merging to the backends this runtime can **actually
+    /// launch** — its single adapter's backend, and only when that backend is allowlisted
+    /// (both gates `start` enforces). A backend is dropped from an entry if it is not
+    /// launchable, and an entry is dropped only if no launchable backend remains — so the
+    /// catalog never advertises an agent that could not be run.
     pub fn discover_agents(
         &self,
         workspace_root: Option<&str>,
@@ -572,10 +573,18 @@ where
         if let Some(home) = &self.global_home {
             raws.extend(discover_raw_global_in(home));
         }
-        // Filter per-backend on the raw candidates: a name surviving on only its allowed
-        // backends becomes an entry listing just those; a name with no allowed backend
-        // produces no entry at all.
-        raws.retain(|raw| self.backend_allowlist.allows(&raw.backend));
+        // Filter per-backend to what this runtime can ACTUALLY launch, so the catalog
+        // never advertises a binding that `start` would then reject. `start` requires the
+        // session backend to equal this runtime's single adapter backend AND that backend
+        // to be allowlisted, so the launchable set is exactly `{ adapter.backend() }` when
+        // it is allowlisted, else empty. Filtering on the allowlist alone is not enough: a
+        // Claude-adapter runtime whose allowlist also contains Copilot would otherwise
+        // advertise `copilot.local` bindings it would reject at launch with
+        // `backend_mismatch`. (A future multi-adapter host would widen `launchable`.) A
+        // name surviving on only its launchable backends becomes an entry listing just
+        // those; a name with no launchable backend produces no entry at all.
+        let launchable = self.adapter.backend();
+        raws.retain(|raw| raw.backend == launchable && self.backend_allowlist.allows(&raw.backend));
         Ok(merge_agents(raws))
     }
 
@@ -1903,5 +1912,56 @@ mod tests {
         assert!(!no_global.iter().any(|a| a.name == "Global Only"));
 
         let _ = fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn discover_agents_never_advertises_a_backend_the_runtime_cannot_launch() {
+        // A single-adapter runtime can only launch its adapter's backend (`start` rejects
+        // any other with `backend_mismatch`). Even if the backend allowlist is broader,
+        // discovery must not advertise a binding that could not be launched.
+        let (_, workspace_root) = workspace_paths();
+        // A Claude agent and a Copilot agent in the same workspace.
+        let claude_dir = std::path::Path::new(&workspace_root).join(".claude/agents");
+        fs::create_dir_all(&claude_dir).expect("claude dir");
+        fs::write(
+            claude_dir.join("reviewer.md"),
+            "---\nname: Reviewer\n---\nbody\n",
+        )
+        .expect("write claude agent");
+        let copilot_dir = std::path::Path::new(&workspace_root).join(".copilot/agents");
+        fs::create_dir_all(&copilot_dir).expect("copilot dir");
+        fs::write(
+            copilot_dir.join("reviewer.md"),
+            "---\nname: Reviewer\n---\nbody\n",
+        )
+        .expect("write copilot agent");
+
+        let empty_home = std::env::temp_dir().join(format!("honeyhub-home-{}", Uuid::new_v4()));
+        fs::create_dir_all(&empty_home).expect("empty home");
+        // Claude adapter, but the allowlist *also* contains Copilot — the loophole the
+        // Grid flagged. `start` would still reject a Copilot session, so the catalog must
+        // not advertise the Copilot binding.
+        let runtime = BridgeRuntime::new(
+            FakeAdapter::new(CapabilityFlags::claude_local()),
+            WorkspaceAllowlist::new(vec![workspace_root.clone()]),
+            BackendAllowlist::new(vec![AgentBackend::ClaudeLocal, AgentBackend::CopilotLocal]),
+        )
+        .with_global_home(Some(empty_home.clone()));
+
+        let agents = runtime
+            .discover_agents(Some(&workspace_root))
+            .expect("scan");
+        // One entry by name, runnable on Claude only — the Copilot binding is dropped
+        // because this runtime's adapter cannot launch it.
+        assert_eq!(agents.len(), 1);
+        assert_eq!(agents[0].name, "Reviewer");
+        assert_eq!(
+            agents[0].backends.len(),
+            1,
+            "only the launchable backend is advertised"
+        );
+        assert_eq!(agents[0].backends[0].backend, AgentBackend::ClaudeLocal);
+
+        let _ = fs::remove_dir_all(&empty_home);
     }
 }
