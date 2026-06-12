@@ -90,7 +90,7 @@ export type DispatchArtifactKind =
   | "branch"
   | "commit"
   | "pull_request"
-  | "issue_packet"
+  | "work_item"
   | "adr_draft"
   | "pdr_draft"
   | "report"

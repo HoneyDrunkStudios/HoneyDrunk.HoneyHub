@@ -156,7 +156,7 @@ fn artifact_kind(label: &str) -> ArtifactKind {
         "branch" => ArtifactKind::Branch,
         "commit" => ArtifactKind::Commit,
         "pull_request" => ArtifactKind::PullRequest,
-        "issue_packet" => ArtifactKind::IssuePacket,
+        "work_item" => ArtifactKind::WorkItem,
         "adr_draft" => ArtifactKind::AdrDraft,
         "pdr_draft" => ArtifactKind::PdrDraft,
         "log_bundle" => ArtifactKind::LogBundle,

@@ -6,7 +6,7 @@ pub enum ArtifactKind {
     Branch,
     Commit,
     PullRequest,
-    IssuePacket,
+    WorkItem,
     AdrDraft,
     PdrDraft,
     Report,
