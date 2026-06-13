@@ -556,6 +556,28 @@ mod tests {
     }
 
     #[test]
+    fn prune_marks_runs_without_a_transcript_file_as_pruned() {
+        // A prunable session whose run never wrote a transcript: the missing-file
+        // branch is taken (no remove), yet the run is still marked pruned and the
+        // session is counted.
+        let root = temp_root();
+        let mut store = LocalStore::open(&root).expect("opens");
+        store.upsert_session(&session("s1")).expect("session");
+        store
+            .put_run(&terminal_run("s1", "r1", "2026-01-01T00:00:00.000Z"))
+            .expect("run");
+        // Deliberately no append_transcript: there is no transcript file on disk.
+
+        let pruned = store.prune("2026-06-01T00:00:00.000Z").expect("prunes");
+        assert_eq!(pruned, 1);
+        assert!(store.transcript_pruned("s1", "r1"));
+        // Durable records survive.
+        assert_eq!(store.runs("s1").len(), 1);
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn pinned_sessions_survive_prune() {
         let root = temp_root();
         let mut store = LocalStore::open(&root).expect("opens");

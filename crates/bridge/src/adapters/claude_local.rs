@@ -97,7 +97,14 @@ impl ClaudeLocalAdapter {
         }
 
         let now = (self.clock)();
-        push_terminal_status(events, success, session_id, run_id, &now);
+        super::common::push_terminal_status(
+            events,
+            AgentBackend::ClaudeLocal,
+            success,
+            session_id,
+            run_id,
+            &now,
+        );
     }
 
     fn base_command(&self) -> Command {
@@ -201,60 +208,6 @@ fn artifact_kind(label: &str) -> ArtifactKind {
         "pdr_draft" => ArtifactKind::PdrDraft,
         "log_bundle" => ArtifactKind::LogBundle,
         _ => ArtifactKind::Report,
-    }
-}
-
-fn terminal_status(
-    session_id: &str,
-    run_id: &str,
-    now: &str,
-    state: DispatchRunState,
-) -> BridgeEvent {
-    BridgeEvent::status(
-        Uuid::new_v4().to_string(),
-        session_id,
-        run_id,
-        0,
-        now.to_string(),
-        BridgeStatusEvent {
-            state,
-            backend: AgentBackend::ClaudeLocal,
-            repo_hint: None,
-            link: None,
-        },
-    )
-}
-
-/// Push the terminal transition events (exactly once) after the tail usage line, so
-/// ordering is `[..usage, finalizing, completed]` on a clean exit or `[..usage, failed]`
-/// on a non-zero exit.
-fn push_terminal_status(
-    events: &mut Vec<BridgeEvent>,
-    success: bool,
-    session_id: &str,
-    run_id: &str,
-    now: &str,
-) {
-    if success {
-        events.push(terminal_status(
-            session_id,
-            run_id,
-            now,
-            DispatchRunState::Finalizing,
-        ));
-        events.push(terminal_status(
-            session_id,
-            run_id,
-            now,
-            DispatchRunState::Completed,
-        ));
-    } else {
-        events.push(terminal_status(
-            session_id,
-            run_id,
-            now,
-            DispatchRunState::Failed,
-        ));
     }
 }
 
@@ -643,6 +596,43 @@ mod tests {
             &mut backend_session
         )
         .is_empty());
+    }
+
+    fn status_states(events: &[BridgeEvent]) -> Vec<DispatchRunState> {
+        events
+            .iter()
+            .filter_map(|event| match &event.payload {
+                crate::wire::BridgeEventPayload::Status { status } => Some(status.state.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn finalize_clean_exit_without_drain_pushes_finalizing_then_completed() {
+        // `retired: None` covers the no-drain path (no live child needed) plus the
+        // shared terminal push for a clean exit.
+        let adapter = ClaudeLocalAdapter::new("claude", None, test_clock());
+        let mut events = Vec::new();
+        adapter.finalize_exited_run(true, "run-1", "session-1", None, &mut events);
+        assert_eq!(
+            status_states(&events),
+            vec![DispatchRunState::Finalizing, DispatchRunState::Completed]
+        );
+        match &events[0].payload {
+            crate::wire::BridgeEventPayload::Status { status } => {
+                assert_eq!(status.backend, AgentBackend::ClaudeLocal);
+            }
+            other => panic!("expected a status payload, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn finalize_failed_exit_without_drain_pushes_failed_only() {
+        let adapter = ClaudeLocalAdapter::new("claude", None, test_clock());
+        let mut events = Vec::new();
+        adapter.finalize_exited_run(false, "run-1", "session-1", None, &mut events);
+        assert_eq!(status_states(&events), vec![DispatchRunState::Failed]);
     }
 
     #[test]

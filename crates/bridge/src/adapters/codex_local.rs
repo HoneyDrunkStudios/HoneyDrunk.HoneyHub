@@ -32,10 +32,9 @@ use crate::adapter::{
 };
 use crate::adapters::child_run::{ChildRun, EventClock, RunSlot};
 use crate::session::{
-    DispatchMessage, DispatchMessageRole, DispatchRunState, UsageConfidence, UsageFidelity,
-    UsageSignal,
+    DispatchMessage, DispatchMessageRole, UsageConfidence, UsageFidelity, UsageSignal,
 };
-use crate::wire::{BridgeEvent, BridgeStatusEvent};
+use crate::wire::BridgeEvent;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::process::Command;
@@ -162,7 +161,14 @@ impl CodexLocalAdapter {
         }
 
         let now = (self.clock)();
-        push_terminal_status(events, success, session_id, run_id, &now);
+        super::common::push_terminal_status(
+            events,
+            AgentBackend::CodexLocal,
+            success,
+            session_id,
+            run_id,
+            &now,
+        );
     }
 }
 
@@ -249,59 +255,6 @@ fn derived_usage_signal(
         // Derived from a rate table whose freshness the adapter cannot verify here.
         confidence: Some(UsageConfidence::Medium),
         recorded_at: now.to_string(),
-    }
-}
-
-fn terminal_status(
-    session_id: &str,
-    run_id: &str,
-    now: &str,
-    state: DispatchRunState,
-) -> BridgeEvent {
-    BridgeEvent::status(
-        Uuid::new_v4().to_string(),
-        session_id,
-        run_id,
-        0,
-        now.to_string(),
-        BridgeStatusEvent {
-            state,
-            backend: AgentBackend::CodexLocal,
-            repo_hint: None,
-            link: None,
-        },
-    )
-}
-
-/// Push the terminal transition (clean exit finalizes then completes; a non-zero exit
-/// fails) after the tail usage line.
-fn push_terminal_status(
-    events: &mut Vec<BridgeEvent>,
-    success: bool,
-    session_id: &str,
-    run_id: &str,
-    now: &str,
-) {
-    if success {
-        events.push(terminal_status(
-            session_id,
-            run_id,
-            now,
-            DispatchRunState::Finalizing,
-        ));
-        events.push(terminal_status(
-            session_id,
-            run_id,
-            now,
-            DispatchRunState::Completed,
-        ));
-    } else {
-        events.push(terminal_status(
-            session_id,
-            run_id,
-            now,
-            DispatchRunState::Failed,
-        ));
     }
 }
 
@@ -515,6 +468,7 @@ impl AgentBackendAdapter for CodexLocalAdapter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::session::DispatchRunState;
 
     fn test_clock() -> EventClock {
         Arc::new(|| "2026-06-08T12:00:00Z".to_string())
@@ -747,6 +701,43 @@ mod tests {
             .start(request)
             .expect_err("follow-up with no captured session fails");
         assert_eq!(error.code, "follow_up_session_missing");
+    }
+
+    fn status_states(events: &[BridgeEvent]) -> Vec<DispatchRunState> {
+        events
+            .iter()
+            .filter_map(|event| match &event.payload {
+                crate::wire::BridgeEventPayload::Status { status } => Some(status.state.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn finalize_clean_exit_without_drain_pushes_finalizing_then_completed() {
+        // `retired: None` covers the no-drain path (no live child needed) plus the
+        // shared terminal push for a clean exit.
+        let adapter = CodexLocalAdapter::new("codex", test_clock());
+        let mut events = Vec::new();
+        adapter.finalize_exited_run(true, "run-1", "session-1", None, &mut events);
+        assert_eq!(
+            status_states(&events),
+            vec![DispatchRunState::Finalizing, DispatchRunState::Completed]
+        );
+        match &events[0].payload {
+            crate::wire::BridgeEventPayload::Status { status } => {
+                assert_eq!(status.backend, AgentBackend::CodexLocal);
+            }
+            other => panic!("expected a status payload, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn finalize_failed_exit_without_drain_pushes_failed_only() {
+        let adapter = CodexLocalAdapter::new("codex", test_clock());
+        let mut events = Vec::new();
+        adapter.finalize_exited_run(false, "run-1", "session-1", None, &mut events);
+        assert_eq!(status_states(&events), vec![DispatchRunState::Failed]);
     }
 
     #[test]

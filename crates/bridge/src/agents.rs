@@ -199,9 +199,9 @@ pub fn merge_agents(mut raws: Vec<RawAgent>) -> Vec<AgentDefinition> {
         // First writer wins: candidates are pre-sorted by precedence, so a later same
         // (name, backend) entry (a shadowed project dup or a global fallback) is ignored.
         backends
-            .entry(raw.backend.clone())
+            .entry(raw.backend)
             .or_insert_with(|| AgentBackendBinding {
-                backend: raw.backend.clone(),
+                backend: raw.backend,
                 description: raw.description.clone(),
                 model: raw.model.clone(),
                 source_path: raw.source_path.clone(),
@@ -309,7 +309,7 @@ fn build_raw(
 
     Some(RawAgent {
         name: name.unwrap_or_else(|| humanize_stem(file_name)),
-        backend: backend.clone(),
+        backend: *backend,
         description: description.unwrap_or_default(),
         model,
         source_path: relative,

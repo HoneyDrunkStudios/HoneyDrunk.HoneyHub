@@ -30,11 +30,28 @@ describe("sortHints", () => {
   });
 
   it("is stable by id for identical severity and timestamp", () => {
-    const ordered = sortHints([
-      hint("z", "high_cost_session", "warning"),
-      hint("a", "stale_session", "warning")
+    // Sort the same pair in both input orders so the id comparator is driven
+    // through both its less-than and greater-than branches regardless of the
+    // engine's internal argument order.
+    const forward = sortHints([
+      hint("a", "high_cost_session", "warning"),
+      hint("z", "stale_session", "warning")
     ]);
-    expect(ordered.map((h) => h.id)).toEqual(["a", "z"]);
+    const reverse = sortHints([
+      hint("z", "stale_session", "warning"),
+      hint("a", "high_cost_session", "warning")
+    ]);
+    expect(forward.map((h) => h.id)).toEqual(["a", "z"]);
+    expect(reverse.map((h) => h.id)).toEqual(["a", "z"]);
+  });
+
+  it("treats fully identical hints as equal (no reorder)", () => {
+    // Same severity, timestamp, and id exercises the comparator's equal branch.
+    const ordered = sortHints([
+      hint("same", "high_cost_session", "warning"),
+      hint("same", "high_cost_session", "warning")
+    ]);
+    expect(ordered.map((h) => h.id)).toEqual(["same", "same"]);
   });
 
   it("does not mutate the input array", () => {

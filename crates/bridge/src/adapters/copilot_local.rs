@@ -32,7 +32,7 @@ use crate::session::{
     DispatchMessage, DispatchMessageRole, DispatchRunState, UsageConfidence, UsageFidelity,
     UsageSignal,
 };
-use crate::wire::{BridgeEvent, BridgeStatusEvent};
+use crate::wire::BridgeEvent;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::process::Command;
@@ -365,25 +365,15 @@ fn estimated_usage_signal(
     }
 }
 
+/// Build one terminal status event tagged for this backend (delegates to the shared
+/// cross-adapter helper).
 fn terminal_status(
     session_id: &str,
     run_id: &str,
     now: &str,
     state: DispatchRunState,
 ) -> BridgeEvent {
-    BridgeEvent::status(
-        Uuid::new_v4().to_string(),
-        session_id,
-        run_id,
-        0,
-        now.to_string(),
-        BridgeStatusEvent {
-            state,
-            backend: AgentBackend::CopilotLocal,
-            repo_hint: None,
-            link: None,
-        },
-    )
+    super::common::terminal_status(AgentBackend::CopilotLocal, session_id, run_id, now, state)
 }
 
 /// True if any of these events is a usage signal (the turn's premium-request
@@ -989,6 +979,167 @@ mod tests {
         )
         .events
         .is_empty());
+    }
+
+    #[test]
+    fn contains_usage_detects_a_usage_event() {
+        let usage = turn_usage_event(
+            &serde_json::json!({"premium_requests": 1}),
+            0,
+            0,
+            "session-1",
+            "run-1",
+            "2026-06-08T12:00:00Z",
+        );
+        let message = agent_message(
+            "hi".to_string(),
+            false,
+            "session-1",
+            "run-1",
+            "2026-06-08T12:00:00Z",
+        );
+        assert!(contains_usage(std::slice::from_ref(&usage)));
+        assert!(!contains_usage(std::slice::from_ref(&message)));
+        assert!(!contains_usage(&[]));
+    }
+
+    #[test]
+    fn capture_completion_session_id_only_fills_an_empty_slot() {
+        // An explicit session_id fills an empty slot.
+        let mut backend_session = None;
+        capture_completion_session_id(
+            &serde_json::json!({"session_id": "from-completion"}),
+            &mut backend_session,
+        );
+        assert_eq!(backend_session.as_deref(), Some("from-completion"));
+
+        // A second completion (even with a different id) must not clobber it.
+        capture_completion_session_id(
+            &serde_json::json!({"session_id": "other"}),
+            &mut backend_session,
+        );
+        assert_eq!(backend_session.as_deref(), Some("from-completion"));
+
+        // A generic `id` (turn/event id) is never adopted as the session id.
+        let mut empty = None;
+        capture_completion_session_id(&serde_json::json!({"id": "turn-9"}), &mut empty);
+        assert_eq!(empty, None);
+    }
+
+    #[test]
+    fn emit_final_text_appends_a_final_message_and_accounts_new_chars() {
+        // No prior delta chars: the whole final text counts toward the estimate.
+        let mut result = ParseResult {
+            events: Vec::new(),
+            output_chars: 0,
+        };
+        emit_final_text(
+            &serde_json::json!({"text": "hello world!"}),
+            0,
+            "session-1",
+            "run-1",
+            "2026-06-08T12:00:00Z",
+            &mut result,
+        );
+        assert_eq!(result.output_chars, 12);
+        match &result.events[0].payload {
+            crate::wire::BridgeEventPayload::Message { message } => {
+                assert_eq!(message.body, "hello world!");
+                assert_eq!(message.is_partial, Some(false));
+            }
+            other => panic!("expected a final message, got {other:?}"),
+        }
+
+        // Already-streamed deltas cover the final text: no new chars are double-counted.
+        let mut covered = ParseResult {
+            events: Vec::new(),
+            output_chars: 0,
+        };
+        emit_final_text(
+            &serde_json::json!({"text": "hello world!"}),
+            12,
+            "session-1",
+            "run-1",
+            "2026-06-08T12:00:00Z",
+            &mut covered,
+        );
+        assert_eq!(covered.output_chars, 0);
+        assert_eq!(covered.events.len(), 1);
+
+        // Empty / missing text emits nothing and accounts nothing.
+        let mut empty = ParseResult {
+            events: Vec::new(),
+            output_chars: 0,
+        };
+        emit_final_text(
+            &serde_json::json!({"text": ""}),
+            0,
+            "session-1",
+            "run-1",
+            "2026-06-08T12:00:00Z",
+            &mut empty,
+        );
+        emit_final_text(
+            &serde_json::json!({}),
+            0,
+            "session-1",
+            "run-1",
+            "2026-06-08T12:00:00Z",
+            &mut empty,
+        );
+        assert!(empty.events.is_empty());
+        assert_eq!(empty.output_chars, 0);
+    }
+
+    #[test]
+    fn turn_usage_event_reads_units_and_estimates_tokens() {
+        let event = turn_usage_event(
+            &serde_json::json!({
+                "premium_requests": 2,
+                "duration_ms": 3000,
+                "model": "claude-sonnet-4.6"
+            }),
+            40,
+            400,
+            "session-1",
+            "run-1",
+            "2026-06-08T12:00:00Z",
+        );
+        match &event.payload {
+            crate::wire::BridgeEventPayload::Usage { signal } => {
+                assert_eq!(signal.fidelity, UsageFidelity::Estimated);
+                assert_eq!(signal.premium_requests, Some(2));
+                assert_eq!(signal.duration_ms, Some(3000));
+                assert_eq!(signal.model_label.as_deref(), Some("claude-sonnet-4.6"));
+                // 40/4 input, 400/4 output.
+                assert_eq!(signal.input_tokens, Some(10));
+                assert_eq!(signal.output_tokens, Some(100));
+                assert_eq!(signal.total_tokens, Some(110));
+                assert_eq!(signal.total_usd, None);
+                assert_eq!(signal.backend, AgentBackend::CopilotLocal);
+            }
+            other => panic!("expected a usage payload, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn turn_usage_event_defaults_premium_requests_to_one() {
+        let event = turn_usage_event(
+            &serde_json::json!({}),
+            0,
+            0,
+            "session-1",
+            "run-1",
+            "2026-06-08T12:00:00Z",
+        );
+        match &event.payload {
+            crate::wire::BridgeEventPayload::Usage { signal } => {
+                assert_eq!(signal.premium_requests, Some(1));
+                assert_eq!(signal.duration_ms, None);
+                assert_eq!(signal.model_label, None);
+            }
+            other => panic!("expected a usage payload, got {other:?}"),
+        }
     }
 
     #[test]
