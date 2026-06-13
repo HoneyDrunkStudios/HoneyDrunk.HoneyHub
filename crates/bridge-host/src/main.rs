@@ -74,24 +74,7 @@ async fn main() -> std::io::Result<()> {
 
     // Serve the built PWA from HONEYHUB_STATIC_DIR, or packages/ui/dist if it
     // exists, so the whole cockpit runs from one command on one origin.
-    let static_dir: Option<PathBuf> = match std::env::var("HONEYHUB_STATIC_DIR") {
-        Ok(dir) if !dir.trim().is_empty() => {
-            let path = PathBuf::from(dir.trim());
-            if path.is_dir() {
-                Some(path)
-            } else {
-                eprintln!(
-                    "warning: HONEYHUB_STATIC_DIR '{}' is not a directory; serving the WebSocket only",
-                    path.display()
-                );
-                None
-            }
-        }
-        _ => {
-            let default_dir = PathBuf::from("packages/ui/dist");
-            default_dir.is_dir().then_some(default_dir)
-        }
-    };
+    let static_dir = resolve_static_dir();
 
     let listener = bind(addr).await?;
     let bound = listener.local_addr()?;
@@ -102,25 +85,7 @@ async fn main() -> std::io::Result<()> {
     } else {
         bound
     };
-    if static_dir.is_some() {
-        let cockpit_url = format!("http://{display_addr}/?token={token}");
-        println!("HoneyHub cockpit ready — open: {cockpit_url}");
-        if bound.ip().is_unspecified() {
-            println!(
-                "  (listening on all interfaces; from another device on your tailnet open http://<this-host-tailnet-ip>:{}/?token={token})",
-                bound.port()
-            );
-        }
-        // Open the cockpit in the default browser unless told not to (e.g. when
-        // the host runs headless or behind a tailnet reached from another device).
-        if std::env::var("HONEYHUB_NO_BROWSER").is_err() {
-            let _ = open::that(&cockpit_url);
-        }
-    } else {
-        println!(
-            "HoneyHub bridge host listening; connect the PWA to ws://{display_addr}/ws?token={token}"
-        );
-    }
+    announce_endpoint(static_dir.is_some(), display_addr, bound, &token);
     if std::env::var("HONEYHUB_WORKSPACE_ROOTS")
         .unwrap_or_default()
         .is_empty()
@@ -138,4 +103,53 @@ async fn main() -> std::io::Result<()> {
         static_dir,
     )
     .await
+}
+
+/// Resolve the directory of the built PWA to serve: `HONEYHUB_STATIC_DIR` when it
+/// names a real directory, else `packages/ui/dist` when it exists, else `None`
+/// (WebSocket-only). A set-but-non-directory `HONEYHUB_STATIC_DIR` warns and falls
+/// back to WebSocket-only.
+fn resolve_static_dir() -> Option<PathBuf> {
+    match std::env::var("HONEYHUB_STATIC_DIR") {
+        Ok(dir) if !dir.trim().is_empty() => {
+            let path = PathBuf::from(dir.trim());
+            if path.is_dir() {
+                return Some(path);
+            }
+            eprintln!(
+                "warning: HONEYHUB_STATIC_DIR '{}' is not a directory; serving the WebSocket only",
+                path.display()
+            );
+            None
+        }
+        _ => {
+            let default_dir = PathBuf::from("packages/ui/dist");
+            default_dir.is_dir().then_some(default_dir)
+        }
+    }
+}
+
+/// Print the connection endpoint and, when serving the PWA, open it in the default
+/// browser (unless `HONEYHUB_NO_BROWSER` is set).
+fn announce_endpoint(serving_pwa: bool, display_addr: SocketAddr, bound: SocketAddr, token: &str) {
+    if !serving_pwa {
+        println!(
+            "HoneyHub bridge host listening; connect the PWA to ws://{display_addr}/ws?token={token}"
+        );
+        return;
+    }
+
+    let cockpit_url = format!("http://{display_addr}/?token={token}");
+    println!("HoneyHub cockpit ready — open: {cockpit_url}");
+    if bound.ip().is_unspecified() {
+        println!(
+            "  (listening on all interfaces; from another device on your tailnet open http://<this-host-tailnet-ip>:{}/?token={token})",
+            bound.port()
+        );
+    }
+    // Open the cockpit in the default browser unless told not to (e.g. when the host
+    // runs headless or behind a tailnet reached from another device).
+    if std::env::var("HONEYHUB_NO_BROWSER").is_err() {
+        let _ = open::that(&cockpit_url);
+    }
 }

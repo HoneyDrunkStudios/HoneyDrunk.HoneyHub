@@ -131,6 +131,16 @@ describe("recommendBackend", () => {
     expect(rec.rationale).not.toMatch(/using the default/i);
   });
 
+  it("reports no route when there are no available backends", () => {
+    const emptyRates = { ...BUNDLED_SNAPSHOT, rates: [] };
+    const rec = recommendBackend({ task: "anything", availableBackends: [] }, emptyRates);
+    // No backend can be chosen; the recommendation falls back to the policy
+    // default for the field but the rationale states nothing was routable.
+    expect(rec.backend).toBe(BUNDLED_SNAPSHOT.policy.defaultBackend);
+    expect(rec.rationale).toMatch(/No backends available/i);
+    expect(rec.ranked).toEqual([]);
+  });
+
   it("is deterministic for the same input", () => {
     const input = { task: "Refactor the module", availableBackends: ALL };
     expect(recommendBackend(input, BUNDLED_SNAPSHOT)).toEqual(

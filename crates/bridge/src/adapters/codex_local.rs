@@ -32,10 +32,9 @@ use crate::adapter::{
 };
 use crate::adapters::child_run::{ChildRun, EventClock, RunSlot};
 use crate::session::{
-    DispatchMessage, DispatchMessageRole, DispatchRunState, UsageConfidence, UsageFidelity,
-    UsageSignal,
+    DispatchMessage, DispatchMessageRole, UsageConfidence, UsageFidelity, UsageSignal,
 };
-use crate::wire::{BridgeEvent, BridgeStatusEvent};
+use crate::wire::BridgeEvent;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::process::Command;
@@ -124,6 +123,53 @@ impl CodexLocalAdapter {
                 .and_then(|slot| slot.backend_session_id().map(str::to_string))
         })
     }
+
+    /// Off-lock finalization for an exited turn: drain the child's final lines (the
+    /// closing `turn.completed` usage line), carry any tail-discovered vendor session
+    /// id back to the retired slot, then push the terminal transition.
+    fn finalize_exited_run(
+        &self,
+        success: bool,
+        run_id: &str,
+        session_id: &str,
+        retired: Option<Box<ChildRun>>,
+        events: &mut Vec<BridgeEvent>,
+    ) {
+        let mut tail_session_id = None;
+        if let Some(mut child) = retired {
+            for line in child.drain_remaining(std::time::Duration::from_secs(2)) {
+                events.extend(parse_line(
+                    &self.clock,
+                    &self.rate_lookup,
+                    &line,
+                    run_id,
+                    session_id,
+                    &mut child.backend_session_id,
+                ));
+            }
+            tail_session_id = child.backend_session_id.clone();
+        }
+
+        // Carry a vendor session id discovered only in the drained tail back to the
+        // retired slot so a later follow-up resume still sees it.
+        if tail_session_id.is_some() {
+            if let Ok(mut guard) = self.lock_runs() {
+                if let Some(slot) = guard.get_mut(run_id) {
+                    slot.set_done_backend_session_id(tail_session_id);
+                }
+            }
+        }
+
+        let now = (self.clock)();
+        super::common::push_terminal_status(
+            events,
+            AgentBackend::CodexLocal,
+            success,
+            session_id,
+            run_id,
+            &now,
+        );
+    }
 }
 
 /// Pull a vendor session id out of an **init**-style event (`thread.started` /
@@ -210,27 +256,6 @@ fn derived_usage_signal(
         confidence: Some(UsageConfidence::Medium),
         recorded_at: now.to_string(),
     }
-}
-
-fn terminal_status(
-    session_id: &str,
-    run_id: &str,
-    now: &str,
-    state: DispatchRunState,
-) -> BridgeEvent {
-    BridgeEvent::status(
-        Uuid::new_v4().to_string(),
-        session_id,
-        run_id,
-        0,
-        now.to_string(),
-        BridgeStatusEvent {
-            state,
-            backend: AgentBackend::CodexLocal,
-            repo_hint: None,
-            link: None,
-        },
-    )
 }
 
 /// Parse one JSONL line from `codex exec --json` into zero or more `BridgeEvent`s.
@@ -393,57 +418,7 @@ impl AgentBackendAdapter for CodexLocalAdapter {
         drop(guard);
 
         if let Some(success) = exit {
-            let mut tail_session_id = None;
-            if let Some(mut child) = retired {
-                // Drain the final lines the CLI flushed on exit (the closing
-                // `turn.completed` usage line) before the child is dropped.
-                for line in child.drain_remaining(std::time::Duration::from_secs(2)) {
-                    events.extend(parse_line(
-                        &self.clock,
-                        &self.rate_lookup,
-                        &line,
-                        run_id,
-                        &session_id,
-                        &mut child.backend_session_id,
-                    ));
-                }
-                tail_session_id = child.backend_session_id.clone();
-            }
-
-            // Carry a vendor session id discovered only in the drained tail back to
-            // the retired slot so a later follow-up resume still sees it.
-            if tail_session_id.is_some() {
-                if let Ok(mut guard) = self.lock_runs() {
-                    if let Some(slot) = guard.get_mut(run_id) {
-                        slot.set_done_backend_session_id(tail_session_id);
-                    }
-                }
-            }
-
-            // Terminal transition after the tail usage line (clean exit finalizes
-            // then completes; a non-zero exit fails).
-            let now = (self.clock)();
-            if success {
-                events.push(terminal_status(
-                    &session_id,
-                    run_id,
-                    &now,
-                    DispatchRunState::Finalizing,
-                ));
-                events.push(terminal_status(
-                    &session_id,
-                    run_id,
-                    &now,
-                    DispatchRunState::Completed,
-                ));
-            } else {
-                events.push(terminal_status(
-                    &session_id,
-                    run_id,
-                    &now,
-                    DispatchRunState::Failed,
-                ));
-            }
+            self.finalize_exited_run(success, run_id, &session_id, retired, &mut events);
         }
 
         Ok(events)
@@ -493,6 +468,7 @@ impl AgentBackendAdapter for CodexLocalAdapter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::session::DispatchRunState;
 
     fn test_clock() -> EventClock {
         Arc::new(|| "2026-06-08T12:00:00Z".to_string())
@@ -725,6 +701,43 @@ mod tests {
             .start(request)
             .expect_err("follow-up with no captured session fails");
         assert_eq!(error.code, "follow_up_session_missing");
+    }
+
+    fn status_states(events: &[BridgeEvent]) -> Vec<DispatchRunState> {
+        events
+            .iter()
+            .filter_map(|event| match &event.payload {
+                crate::wire::BridgeEventPayload::Status { status } => Some(status.state.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn finalize_clean_exit_without_drain_pushes_finalizing_then_completed() {
+        // `retired: None` covers the no-drain path (no live child needed) plus the
+        // shared terminal push for a clean exit.
+        let adapter = CodexLocalAdapter::new("codex", test_clock());
+        let mut events = Vec::new();
+        adapter.finalize_exited_run(true, "run-1", "session-1", None, &mut events);
+        assert_eq!(
+            status_states(&events),
+            vec![DispatchRunState::Finalizing, DispatchRunState::Completed]
+        );
+        match &events[0].payload {
+            crate::wire::BridgeEventPayload::Status { status } => {
+                assert_eq!(status.backend, AgentBackend::CodexLocal);
+            }
+            other => panic!("expected a status payload, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn finalize_failed_exit_without_drain_pushes_failed_only() {
+        let adapter = CodexLocalAdapter::new("codex", test_clock());
+        let mut events = Vec::new();
+        adapter.finalize_exited_run(false, "run-1", "session-1", None, &mut events);
+        assert_eq!(status_states(&events), vec![DispatchRunState::Failed]);
     }
 
     #[test]

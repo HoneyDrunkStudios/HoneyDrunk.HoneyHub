@@ -444,93 +444,7 @@ where
                 "stream event session id does not match managed run session",
             ));
         }
-
-        match &event.payload {
-            BridgeEventPayload::Message { message } => {
-                if message.run_id != event.run_id || message.session_id != event.session_id {
-                    return Err(BridgeError::new(
-                        "event_message_mismatch",
-                        "stream message ids do not match containing event",
-                    ));
-                }
-            }
-            BridgeEventPayload::Control { event: control } => {
-                if control.run_id != event.run_id || control.session_id != event.session_id {
-                    return Err(BridgeError::new(
-                        "event_control_mismatch",
-                        "stream control event ids do not match containing event",
-                    ));
-                }
-            }
-            BridgeEventPayload::Usage { signal } => {
-                if signal.run_id != event.run_id || signal.session_id != event.session_id {
-                    return Err(BridgeError::new(
-                        "event_usage_mismatch",
-                        "stream usage signal ids do not match containing event",
-                    ));
-                }
-                if signal.backend != self.adapter.backend() {
-                    return Err(BridgeError::new(
-                        "event_backend_mismatch",
-                        "stream usage backend does not match bridge adapter",
-                    ));
-                }
-            }
-            BridgeEventPayload::PolicyHint { hint } => {
-                if hint.session_id != event.session_id
-                    || hint
-                        .run_id
-                        .as_ref()
-                        .is_some_and(|run_id| run_id != &event.run_id)
-                {
-                    return Err(BridgeError::new(
-                        "event_policy_hint_mismatch",
-                        "stream policy hint ids do not match containing event",
-                    ));
-                }
-            }
-            BridgeEventPayload::Status { status } => {
-                if status.backend != self.adapter.backend() {
-                    return Err(BridgeError::new(
-                        "event_backend_mismatch",
-                        "stream status backend does not match bridge adapter",
-                    ));
-                }
-            }
-            BridgeEventPayload::Artifact { artifact } => {
-                if artifact.run_id != event.run_id || artifact.session_id != event.session_id {
-                    return Err(BridgeError::new(
-                        "event_artifact_mismatch",
-                        "stream artifact ids do not match containing event",
-                    ));
-                }
-            }
-            BridgeEventPayload::UsageSummary { .. } => {
-                // A usage summary is a device-wide, host-synthesized response to a
-                // client query — never an event an adapter streams from a run. Seeing
-                // one here means a backend emitted a frame it must not.
-                return Err(BridgeError::new(
-                    "event_unexpected_usage_summary",
-                    "a backend stream must not emit a device-wide usage summary",
-                ));
-            }
-            BridgeEventPayload::CoachingHints { .. } => {
-                // Likewise device-wide and host-synthesized — never adapter-streamed.
-                return Err(BridgeError::new(
-                    "event_unexpected_coaching_hints",
-                    "a backend stream must not emit device-wide coaching hints",
-                ));
-            }
-            BridgeEventPayload::AgentCatalog { .. } => {
-                // Device-wide, host-synthesized discovery result — never streamed.
-                return Err(BridgeError::new(
-                    "event_unexpected_agent_catalog",
-                    "a backend stream must not emit a device-wide agent catalog",
-                ));
-            }
-        }
-
-        Ok(())
+        validate_stream_payload(&event.payload, event, self.adapter.backend())
     }
 
     pub fn run(&self, run_id: &str) -> Result<&ManagedRun, BridgeError> {
@@ -642,7 +556,7 @@ where
             let aggregate = sessions
                 .entry(managed.session.id.clone())
                 .or_insert_with(|| SessionAggregate {
-                    backend: managed.session.backend.clone(),
+                    backend: managed.session.backend,
                     latest: None,
                     usage: Vec::new(),
                 });
@@ -696,7 +610,7 @@ where
                     .latest
                     .as_ref()
                     .map(|latest| latest.key.1.as_str()),
-                backend: aggregate.backend.clone(),
+                backend: aggregate.backend,
                 message_count: aggregate
                     .latest
                     .as_ref()
@@ -868,6 +782,106 @@ where
             Ok(())
         }
     }
+}
+
+/// True when a payload's own run/session ids match its containing event.
+fn ids_match(payload_run_id: &str, payload_session_id: &str, event: &BridgeEvent) -> bool {
+    payload_run_id == event.run_id && payload_session_id == event.session_id
+}
+
+/// Validate one stream payload against its containing event and the bridge adapter's
+/// backend. The device-wide, host-synthesized payloads are never adapter-streamed and
+/// are rejected outright.
+fn validate_stream_payload(
+    payload: &BridgeEventPayload,
+    event: &BridgeEvent,
+    backend: AgentBackend,
+) -> Result<(), BridgeError> {
+    match payload {
+        BridgeEventPayload::Message { message } => {
+            if !ids_match(&message.run_id, &message.session_id, event) {
+                return Err(BridgeError::new(
+                    "event_message_mismatch",
+                    "stream message ids do not match containing event",
+                ));
+            }
+        }
+        BridgeEventPayload::Control { event: control } => {
+            if !ids_match(&control.run_id, &control.session_id, event) {
+                return Err(BridgeError::new(
+                    "event_control_mismatch",
+                    "stream control event ids do not match containing event",
+                ));
+            }
+        }
+        BridgeEventPayload::Usage { signal } => {
+            if !ids_match(&signal.run_id, &signal.session_id, event) {
+                return Err(BridgeError::new(
+                    "event_usage_mismatch",
+                    "stream usage signal ids do not match containing event",
+                ));
+            }
+            if signal.backend != backend {
+                return Err(BridgeError::new(
+                    "event_backend_mismatch",
+                    "stream usage backend does not match bridge adapter",
+                ));
+            }
+        }
+        BridgeEventPayload::PolicyHint { hint } => {
+            let run_mismatch = hint
+                .run_id
+                .as_ref()
+                .is_some_and(|run_id| run_id != &event.run_id);
+            if hint.session_id != event.session_id || run_mismatch {
+                return Err(BridgeError::new(
+                    "event_policy_hint_mismatch",
+                    "stream policy hint ids do not match containing event",
+                ));
+            }
+        }
+        BridgeEventPayload::Status { status } => {
+            if status.backend != backend {
+                return Err(BridgeError::new(
+                    "event_backend_mismatch",
+                    "stream status backend does not match bridge adapter",
+                ));
+            }
+        }
+        BridgeEventPayload::Artifact { artifact } => {
+            if !ids_match(&artifact.run_id, &artifact.session_id, event) {
+                return Err(BridgeError::new(
+                    "event_artifact_mismatch",
+                    "stream artifact ids do not match containing event",
+                ));
+            }
+        }
+        BridgeEventPayload::UsageSummary { .. } => {
+            // A usage summary is a device-wide, host-synthesized response to a client
+            // query — never an event an adapter streams from a run. Seeing one here
+            // means a backend emitted a frame it must not.
+            return Err(BridgeError::new(
+                "event_unexpected_usage_summary",
+                "a backend stream must not emit a device-wide usage summary",
+            ));
+        }
+        BridgeEventPayload::CoachingHints { .. } => {
+            // Likewise device-wide and host-synthesized — never adapter-streamed.
+            return Err(BridgeError::new(
+                "event_unexpected_coaching_hints",
+                "a backend stream must not emit device-wide coaching hints",
+            ));
+        }
+        BridgeEventPayload::AgentCatalog { .. } => {
+            // Device-wide, host-synthesized discovery result — never streamed.
+            return Err(BridgeError::new(
+                "event_unexpected_agent_catalog",
+                "a backend stream must not emit a device-wide agent catalog",
+            ));
+        }
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1970,5 +1984,276 @@ mod tests {
         assert_eq!(agents[0].backends[0].backend, AgentBackend::ClaudeLocal);
 
         let _ = fs::remove_dir_all(&empty_home);
+    }
+
+    // --- Direct unit tests for the pure payload validators. ---
+
+    const NOW: &str = "2026-06-07T12:00:00Z";
+
+    /// A status event envelope (`session-1` / `run-1`) used as the validation anchor.
+    fn anchor_event() -> BridgeEvent {
+        BridgeEvent::status(
+            "event-1",
+            "session-1",
+            "run-1",
+            0,
+            NOW,
+            BridgeStatusEvent {
+                state: DispatchRunState::Running,
+                backend: AgentBackend::ClaudeLocal,
+                repo_hint: None,
+                link: None,
+            },
+        )
+    }
+
+    fn message_payload(session_id: &str, run_id: &str) -> BridgeEventPayload {
+        BridgeEventPayload::Message {
+            message: DispatchMessage {
+                id: "m1".to_string(),
+                session_id: session_id.to_string(),
+                run_id: run_id.to_string(),
+                role: DispatchMessageRole::Agent,
+                body: "hi".to_string(),
+                created_at: NOW.to_string(),
+                is_partial: Some(false),
+            },
+        }
+    }
+
+    fn usage_payload(session_id: &str, run_id: &str, backend: AgentBackend) -> BridgeEventPayload {
+        BridgeEventPayload::Usage {
+            signal: UsageSignal {
+                id: "u1".to_string(),
+                session_id: session_id.to_string(),
+                run_id: run_id.to_string(),
+                backend,
+                fidelity: crate::session::UsageFidelity::Exact,
+                model_label: None,
+                input_tokens: Some(1),
+                output_tokens: Some(1),
+                total_tokens: Some(2),
+                total_usd: None,
+                premium_requests: None,
+                duration_ms: None,
+                confidence: None,
+                recorded_at: NOW.to_string(),
+            },
+        }
+    }
+
+    fn ok(payload: BridgeEventPayload) -> Result<(), BridgeError> {
+        validate_stream_payload(&payload, &anchor_event(), AgentBackend::ClaudeLocal)
+    }
+
+    fn err_code(payload: BridgeEventPayload) -> String {
+        ok(payload).expect_err("expected a validation error").code
+    }
+
+    #[test]
+    fn ids_match_compares_both_run_and_session() {
+        let event = anchor_event();
+        assert!(ids_match("run-1", "session-1", &event));
+        assert!(!ids_match("other-run", "session-1", &event));
+        assert!(!ids_match("run-1", "other-session", &event));
+    }
+
+    #[test]
+    fn validates_matching_message_control_usage_artifact_payloads() {
+        assert!(ok(message_payload("session-1", "run-1")).is_ok());
+
+        assert!(ok(BridgeEventPayload::Control {
+            event: DispatchControlEvent {
+                id: "c1".to_string(),
+                session_id: "session-1".to_string(),
+                run_id: "run-1".to_string(),
+                kind: DispatchControlEventKind::Reply,
+                created_at: NOW.to_string(),
+                summary: "ok".to_string(),
+            },
+        })
+        .is_ok());
+
+        assert!(ok(usage_payload(
+            "session-1",
+            "run-1",
+            AgentBackend::ClaudeLocal
+        ))
+        .is_ok());
+
+        assert!(ok(BridgeEventPayload::Artifact {
+            artifact: DispatchArtifact {
+                id: "a1".to_string(),
+                session_id: "session-1".to_string(),
+                run_id: "run-1".to_string(),
+                kind: crate::artifact::ArtifactKind::Report,
+                label: "r".to_string(),
+                href: None,
+                repo_relative_path: None,
+                created_at: NOW.to_string(),
+            },
+        })
+        .is_ok());
+
+        // A status whose backend matches the adapter is accepted.
+        assert!(ok(BridgeEventPayload::Status {
+            status: BridgeStatusEvent {
+                state: DispatchRunState::Completed,
+                backend: AgentBackend::ClaudeLocal,
+                repo_hint: None,
+                link: None,
+            },
+        })
+        .is_ok());
+    }
+
+    #[test]
+    fn rejects_id_mismatches_per_payload_kind() {
+        assert_eq!(
+            err_code(message_payload("session-1", "other-run")),
+            "event_message_mismatch"
+        );
+        assert_eq!(
+            err_code(BridgeEventPayload::Control {
+                event: DispatchControlEvent {
+                    id: "c1".to_string(),
+                    session_id: "other-session".to_string(),
+                    run_id: "run-1".to_string(),
+                    kind: DispatchControlEventKind::Reply,
+                    created_at: NOW.to_string(),
+                    summary: "x".to_string(),
+                },
+            }),
+            "event_control_mismatch"
+        );
+        assert_eq!(
+            err_code(usage_payload(
+                "session-1",
+                "other-run",
+                AgentBackend::ClaudeLocal
+            )),
+            "event_usage_mismatch"
+        );
+        assert_eq!(
+            err_code(BridgeEventPayload::Artifact {
+                artifact: DispatchArtifact {
+                    id: "a1".to_string(),
+                    session_id: "other-session".to_string(),
+                    run_id: "run-1".to_string(),
+                    kind: crate::artifact::ArtifactKind::Report,
+                    label: "r".to_string(),
+                    href: None,
+                    repo_relative_path: None,
+                    created_at: NOW.to_string(),
+                },
+            }),
+            "event_artifact_mismatch"
+        );
+    }
+
+    #[test]
+    fn rejects_usage_and_status_backend_mismatch() {
+        // Usage signal backend differs from the bridge adapter.
+        assert_eq!(
+            err_code(usage_payload(
+                "session-1",
+                "run-1",
+                AgentBackend::CodexLocal
+            )),
+            "event_backend_mismatch"
+        );
+        // Status backend differs from the bridge adapter.
+        assert_eq!(
+            err_code(BridgeEventPayload::Status {
+                status: BridgeStatusEvent {
+                    state: DispatchRunState::Completed,
+                    backend: AgentBackend::CopilotLocal,
+                    repo_hint: None,
+                    link: None,
+                },
+            }),
+            "event_backend_mismatch"
+        );
+    }
+
+    #[test]
+    fn validates_policy_hint_run_optionality() {
+        // A hint with no run id but a matching session id is accepted.
+        assert!(ok(BridgeEventPayload::PolicyHint {
+            hint: PolicyHint {
+                id: "h1".to_string(),
+                session_id: "session-1".to_string(),
+                run_id: None,
+                code: "x".to_string(),
+                severity: crate::session::PolicyHintSeverity::Info,
+                message: "m".to_string(),
+                created_at: NOW.to_string(),
+            },
+        })
+        .is_ok());
+
+        // A matching run id is also accepted.
+        assert!(ok(BridgeEventPayload::PolicyHint {
+            hint: PolicyHint {
+                id: "h2".to_string(),
+                session_id: "session-1".to_string(),
+                run_id: Some("run-1".to_string()),
+                code: "x".to_string(),
+                severity: crate::session::PolicyHintSeverity::Info,
+                message: "m".to_string(),
+                created_at: NOW.to_string(),
+            },
+        })
+        .is_ok());
+
+        // A mismatched run id is rejected.
+        assert_eq!(
+            err_code(BridgeEventPayload::PolicyHint {
+                hint: PolicyHint {
+                    id: "h3".to_string(),
+                    session_id: "session-1".to_string(),
+                    run_id: Some("other-run".to_string()),
+                    code: "x".to_string(),
+                    severity: crate::session::PolicyHintSeverity::Info,
+                    message: "m".to_string(),
+                    created_at: NOW.to_string(),
+                },
+            }),
+            "event_policy_hint_mismatch"
+        );
+
+        // A mismatched session id is rejected.
+        assert_eq!(
+            err_code(BridgeEventPayload::PolicyHint {
+                hint: PolicyHint {
+                    id: "h4".to_string(),
+                    session_id: "other-session".to_string(),
+                    run_id: None,
+                    code: "x".to_string(),
+                    severity: crate::session::PolicyHintSeverity::Info,
+                    message: "m".to_string(),
+                    created_at: NOW.to_string(),
+                },
+            }),
+            "event_policy_hint_mismatch"
+        );
+    }
+
+    #[test]
+    fn rejects_host_synthesized_device_wide_payloads() {
+        assert_eq!(
+            err_code(BridgeEventPayload::UsageSummary {
+                summary: UsageSummary::from_signals(&[], 0),
+            }),
+            "event_unexpected_usage_summary"
+        );
+        assert_eq!(
+            err_code(BridgeEventPayload::CoachingHints { hints: Vec::new() }),
+            "event_unexpected_coaching_hints"
+        );
+        assert_eq!(
+            err_code(BridgeEventPayload::AgentCatalog { agents: Vec::new() }),
+            "event_unexpected_agent_catalog"
+        );
     }
 }

@@ -71,15 +71,15 @@ interface Pending {
 const DEFAULT_RESPONSE_TIMEOUT_MS = 15_000;
 
 export class WebSocketWireClient implements WireClient {
-  private handlers = new Set<WireEventHandler>();
+  private readonly handlers = new Set<WireEventHandler>();
   private queue: Array<{ frameId: string; data: string }> = [];
   private open = false;
   private closed = false;
-  private pending = new Map<string, Pending>();
+  private readonly pending = new Map<string, Pending>();
 
   constructor(
-    private socket: WireSocket,
-    private responseTimeoutMs: number = DEFAULT_RESPONSE_TIMEOUT_MS
+    private readonly socket: WireSocket,
+    private readonly responseTimeoutMs: number = DEFAULT_RESPONSE_TIMEOUT_MS
   ) {
     this.socket.onOpen(() => {
       // Flush queued frames before marking open so ordering is unambiguous, and

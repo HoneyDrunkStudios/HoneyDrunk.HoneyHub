@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   acknowledgeGrant,
   addWorkspaceRoot,
+  defaultPairingFactory,
   emptyBridgeSettings,
   isAbsoluteWorkspaceRoot,
   pairDevice,
@@ -19,6 +20,18 @@ function fixedFactory(seed: string): PairingFactory {
     now: () => "2026-06-07T12:00:00Z"
   };
 }
+
+describe("defaultPairingFactory", () => {
+  it("produces a dash-free hex token, a device id, and an ISO timestamp", () => {
+    const token = defaultPairingFactory.token();
+    // Two concatenated UUIDs with the dashes stripped.
+    expect(token).toMatch(/^[0-9a-f]{64}$/);
+    expect(token).not.toContain("-");
+
+    expect(defaultPairingFactory.deviceId()).not.toBe(defaultPairingFactory.deviceId());
+    expect(defaultPairingFactory.now()).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+  });
+});
 
 describe("bridge settings model", () => {
   it("pairs a device and surfaces the token exactly once", () => {

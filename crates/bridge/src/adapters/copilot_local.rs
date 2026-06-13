@@ -32,7 +32,7 @@ use crate::session::{
     DispatchMessage, DispatchMessageRole, DispatchRunState, UsageConfidence, UsageFidelity,
     UsageSignal,
 };
-use crate::wire::{BridgeEvent, BridgeStatusEvent};
+use crate::wire::BridgeEvent;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::process::Command;
@@ -166,6 +166,113 @@ impl CopilotLocalAdapter {
                 .and_then(|slot| slot.backend_session_id().map(str::to_string))
         })
     }
+
+    /// Parse one drained line through the per-turn estimate accounting and fold the
+    /// result into `run` (running output chars + the once-per-turn usage flag),
+    /// extending `events` with anything emitted.
+    fn account_line(
+        &self,
+        run: &mut CopilotRun,
+        run_id: &str,
+        session_id: &str,
+        line: &str,
+        events: &mut Vec<BridgeEvent>,
+    ) {
+        let parsed = parse_line(
+            &self.clock,
+            line,
+            run_id,
+            session_id,
+            RunEstimate {
+                input_chars: run.input_chars,
+                output_chars_so_far: run.output_chars,
+                usage_already_emitted: run.usage_emitted,
+            },
+            &mut run.child.backend_session_id,
+        );
+        run.output_chars += parsed.output_chars;
+        if contains_usage(&parsed.events) {
+            run.usage_emitted = true;
+        }
+        events.extend(parsed.events);
+    }
+
+    /// Off-lock finalization for an exited turn: drain the child's final lines through
+    /// the same accounting, carry any tail-discovered vendor session id back to the
+    /// retired slot, synthesize a usage signal if the turn ended without one (so a turn
+    /// always reports its premium request), then push the terminal transition.
+    fn finalize_exited_run(
+        &self,
+        success: bool,
+        run_id: &str,
+        session_id: &str,
+        mut run: Box<CopilotRun>,
+        events: &mut Vec<BridgeEvent>,
+    ) {
+        for line in run.child.drain_remaining(std::time::Duration::from_secs(2)) {
+            self.account_line(&mut run, run_id, session_id, &line, events);
+        }
+
+        // Carry a vendor session id discovered only in the drained tail back to the
+        // retired slot so a later follow-up resume still sees it.
+        let tail_session_id = run.child.backend_session_id.clone();
+        if tail_session_id.is_some() {
+            if let Ok(mut guard) = self.lock_runs() {
+                if let Some(slot) = guard.get_mut(run_id) {
+                    slot.set_done_backend_session_id(tail_session_id);
+                }
+            }
+        }
+
+        let now = (self.clock)();
+        if !success {
+            events.push(terminal_status(
+                session_id,
+                run_id,
+                &now,
+                DispatchRunState::Failed,
+            ));
+            return;
+        }
+
+        // If the turn ended without a completion event carrying usage, synthesize the
+        // estimated signal so a turn always reports its premium request (the real
+        // billing unit) — never silently dropped.
+        if !run.usage_emitted {
+            events.push(BridgeEvent::usage(
+                Uuid::new_v4().to_string(),
+                session_id,
+                run_id,
+                0,
+                now.clone(),
+                estimated_usage_signal(
+                    UsageEstimate {
+                        premium_requests: 1,
+                        duration_ms: None,
+                        input_chars: run.input_chars,
+                        output_chars: run.output_chars,
+                        model: None,
+                    },
+                    session_id,
+                    run_id,
+                    &now,
+                ),
+            ));
+        }
+        events.push(terminal_status(
+            session_id,
+            run_id,
+            &now,
+            DispatchRunState::Finalizing,
+        ));
+        events.push(terminal_status(
+            session_id,
+            run_id,
+            &now,
+            DispatchRunState::Completed,
+        ));
+        // `run` (and its child) drops here, off-lock.
+    }
 }
 
 fn session_id_from(value: &Value) -> Option<String> {
@@ -258,25 +365,23 @@ fn estimated_usage_signal(
     }
 }
 
+/// Build one terminal status event tagged for this backend (delegates to the shared
+/// cross-adapter helper).
 fn terminal_status(
     session_id: &str,
     run_id: &str,
     now: &str,
     state: DispatchRunState,
 ) -> BridgeEvent {
-    BridgeEvent::status(
-        Uuid::new_v4().to_string(),
-        session_id,
-        run_id,
-        0,
-        now.to_string(),
-        BridgeStatusEvent {
-            state,
-            backend: AgentBackend::CopilotLocal,
-            repo_hint: None,
-            link: None,
-        },
-    )
+    super::common::terminal_status(AgentBackend::CopilotLocal, session_id, run_id, now, state)
+}
+
+/// True if any of these events is a usage signal (the turn's premium-request
+/// accounting point).
+fn contains_usage(events: &[BridgeEvent]) -> bool {
+    events
+        .iter()
+        .any(|event| matches!(event.payload, crate::wire::BridgeEventPayload::Usage { .. }))
 }
 
 /// The outcome of parsing one Copilot JSONL line: events to emit plus the number of
@@ -293,6 +398,84 @@ struct RunEstimate {
     input_chars: usize,
     output_chars_so_far: usize,
     usage_already_emitted: bool,
+}
+
+/// Adopt a vendor session id from a completion event, but only if one is not already
+/// captured (a completion event's generic `id` must not clobber the init session id).
+fn capture_completion_session_id(value: &Value, backend_session_id: &mut Option<String>) {
+    if backend_session_id.is_none() {
+        if let Some(id) = completion_session_id(value) {
+            *backend_session_id = Some(id);
+        }
+    }
+}
+
+/// Emit a final assembled message and account its size toward the output-token estimate
+/// **without double-counting** the deltas that already streamed it: bump the running
+/// char count up to the final length only if it exceeds what the deltas accounted for.
+/// This is what makes a *final-text-only* response (no deltas) estimate non-zero output
+/// tokens.
+fn emit_final_text(
+    value: &Value,
+    output_chars_so_far: usize,
+    session_id: &str,
+    run_id: &str,
+    now: &str,
+    result: &mut ParseResult,
+) {
+    let Some(text) = value.get("text").and_then(Value::as_str) else {
+        return;
+    };
+    if text.is_empty() {
+        return;
+    }
+    result.events.push(agent_message(
+        text.to_string(),
+        false,
+        session_id,
+        run_id,
+        now,
+    ));
+    let len = text.chars().count();
+    let total = output_chars_so_far + result.output_chars;
+    result.output_chars += len.saturating_sub(total);
+}
+
+/// Build the per-turn estimated usage event from a completion line's exact
+/// premium-request/duration units plus the accumulated character counts.
+fn turn_usage_event(
+    value: &Value,
+    input_chars: usize,
+    output_chars: usize,
+    session_id: &str,
+    run_id: &str,
+    now: &str,
+) -> BridgeEvent {
+    let premium_requests = value
+        .get("premium_requests")
+        .and_then(Value::as_u64)
+        .unwrap_or(1);
+    let duration_ms = value.get("duration_ms").and_then(Value::as_u64);
+    let model = value.get("model").and_then(Value::as_str);
+    BridgeEvent::usage(
+        Uuid::new_v4().to_string(),
+        session_id,
+        run_id,
+        0,
+        now.to_string(),
+        estimated_usage_signal(
+            UsageEstimate {
+                premium_requests,
+                duration_ms,
+                input_chars,
+                output_chars,
+                model,
+            },
+            session_id,
+            run_id,
+            now,
+        ),
+    )
 }
 
 /// Parse one JSONL line from the Copilot CLI. Token-level `assistant.message_delta`
@@ -324,28 +507,6 @@ fn parse_line(
         .unwrap_or_default();
     let now = (clock)();
 
-    // Emit a final assembled message and account its size toward the output-token
-    // estimate **without double-counting** the deltas that already streamed it: bump
-    // the running char count up to the final length only if it exceeds what the deltas
-    // accounted for. This is what makes a *final-text-only* response (no deltas)
-    // estimate non-zero output tokens.
-    let emit_final_text = |result: &mut ParseResult| {
-        if let Some(text) = value.get("text").and_then(Value::as_str) {
-            if !text.is_empty() {
-                result.events.push(agent_message(
-                    text.to_string(),
-                    false,
-                    session_id,
-                    run_id,
-                    &now,
-                ));
-                let len = text.chars().count();
-                let total = output_chars_so_far + result.output_chars;
-                result.output_chars += len.saturating_sub(total);
-            }
-        }
-    };
-
     match kind {
         "session.created" | "session.configured" | "thread.started" => {
             if let Some(id) = session_id_from(&value) {
@@ -373,54 +534,43 @@ fn parse_line(
         // carries NO usage: usage is accounted exactly once per turn, on
         // `turn.completed`.
         "assistant.message_completed" => {
-            if backend_session_id.is_none() {
-                if let Some(id) = completion_session_id(&value) {
-                    *backend_session_id = Some(id);
-                }
-            }
-            emit_final_text(&mut result);
+            capture_completion_session_id(&value, backend_session_id);
+            emit_final_text(
+                &value,
+                output_chars_so_far,
+                session_id,
+                run_id,
+                &now,
+                &mut result,
+            );
         }
         // The turn ended — the single accounting point for the premium request.
         "turn.completed" | "thread.completed" => {
-            if backend_session_id.is_none() {
-                if let Some(id) = completion_session_id(&value) {
-                    *backend_session_id = Some(id);
-                }
-            }
+            capture_completion_session_id(&value, backend_session_id);
             // A final assembled message, when this event (rather than a separate
             // `assistant.message_completed`) carries the whole text.
-            emit_final_text(&mut result);
+            emit_final_text(
+                &value,
+                output_chars_so_far,
+                session_id,
+                run_id,
+                &now,
+                &mut result,
+            );
 
             // Account usage exactly once per turn: if a prior completion line in this
             // same drain already emitted it, do not emit again (a CLI emitting both
             // `assistant.message_completed`-as-completion and a second `turn.completed`
             // cannot double-count the premium request).
             if !usage_already_emitted {
-                let premium_requests = value
-                    .get("premium_requests")
-                    .and_then(Value::as_u64)
-                    .unwrap_or(1);
-                let duration_ms = value.get("duration_ms").and_then(Value::as_u64);
-                let model = value.get("model").and_then(Value::as_str);
-                result.events.push(BridgeEvent::usage(
-                    Uuid::new_v4().to_string(),
+                result.events.push(turn_usage_event(
+                    &value,
+                    input_chars,
+                    // Include this line's final text in the estimate.
+                    output_chars_so_far + result.output_chars,
                     session_id,
                     run_id,
-                    0,
-                    now.clone(),
-                    estimated_usage_signal(
-                        UsageEstimate {
-                            premium_requests,
-                            duration_ms,
-                            input_chars,
-                            // Include this line's final text in the estimate.
-                            output_chars: output_chars_so_far + result.output_chars,
-                            model,
-                        },
-                        session_id,
-                        run_id,
-                        &now,
-                    ),
+                    &now,
                 ));
             }
         }
@@ -490,30 +640,9 @@ impl AgentBackendAdapter for CopilotLocalAdapter {
 
         let lines = run.child.drain_lines();
         let session_id = run.child.session_id.clone();
-        let input_chars = run.input_chars;
         let mut events = Vec::new();
         for line in lines {
-            let parsed = parse_line(
-                &self.clock,
-                &line,
-                run_id,
-                &session_id,
-                RunEstimate {
-                    input_chars,
-                    output_chars_so_far: run.output_chars,
-                    usage_already_emitted: run.usage_emitted,
-                },
-                &mut run.child.backend_session_id,
-            );
-            run.output_chars += parsed.output_chars;
-            if parsed
-                .events
-                .iter()
-                .any(|event| matches!(event.payload, crate::wire::BridgeEventPayload::Usage { .. }))
-            {
-                run.usage_emitted = true;
-            }
-            events.extend(parsed.events);
+            self.account_line(run, run_id, &session_id, &line, &mut events);
         }
 
         // On process exit, retire under the lock and take ownership of the run, then
@@ -524,92 +653,8 @@ impl AgentBackendAdapter for CopilotLocalAdapter {
         let retired = if exit.is_some() { slot.retire() } else { None };
         drop(guard);
 
-        if let Some(success) = exit {
-            if let Some(mut run) = retired {
-                // Drain the final lines the CLI flushed on exit (e.g. the
-                // `turn.completed` premium-request line) through the same accounting
-                // as the main loop, now that the channel is off the lock.
-                for line in run.child.drain_remaining(std::time::Duration::from_secs(2)) {
-                    let parsed = parse_line(
-                        &self.clock,
-                        &line,
-                        run_id,
-                        &session_id,
-                        RunEstimate {
-                            input_chars: run.input_chars,
-                            output_chars_so_far: run.output_chars,
-                            usage_already_emitted: run.usage_emitted,
-                        },
-                        &mut run.child.backend_session_id,
-                    );
-                    run.output_chars += parsed.output_chars;
-                    if parsed.events.iter().any(|event| {
-                        matches!(event.payload, crate::wire::BridgeEventPayload::Usage { .. })
-                    }) {
-                        run.usage_emitted = true;
-                    }
-                    events.extend(parsed.events);
-                }
-
-                // Carry a vendor session id discovered only in the drained tail back to
-                // the retired slot so a later follow-up resume still sees it.
-                let tail_session_id = run.child.backend_session_id.clone();
-                if tail_session_id.is_some() {
-                    if let Ok(mut guard) = self.lock_runs() {
-                        if let Some(slot) = guard.get_mut(run_id) {
-                            slot.set_done_backend_session_id(tail_session_id);
-                        }
-                    }
-                }
-
-                let now = (self.clock)();
-                if success {
-                    // If the turn ended without a completion event carrying usage,
-                    // synthesize the estimated signal so a turn always reports its
-                    // premium request (the real billing unit) — never silently dropped.
-                    if !run.usage_emitted {
-                        events.push(BridgeEvent::usage(
-                            Uuid::new_v4().to_string(),
-                            &session_id,
-                            run_id,
-                            0,
-                            now.clone(),
-                            estimated_usage_signal(
-                                UsageEstimate {
-                                    premium_requests: 1,
-                                    duration_ms: None,
-                                    input_chars: run.input_chars,
-                                    output_chars: run.output_chars,
-                                    model: None,
-                                },
-                                &session_id,
-                                run_id,
-                                &now,
-                            ),
-                        ));
-                    }
-                    events.push(terminal_status(
-                        &session_id,
-                        run_id,
-                        &now,
-                        DispatchRunState::Finalizing,
-                    ));
-                    events.push(terminal_status(
-                        &session_id,
-                        run_id,
-                        &now,
-                        DispatchRunState::Completed,
-                    ));
-                } else {
-                    events.push(terminal_status(
-                        &session_id,
-                        run_id,
-                        &now,
-                        DispatchRunState::Failed,
-                    ));
-                }
-                // `run` (and its child) drops here, off-lock.
-            }
+        if let (Some(success), Some(run)) = (exit, retired) {
+            self.finalize_exited_run(success, run_id, &session_id, run, &mut events);
         }
 
         Ok(events)
@@ -934,6 +979,167 @@ mod tests {
         )
         .events
         .is_empty());
+    }
+
+    #[test]
+    fn contains_usage_detects_a_usage_event() {
+        let usage = turn_usage_event(
+            &serde_json::json!({"premium_requests": 1}),
+            0,
+            0,
+            "session-1",
+            "run-1",
+            "2026-06-08T12:00:00Z",
+        );
+        let message = agent_message(
+            "hi".to_string(),
+            false,
+            "session-1",
+            "run-1",
+            "2026-06-08T12:00:00Z",
+        );
+        assert!(contains_usage(std::slice::from_ref(&usage)));
+        assert!(!contains_usage(std::slice::from_ref(&message)));
+        assert!(!contains_usage(&[]));
+    }
+
+    #[test]
+    fn capture_completion_session_id_only_fills_an_empty_slot() {
+        // An explicit session_id fills an empty slot.
+        let mut backend_session = None;
+        capture_completion_session_id(
+            &serde_json::json!({"session_id": "from-completion"}),
+            &mut backend_session,
+        );
+        assert_eq!(backend_session.as_deref(), Some("from-completion"));
+
+        // A second completion (even with a different id) must not clobber it.
+        capture_completion_session_id(
+            &serde_json::json!({"session_id": "other"}),
+            &mut backend_session,
+        );
+        assert_eq!(backend_session.as_deref(), Some("from-completion"));
+
+        // A generic `id` (turn/event id) is never adopted as the session id.
+        let mut empty = None;
+        capture_completion_session_id(&serde_json::json!({"id": "turn-9"}), &mut empty);
+        assert_eq!(empty, None);
+    }
+
+    #[test]
+    fn emit_final_text_appends_a_final_message_and_accounts_new_chars() {
+        // No prior delta chars: the whole final text counts toward the estimate.
+        let mut result = ParseResult {
+            events: Vec::new(),
+            output_chars: 0,
+        };
+        emit_final_text(
+            &serde_json::json!({"text": "hello world!"}),
+            0,
+            "session-1",
+            "run-1",
+            "2026-06-08T12:00:00Z",
+            &mut result,
+        );
+        assert_eq!(result.output_chars, 12);
+        match &result.events[0].payload {
+            crate::wire::BridgeEventPayload::Message { message } => {
+                assert_eq!(message.body, "hello world!");
+                assert_eq!(message.is_partial, Some(false));
+            }
+            other => panic!("expected a final message, got {other:?}"),
+        }
+
+        // Already-streamed deltas cover the final text: no new chars are double-counted.
+        let mut covered = ParseResult {
+            events: Vec::new(),
+            output_chars: 0,
+        };
+        emit_final_text(
+            &serde_json::json!({"text": "hello world!"}),
+            12,
+            "session-1",
+            "run-1",
+            "2026-06-08T12:00:00Z",
+            &mut covered,
+        );
+        assert_eq!(covered.output_chars, 0);
+        assert_eq!(covered.events.len(), 1);
+
+        // Empty / missing text emits nothing and accounts nothing.
+        let mut empty = ParseResult {
+            events: Vec::new(),
+            output_chars: 0,
+        };
+        emit_final_text(
+            &serde_json::json!({"text": ""}),
+            0,
+            "session-1",
+            "run-1",
+            "2026-06-08T12:00:00Z",
+            &mut empty,
+        );
+        emit_final_text(
+            &serde_json::json!({}),
+            0,
+            "session-1",
+            "run-1",
+            "2026-06-08T12:00:00Z",
+            &mut empty,
+        );
+        assert!(empty.events.is_empty());
+        assert_eq!(empty.output_chars, 0);
+    }
+
+    #[test]
+    fn turn_usage_event_reads_units_and_estimates_tokens() {
+        let event = turn_usage_event(
+            &serde_json::json!({
+                "premium_requests": 2,
+                "duration_ms": 3000,
+                "model": "claude-sonnet-4.6"
+            }),
+            40,
+            400,
+            "session-1",
+            "run-1",
+            "2026-06-08T12:00:00Z",
+        );
+        match &event.payload {
+            crate::wire::BridgeEventPayload::Usage { signal } => {
+                assert_eq!(signal.fidelity, UsageFidelity::Estimated);
+                assert_eq!(signal.premium_requests, Some(2));
+                assert_eq!(signal.duration_ms, Some(3000));
+                assert_eq!(signal.model_label.as_deref(), Some("claude-sonnet-4.6"));
+                // 40/4 input, 400/4 output.
+                assert_eq!(signal.input_tokens, Some(10));
+                assert_eq!(signal.output_tokens, Some(100));
+                assert_eq!(signal.total_tokens, Some(110));
+                assert_eq!(signal.total_usd, None);
+                assert_eq!(signal.backend, AgentBackend::CopilotLocal);
+            }
+            other => panic!("expected a usage payload, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn turn_usage_event_defaults_premium_requests_to_one() {
+        let event = turn_usage_event(
+            &serde_json::json!({}),
+            0,
+            0,
+            "session-1",
+            "run-1",
+            "2026-06-08T12:00:00Z",
+        );
+        match &event.payload {
+            crate::wire::BridgeEventPayload::Usage { signal } => {
+                assert_eq!(signal.premium_requests, Some(1));
+                assert_eq!(signal.duration_ms, None);
+                assert_eq!(signal.model_label, None);
+            }
+            other => panic!("expected a usage payload, got {other:?}"),
+        }
     }
 
     #[test]

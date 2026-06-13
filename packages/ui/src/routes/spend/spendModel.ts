@@ -5,7 +5,6 @@ import type {
   UsageSignal,
   UsageSummary
 } from "@honeydrunk/honeyhub-types";
-import { backendLabel } from "../../backends";
 import { formatUsd } from "../../usageFormat";
 
 // Pure helpers for the "your spend" view (ADR-0092 D2 cost view). The host
@@ -14,7 +13,7 @@ import { formatUsd } from "../../usageFormat";
 // dollar) lives in one tested place.
 
 // Re-export so existing importers (the view, the tests) keep their import path.
-export { backendLabel };
+export { backendLabel } from "../../backends";
 
 // Explicit rank maps so the mock/offline rollup order matches Rust's enum-`Ord`
 // ordering (declaration order), not JS lexicographic order — "exact" < "derived" <
@@ -137,7 +136,7 @@ export function summarizeUsage(signals: UsageSignal[], sessionCount: number): Us
     rollups,
     // Omit (rather than set undefined) so the optional field stays absent under
     // exactOptionalPropertyTypes — matching the bridge's `skip_serializing_if`.
-    ...(groundedTotalUsd !== undefined ? { groundedTotalUsd } : {}),
+    ...(groundedTotalUsd === undefined ? {} : { groundedTotalUsd }),
     totalPremiumRequests
   };
 }

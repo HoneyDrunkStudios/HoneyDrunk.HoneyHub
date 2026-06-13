@@ -26,7 +26,7 @@ const HINT_TITLES: Record<string, string> = {
 /** A short heading for a hint, derived from its rule code (the full guidance is the
     hint's own `message`). Falls back to a humanized code for an unknown rule. */
 export function hintTitle(code: string): string {
-  return HINT_TITLES[code] ?? code.replace(/_/g, " ");
+  return HINT_TITLES[code] ?? code.replaceAll("_", " ");
 }
 
 /** Order advisories by severity (warnings first), then by recency, then by a stable
@@ -36,6 +36,8 @@ export function sortHints(hints: PolicyHint[]): PolicyHint[] {
     const severityDelta = SEVERITY_RANK[left.severity] - SEVERITY_RANK[right.severity];
     if (severityDelta !== 0) return severityDelta;
     if (left.createdAt !== right.createdAt) return left.createdAt < right.createdAt ? 1 : -1;
-    return left.id < right.id ? -1 : left.id > right.id ? 1 : 0;
+    if (left.id < right.id) return -1;
+    if (left.id > right.id) return 1;
+    return 0;
   });
 }

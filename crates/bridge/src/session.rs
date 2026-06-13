@@ -205,9 +205,9 @@ impl UsageSummary {
         let mut groups: BTreeMap<(AgentBackend, UsageFidelity), UsageRollup> = BTreeMap::new();
         for signal in signals {
             let rollup = groups
-                .entry((signal.backend.clone(), signal.fidelity.clone()))
+                .entry((signal.backend, signal.fidelity.clone()))
                 .or_insert_with(|| UsageRollup {
-                    backend: signal.backend.clone(),
+                    backend: signal.backend,
                     fidelity: signal.fidelity.clone(),
                     turn_count: 0,
                     input_tokens: 0,

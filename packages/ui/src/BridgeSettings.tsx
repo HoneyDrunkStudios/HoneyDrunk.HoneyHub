@@ -28,7 +28,7 @@ export function BridgeSettings({
   factory,
   state: controlledState,
   onChange
-}: BridgeSettingsProps) {
+}: Readonly<BridgeSettingsProps>) {
   const [internalState, setInternalState] = useState<BridgeSettingsState>(
     initialState ?? emptyBridgeSettings
   );
@@ -93,7 +93,7 @@ export function BridgeSettings({
         </button>
 
         {state.lastGrant !== undefined && (
-          <div role="status" className="pairing-token">
+          <output className="pairing-token">
             <p>
               Copy this token to <strong>{state.lastGrant.device.displayName}</strong>{" "}
               now. It is shown only once.
@@ -102,7 +102,7 @@ export function BridgeSettings({
             <button type="button" onClick={() => setState(acknowledgeGrant(state))}>
               Done
             </button>
-          </div>
+          </output>
         )}
 
         <ul aria-label="Paired devices">

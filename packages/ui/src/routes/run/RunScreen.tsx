@@ -33,17 +33,17 @@ export interface RunScreenProps {
   availableBackends?: AgentBackend[];
 }
 
-const TERMINAL: DispatchRunState[] = ["completed", "failed", "cancelled"];
+const TERMINAL = new Set<DispatchRunState>(["completed", "failed", "cancelled"]);
 
 function isTerminal(state: DispatchRunState | undefined): boolean {
-  return state !== undefined && TERMINAL.includes(state);
+  return state !== undefined && TERMINAL.has(state);
 }
 
 export function RunScreen({
   client,
   workspaceRoots = [],
   availableBackends = []
-}: RunScreenProps) {
+}: Readonly<RunScreenProps>) {
   // Offer the user's configured backends; before they configure any, fall back to the
   // proven-initial backend only (the bridge still enforces its allowlist on launch).
   // Memoized so the offered set has a stable identity for the pin-clearing effect below.
@@ -243,7 +243,7 @@ export function RunScreen({
     }
   };
 
-  const latestUsage = useMemo(() => usage[usage.length - 1], [usage]);
+  const latestUsage = useMemo(() => usage.at(-1), [usage]);
   const needsInput = runState === "needs_input";
   const canFollowUp = isTerminal(runState);
 
@@ -352,12 +352,12 @@ export function RunScreen({
               {artifacts.map((artifact) => (
                 <li key={artifact.id} className={`artifact kind-${artifact.kind}`}>
                   <span className="artifact-kind">{artifact.kind}</span>
-                  {artifact.href !== undefined ? (
+                  {artifact.href === undefined ? (
+                    <span>{artifact.label}</span>
+                  ) : (
                     <a href={artifact.href} target="_blank" rel="noopener noreferrer">
                       {artifact.label}
                     </a>
-                  ) : (
-                    <span>{artifact.label}</span>
                   )}
                 </li>
               ))}

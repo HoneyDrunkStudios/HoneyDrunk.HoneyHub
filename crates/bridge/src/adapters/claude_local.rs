@@ -60,6 +60,53 @@ impl ClaudeLocalAdapter {
             .map_err(|_| BridgeError::new("lock_poisoned", "claude adapter lock was poisoned"))
     }
 
+    /// Off-lock finalization for an exited run: drain the child's final lines (the
+    /// closing `result` line carries exact tokens + USD), carry any tail-discovered
+    /// vendor session id back to the retired slot, then push the terminal transition.
+    fn finalize_exited_run(
+        &self,
+        success: bool,
+        run_id: &str,
+        session_id: &str,
+        retired: Option<Box<ChildRun>>,
+        events: &mut Vec<BridgeEvent>,
+    ) {
+        let mut tail_session_id = None;
+        if let Some(mut child) = retired {
+            for line in child.drain_remaining(std::time::Duration::from_secs(2)) {
+                events.extend(parse_line(
+                    &self.clock,
+                    &line,
+                    run_id,
+                    session_id,
+                    &mut child.backend_session_id,
+                ));
+            }
+            tail_session_id = child.backend_session_id.clone();
+            // `child` drops here, off-lock: reader-thread join (and the one-time tree
+            // kill that forces stdout EOF) happen without the lock held.
+        }
+
+        // Sync any tail-discovered vendor session id into the retired `Done` slot.
+        if tail_session_id.is_some() {
+            if let Ok(mut guard) = self.lock_runs() {
+                if let Some(slot) = guard.get_mut(run_id) {
+                    slot.set_done_backend_session_id(tail_session_id);
+                }
+            }
+        }
+
+        let now = (self.clock)();
+        super::common::push_terminal_status(
+            events,
+            AgentBackend::ClaudeLocal,
+            success,
+            session_id,
+            run_id,
+            &now,
+        );
+    }
+
     fn base_command(&self) -> Command {
         let mut command = Command::new(&self.program);
         command
@@ -162,27 +209,6 @@ fn artifact_kind(label: &str) -> ArtifactKind {
         "log_bundle" => ArtifactKind::LogBundle,
         _ => ArtifactKind::Report,
     }
-}
-
-fn terminal_status(
-    session_id: &str,
-    run_id: &str,
-    now: &str,
-    state: DispatchRunState,
-) -> BridgeEvent {
-    BridgeEvent::status(
-        Uuid::new_v4().to_string(),
-        session_id,
-        run_id,
-        0,
-        now.to_string(),
-        BridgeStatusEvent {
-            state,
-            backend: AgentBackend::ClaudeLocal,
-            repo_hint: None,
-            link: None,
-        },
-    )
 }
 
 /// Parse one JSONL line from the CLI into zero or more `BridgeEvent`s. Unknown or
@@ -390,61 +416,7 @@ impl AgentBackendAdapter for ClaudeLocalAdapter {
         drop(guard);
 
         if let Some(success) = exit {
-            let mut tail_session_id = None;
-            if let Some(mut child) = retired {
-                // Drain the final lines the CLI flushed on exit (the closing `result`
-                // line carries the exact tokens + USD) before the child is dropped.
-                for line in child.drain_remaining(std::time::Duration::from_secs(2)) {
-                    events.extend(parse_line(
-                        &self.clock,
-                        &line,
-                        run_id,
-                        &session_id,
-                        &mut child.backend_session_id,
-                    ));
-                }
-                // The vendor session id is normally captured early (the `system`
-                // event), but if it only arrived in this drained tail, carry it back
-                // to the retired slot below so a later resume still sees it.
-                tail_session_id = child.backend_session_id.clone();
-                // `child` drops here, off-lock: reader-thread join (and the one-time
-                // tree kill that forces stdout EOF) happen without the lock held.
-            }
-
-            // Sync any tail-discovered vendor session id into the retired `Done` slot.
-            if tail_session_id.is_some() {
-                if let Ok(mut guard) = self.lock_runs() {
-                    if let Some(slot) = guard.get_mut(run_id) {
-                        slot.set_done_backend_session_id(tail_session_id);
-                    }
-                }
-            }
-
-            // Emit the terminal transition (exactly once) after the tail usage line,
-            // so ordering is [..usage, finalizing, completed]. A clean exit finalizes
-            // then completes; a non-zero exit fails.
-            let now = (self.clock)();
-            if success {
-                events.push(terminal_status(
-                    &session_id,
-                    run_id,
-                    &now,
-                    DispatchRunState::Finalizing,
-                ));
-                events.push(terminal_status(
-                    &session_id,
-                    run_id,
-                    &now,
-                    DispatchRunState::Completed,
-                ));
-            } else {
-                events.push(terminal_status(
-                    &session_id,
-                    run_id,
-                    &now,
-                    DispatchRunState::Failed,
-                ));
-            }
+            self.finalize_exited_run(success, run_id, &session_id, retired, &mut events);
         }
 
         Ok(events)
@@ -624,6 +596,43 @@ mod tests {
             &mut backend_session
         )
         .is_empty());
+    }
+
+    fn status_states(events: &[BridgeEvent]) -> Vec<DispatchRunState> {
+        events
+            .iter()
+            .filter_map(|event| match &event.payload {
+                crate::wire::BridgeEventPayload::Status { status } => Some(status.state.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn finalize_clean_exit_without_drain_pushes_finalizing_then_completed() {
+        // `retired: None` covers the no-drain path (no live child needed) plus the
+        // shared terminal push for a clean exit.
+        let adapter = ClaudeLocalAdapter::new("claude", None, test_clock());
+        let mut events = Vec::new();
+        adapter.finalize_exited_run(true, "run-1", "session-1", None, &mut events);
+        assert_eq!(
+            status_states(&events),
+            vec![DispatchRunState::Finalizing, DispatchRunState::Completed]
+        );
+        match &events[0].payload {
+            crate::wire::BridgeEventPayload::Status { status } => {
+                assert_eq!(status.backend, AgentBackend::ClaudeLocal);
+            }
+            other => panic!("expected a status payload, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn finalize_failed_exit_without_drain_pushes_failed_only() {
+        let adapter = ClaudeLocalAdapter::new("claude", None, test_clock());
+        let mut events = Vec::new();
+        adapter.finalize_exited_run(false, "run-1", "session-1", None, &mut events);
+        assert_eq!(status_states(&events), vec![DispatchRunState::Failed]);
     }
 
     #[test]

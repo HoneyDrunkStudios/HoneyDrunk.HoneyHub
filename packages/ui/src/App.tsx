@@ -43,12 +43,12 @@ export function App({ client }: AppProps = {}) {
     if (client !== undefined) {
       return;
     }
-    const token = new URLSearchParams(window.location.search).get("token");
+    const token = new URLSearchParams(globalThis.location.search).get("token");
     if (token === null || token.length === 0) {
       return;
     }
     try {
-      setWireClient(WebSocketWireClient.connect(bridgeWsUrl(window.location, token)));
+      setWireClient(WebSocketWireClient.connect(bridgeWsUrl(globalThis.location, token)));
       setConnected(true);
     } catch {
       // Leave the manual connect control available.
