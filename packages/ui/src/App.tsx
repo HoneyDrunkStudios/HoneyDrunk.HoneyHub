@@ -132,7 +132,11 @@ export function App({ client }: AppProps = {}) {
       {/* Both panels stay mounted; visibility is toggled so in-progress state
           survives a tab switch. */}
       <div hidden={view !== "run"}>
-        <RunScreen client={wireClient} workspaceRoots={settings.workspaceRoots} />
+        <RunScreen
+          client={wireClient}
+          workspaceRoots={settings.workspaceRoots}
+          availableBackends={settings.backends}
+        />
       </div>
 
       <div hidden={view !== "spend"}>

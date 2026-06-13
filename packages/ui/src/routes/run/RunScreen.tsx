@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type {
+  AgentBackend,
   DispatchArtifact,
   DispatchMessage,
   DispatchRunState,
@@ -7,14 +8,29 @@ import type {
   UsageSignal
 } from "@honeydrunk/honeyhub-types";
 import { UsageBadge } from "../../components/UsageBadge";
+import { backendLabel } from "../../backends";
+import { recommendBackend } from "../routing/router";
+import { loadRoutingSnapshot } from "../routing/routingSnapshot";
 import { SessionDiagnostics } from "./SessionDiagnostics";
 import type { WireClient } from "../../wire/client";
+
+// Before the user configures any backends, the picker offers only the proven-initial
+// backend (Claude). Codex/Copilot are offered once the user adds them in Bridge
+// settings, so an empty config never implies an unconfigured/uninstalled CLI is
+// launchable. The full configurable set lives in `settingsModel.allBackends` (the
+// Bridge settings UI), not duplicated here.
+const INITIAL_BACKENDS: AgentBackend[] = ["claude.local"];
 
 export interface RunScreenProps {
   client: WireClient;
   /** Allowlisted workspace roots (packet 05). When empty, a free-text root is
       accepted and the bridge enforces the allowlist on launch. */
   workspaceRoots?: string[];
+  /** The user's allowlisted backends. When empty (not yet configured), only the
+      proven-initial backend (Claude) is offered, so an unconfigured cockpit never
+      implies an uninstalled CLI is launchable; when set, the picker and the router
+      consider only these. The bridge still enforces its allowlist on launch. */
+  availableBackends?: AgentBackend[];
 }
 
 const TERMINAL: DispatchRunState[] = ["completed", "failed", "cancelled"];
@@ -23,7 +39,18 @@ function isTerminal(state: DispatchRunState | undefined): boolean {
   return state !== undefined && TERMINAL.includes(state);
 }
 
-export function RunScreen({ client, workspaceRoots = [] }: RunScreenProps) {
+export function RunScreen({
+  client,
+  workspaceRoots = [],
+  availableBackends = []
+}: RunScreenProps) {
+  // Offer the user's configured backends; before they configure any, fall back to the
+  // proven-initial backend only (the bridge still enforces its allowlist on launch).
+  // Memoized so the offered set has a stable identity for the pin-clearing effect below.
+  const routableBackends = useMemo(
+    () => (availableBackends.length > 0 ? availableBackends : INITIAL_BACKENDS),
+    [availableBackends]
+  );
   const [task, setTask] = useState("");
   const [workspaceRoot, setWorkspaceRoot] = useState(workspaceRoots[0] ?? "");
   const [runId, setRunId] = useState<string | undefined>(undefined);
@@ -34,6 +61,40 @@ export function RunScreen({ client, workspaceRoots = [] }: RunScreenProps) {
   const [usage, setUsage] = useState<UsageSignal[]>([]);
   const [reply, setReply] = useState("");
   const [error, setError] = useState<string | undefined>(undefined);
+  // The user's explicit backend pick, set only when they override the suggestion.
+  const [pinnedBackend, setPinnedBackend] = useState<AgentBackend | undefined>(undefined);
+  // The backend the active run actually launched on, frozen at launch so the active
+  // run's diagnostics never drift if the task/config changes mid-session.
+  const [runBackend, setRunBackend] = useState<AgentBackend | undefined>(undefined);
+
+  // The routing snapshot, loaded once through the consumption seam (a fetch-shaped
+  // loader; v1 returns the bundled JSON projection).
+  const snapshot = useMemo(() => loadRoutingSnapshot(), []);
+  // The router's suggestion for the current task (app-tier, ADR-0092 D3). Recomputed
+  // as the task text changes; a pure function of the task + the snapshot.
+  const recommendation = useMemo(
+    () => recommendBackend({ task, availableBackends: routableBackends }, snapshot),
+    [task, routableBackends, snapshot]
+  );
+  // The backend a run will launch on: the user's pick once they override, otherwise
+  // the live suggestion. Derived (not synced via an effect), so it is never stale at
+  // launch and the select reflects it synchronously. A pin that is no longer offered
+  // (the user changed their configured backends) is ignored, falling back to the
+  // suggestion.
+  const backend =
+    pinnedBackend !== undefined && routableBackends.includes(pinnedBackend)
+      ? pinnedBackend
+      : recommendation.backend;
+
+  // Clear a pin that has fallen out of the offered set (the user removed that backend
+  // from their configured allowlist). Masking it in `backend` above is not enough on
+  // its own: without clearing the state, removing the backend and later re-adding it
+  // would silently resurrect the old pin and override the live suggestion.
+  useEffect(() => {
+    if (pinnedBackend !== undefined && !routableBackends.includes(pinnedBackend)) {
+      setPinnedBackend(undefined);
+    }
+  }, [pinnedBackend, routableBackends]);
 
   // Keep the active run id available to the event handler without re-subscribing.
   const runIdRef = useRef<string | undefined>(undefined);
@@ -93,11 +154,15 @@ export function RunScreen({ client, workspaceRoots = [] }: RunScreenProps) {
     setRunId(newRunId);
     setRunState(undefined);
     setStreaming("");
+    // Freeze the backend for this run so the request and the active-run diagnostics
+    // use exactly what launched, even if the task/config changes mid-session.
+    const launchBackend = backend;
+    setRunBackend(launchBackend);
 
     const request: StartRunRequest = {
       session: {
         id: "session-1",
-        backend: "claude.local",
+        backend: launchBackend,
         title: taskText,
         workspaceRoot,
         createdAt: new Date().toISOString(),
@@ -228,7 +293,6 @@ export function RunScreen({ client, workspaceRoots = [] }: RunScreenProps) {
               placeholder="/path/to/allowlisted/workspace"
             />
           )}
-          <span className="run-backend">Backend: claude.local</span>
           <label htmlFor="task">Task</label>
           <textarea
             id="task"
@@ -236,13 +300,37 @@ export function RunScreen({ client, workspaceRoots = [] }: RunScreenProps) {
             onChange={(event) => setTask(event.target.value)}
             rows={3}
           />
+          <label htmlFor="backend">Backend</label>
+          <select
+            id="backend"
+            value={backend}
+            onChange={(event) => {
+              const chosen = event.target.value as AgentBackend;
+              // Re-selecting the suggested backend returns to auto-follow; anything
+              // else pins the choice.
+              setPinnedBackend(chosen === recommendation.backend ? undefined : chosen);
+            }}
+          >
+            {routableBackends.map((option) => (
+              <option key={option} value={option}>
+                {backendLabel(option)}
+                {option === recommendation.backend ? " (suggested)" : ""}
+              </option>
+            ))}
+          </select>
+          <p className="routing-rationale">
+            {recommendation.rationale}
+            {recommendation.snapshotSource === "bundled-default" && (
+              <span className="routing-source"> · rates: bundled</span>
+            )}
+          </p>
           <button type="button" onClick={onStart}>
             Start session
           </button>
         </div>
       ) : (
         <>
-          <SessionDiagnostics backend="claude.local" messages={messages} usage={usage} />
+          <SessionDiagnostics backend={runBackend ?? backend} messages={messages} usage={usage} />
 
           <ol className="transcript" aria-label="Transcript">
             {messages.map((message) => (
