@@ -15,7 +15,7 @@ export interface NotificationListProps {
 // Renders the state-only notifications (status/backend/repo/link). It can only
 // show what the Notification type carries, so no transcript/path content can
 // reach the UI here.
-export function NotificationList({ notifications }: NotificationListProps) {
+export function NotificationList({ notifications }: Readonly<NotificationListProps>) {
   return (
     <section className="notifications" aria-label="Notifications">
       <header className="notifications-header">

@@ -1,7 +1,7 @@
 const CACHE_NAME = "honeyhub-shell-v1";
-const SCOPE_URL = new URL(self.registration.scope);
+const SCOPE_URL = new URL(globalThis.registration.scope);
 const SCOPE_PATH = SCOPE_URL.pathname;
-const scopedUrl = (path) => new URL(path, self.registration.scope).toString();
+const scopedUrl = (path) => new URL(path, globalThis.registration.scope).toString();
 const APP_SHELL = [
   scopedUrl("./"),
   scopedUrl("manifest.webmanifest"),
@@ -12,24 +12,24 @@ const APP_SHELL = [
 ];
 const CACHEABLE_DESTINATIONS = new Set(["script", "style", "worker", "font"]);
 
-self.addEventListener("install", (event) => {
+globalThis.addEventListener("install", (event) => {
   event.waitUntil(caches.open(CACHE_NAME).then((cache) => cache.addAll(APP_SHELL)));
-  self.skipWaiting();
+  globalThis.skipWaiting();
 });
 
-self.addEventListener("activate", (event) => {
+globalThis.addEventListener("activate", (event) => {
   event.waitUntil(
     caches
       .keys()
       .then((keys) => Promise.all(keys.filter((key) => key !== CACHE_NAME).map((key) => caches.delete(key))))
-      .then(() => self.clients.claim())
+      .then(() => globalThis.clients.claim())
   );
 });
 
-self.addEventListener("fetch", (event) => {
+globalThis.addEventListener("fetch", (event) => {
   const url = new URL(event.request.url);
 
-  if (event.request.method !== "GET" || url.origin !== self.location.origin || !url.pathname.startsWith(SCOPE_PATH)) {
+  if (event.request.method !== "GET" || url.origin !== globalThis.location.origin || !url.pathname.startsWith(SCOPE_PATH)) {
     return;
   }
 

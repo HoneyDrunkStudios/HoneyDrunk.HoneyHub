@@ -17,7 +17,7 @@ export interface SpendViewProps {
  * renders grounded dollars separately from estimated activity so a guess can never
  * read as a measured cost.
  */
-export function SpendView({ client, active }: SpendViewProps) {
+export function SpendView({ client, active }: Readonly<SpendViewProps>) {
   const [summary, setSummary] = useState<UsageSummary | undefined>(undefined);
   const [error, setError] = useState<string | undefined>(undefined);
   const [loading, setLoading] = useState(false);
@@ -53,8 +53,6 @@ export function SpendView({ client, active }: SpendViewProps) {
     }
   }, [active, refresh]);
 
-  const headline = summary !== undefined ? groundedHeadline(summary) : undefined;
-
   return (
     <section className="spend" aria-label="Your spend">
       <header className="spend-header">
@@ -73,73 +71,103 @@ export function SpendView({ client, active }: SpendViewProps) {
         </p>
       )}
 
-      {summary === undefined ? (
-        // No summary yet: show the loading copy only while a request is in flight,
-        // so a failed load (error shown above) doesn't read as still-loading.
-        loading ? (
-          <p className="spend-empty">Loading your spend…</p>
-        ) : error === undefined ? (
-          <p className="spend-empty">No spend data yet.</p>
-        ) : null
-      ) : !hasSpend(summary) ? (
-        <p className="spend-empty">No usage recorded yet. Run an agent and it shows up here.</p>
-      ) : (
-        <>
-          <dl className="spend-totals">
-            <div>
-              <dt>Measured spend</dt>
-              <dd className="spend-headline">
-                {headline ?? "no measured spend yet"}
-              </dd>
-            </div>
-            {summary.totalPremiumRequests > 0 && (
-              <div>
-                <dt>Premium requests</dt>
-                <dd>{summary.totalPremiumRequests.toLocaleString()}</dd>
-              </div>
-            )}
-            <div>
-              <dt>Activity</dt>
-              <dd>
-                {summary.totalTurns.toLocaleString()} turn
-                {summary.totalTurns === 1 ? "" : "s"} ·{" "}
-                {summary.sessionCount.toLocaleString()} session
-                {summary.sessionCount === 1 ? "" : "s"}
-              </dd>
-            </div>
-          </dl>
-
-          <table className="spend-table">
-            <caption className="spend-table-caption">Per backend</caption>
-            <thead>
-              <tr>
-                <th scope="col">Backend</th>
-                <th scope="col">Cost</th>
-                <th scope="col">Tokens</th>
-                <th scope="col">Turns</th>
-              </tr>
-            </thead>
-            <tbody>
-              {summary.rollups.map((rollup) => (
-                <tr key={`${rollup.backend}-${rollup.fidelity}`}>
-                  <th scope="row">
-                    {backendLabel(rollup.backend)}
-                    <span className="fidelity-tag"> {fidelityNote(rollup.fidelity)}</span>
-                  </th>
-                  <td>{rollupCost(rollup)}</td>
-                  <td>{rollup.totalTokens.toLocaleString()}</td>
-                  <td>{rollup.turnCount.toLocaleString()}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-          <p className="spend-note">
-            Measured spend counts Claude (exact) and Codex (rate-derived) dollars only.
-            Copilot bills premium requests, so its activity is shown separately and never
-            folded into the dollar figure.
-          </p>
-        </>
-      )}
+      <SpendBody summary={summary} loading={loading} error={error} />
     </section>
+  );
+}
+
+interface SpendBodyProps {
+  summary: UsageSummary | undefined;
+  loading: boolean;
+  error: string | undefined;
+}
+
+/** The body of the spend view: loading/empty placeholders until a summary lands,
+    then either the empty-device copy or the full per-backend breakdown. Split out
+    so the screen-level component stays flat. */
+function SpendBody({ summary, loading, error }: Readonly<SpendBodyProps>) {
+  if (summary === undefined) {
+    // No summary yet: show the loading copy only while a request is in flight, so a
+    // failed load (error shown above) doesn't read as still-loading.
+    if (loading) {
+      return <p className="spend-empty">Loading your spend…</p>;
+    }
+    if (error === undefined) {
+      return <p className="spend-empty">No spend data yet.</p>;
+    }
+    return null;
+  }
+
+  if (hasSpend(summary)) {
+    return <SpendSummary summary={summary} />;
+  }
+
+  return (
+    <p className="spend-empty">No usage recorded yet. Run an agent and it shows up here.</p>
+  );
+}
+
+/** The full breakdown shown once a non-empty summary is in hand. */
+function SpendSummary({ summary }: Readonly<{ summary: UsageSummary }>) {
+  const headline = groundedHeadline(summary);
+  const turnSuffix = summary.totalTurns === 1 ? "" : "s";
+  const sessionSuffix = summary.sessionCount === 1 ? "" : "s";
+
+  return (
+    <>
+      <dl className="spend-totals">
+        <div>
+          <dt>Measured spend</dt>
+          <dd className="spend-headline">
+            {headline ?? "no measured spend yet"}
+          </dd>
+        </div>
+        {summary.totalPremiumRequests > 0 && (
+          <div>
+            <dt>Premium requests</dt>
+            <dd>{summary.totalPremiumRequests.toLocaleString()}</dd>
+          </div>
+        )}
+        <div>
+          <dt>Activity</dt>
+          <dd>
+            {summary.totalTurns.toLocaleString()} turn
+            {turnSuffix} ·{" "}
+            {summary.sessionCount.toLocaleString()} session
+            {sessionSuffix}
+          </dd>
+        </div>
+      </dl>
+
+      <table className="spend-table">
+        <caption className="spend-table-caption">Per backend</caption>
+        <thead>
+          <tr>
+            <th scope="col">Backend</th>
+            <th scope="col">Cost</th>
+            <th scope="col">Tokens</th>
+            <th scope="col">Turns</th>
+          </tr>
+        </thead>
+        <tbody>
+          {summary.rollups.map((rollup) => (
+            <tr key={`${rollup.backend}-${rollup.fidelity}`}>
+              <th scope="row">
+                {backendLabel(rollup.backend)}
+                <span className="fidelity-tag"> {fidelityNote(rollup.fidelity)}</span>
+              </th>
+              <td>{rollupCost(rollup)}</td>
+              <td>{rollup.totalTokens.toLocaleString()}</td>
+              <td>{rollup.turnCount.toLocaleString()}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      <p className="spend-note">
+        Measured spend counts Claude (exact) and Codex (rate-derived) dollars only.
+        Copilot bills premium requests, so its activity is shown separately and never
+        folded into the dollar figure.
+      </p>
+    </>
   );
 }

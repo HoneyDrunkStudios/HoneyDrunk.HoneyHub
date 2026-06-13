@@ -22,14 +22,14 @@ interface MockState {
 }
 
 export class MockWireClient implements WireClient {
-  private handlers = new Set<WireEventHandler>();
+  private readonly handlers = new Set<WireEventHandler>();
   private sequence = 0;
-  private runs = new Map<string, MockState>();
-  private createdAt = "2026-06-07T12:00:00.000Z";
+  private readonly runs = new Map<string, MockState>();
+  private readonly createdAt = "2026-06-07T12:00:00.000Z";
   // Accumulate the usage the demo emits so `requestUsageSummary` can roll it up the
   // same way the real host does (mirroring `UsageSummary::from_signals`).
-  private usageSignals: UsageSignal[] = [];
-  private sessionIds = new Set<string>();
+  private readonly usageSignals: UsageSignal[] = [];
+  private readonly sessionIds = new Set<string>();
 
   subscribe(handler: WireEventHandler): () => void {
     this.handlers.add(handler);

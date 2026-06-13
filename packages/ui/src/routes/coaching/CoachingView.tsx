@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
+import type { ReactElement } from "react";
 import type { PolicyHint } from "@honeydrunk/honeyhub-types";
 import type { WireClient } from "../../wire/client";
 import { hintTitle, severityLabel, sortHints } from "./coachingModel";
@@ -18,7 +19,7 @@ export interface CoachingViewProps {
  * when the tab becomes active, listens for the `coaching_hints` event, and renders
  * them severity-first.
  */
-export function CoachingView({ client, active }: CoachingViewProps) {
+export function CoachingView({ client, active }: Readonly<CoachingViewProps>) {
   const [hints, setHints] = useState<PolicyHint[] | undefined>(undefined);
   const [error, setError] = useState<string | undefined>(undefined);
   const [loading, setLoading] = useState(false);
@@ -53,6 +54,13 @@ export function CoachingView({ client, active }: CoachingViewProps) {
 
   const ordered = hints === undefined ? undefined : sortHints(hints);
 
+  let placeholder: ReactElement | null = null;
+  if (loading) {
+    placeholder = <p className="coaching-empty">Loading coaching…</p>;
+  } else if (error === undefined) {
+    placeholder = <p className="coaching-empty">No coaching yet.</p>;
+  }
+
   return (
     <section className="coaching" aria-label="Coaching">
       <header className="coaching-header">
@@ -72,11 +80,7 @@ export function CoachingView({ client, active }: CoachingViewProps) {
       )}
 
       {ordered === undefined ? (
-        loading ? (
-          <p className="coaching-empty">Loading coaching…</p>
-        ) : error === undefined ? (
-          <p className="coaching-empty">No coaching yet.</p>
-        ) : null
+        placeholder
       ) : ordered.length === 0 ? (
         <p className="coaching-empty">No advisories right now. Your sessions look healthy.</p>
       ) : (

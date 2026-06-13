@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
+import type { ReactElement } from "react";
 import type { AgentDefinition } from "@honeydrunk/honeyhub-types";
 import type { WireClient } from "../../wire/client";
 import { backendLabel } from "../../backends";
@@ -22,7 +23,7 @@ export interface AgentsViewProps {
  * It asks the host to discover when the tab becomes active and listens for the
  * `agent_catalog` event.
  */
-export function AgentsView({ client, active }: AgentsViewProps) {
+export function AgentsView({ client, active }: Readonly<AgentsViewProps>) {
   const [agents, setAgents] = useState<AgentDefinition[] | undefined>(undefined);
   const [error, setError] = useState<string | undefined>(undefined);
   const [loading, setLoading] = useState(false);
@@ -57,6 +58,13 @@ export function AgentsView({ client, active }: AgentsViewProps) {
 
   const ordered = agents === undefined ? undefined : sortAgents(agents);
 
+  let placeholder: ReactElement | null = null;
+  if (loading) {
+    placeholder = <p className="agents-empty">Discovering agents…</p>;
+  } else if (error === undefined) {
+    placeholder = <p className="agents-empty">No agents discovered yet.</p>;
+  }
+
   return (
     <section className="agents" aria-label="Agents">
       <header className="agents-header">
@@ -78,11 +86,7 @@ export function AgentsView({ client, active }: AgentsViewProps) {
       )}
 
       {ordered === undefined ? (
-        loading ? (
-          <p className="agents-empty">Discovering agents…</p>
-        ) : error === undefined ? (
-          <p className="agents-empty">No agents discovered yet.</p>
-        ) : null
+        placeholder
       ) : ordered.length === 0 ? (
         <p className="agents-empty">
           No agent definitions found. Add one under <code>.claude/agents/</code> or{" "}

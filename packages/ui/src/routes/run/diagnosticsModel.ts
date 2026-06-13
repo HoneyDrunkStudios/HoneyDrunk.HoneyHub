@@ -87,7 +87,7 @@ export function computeSessionDiagnostics(
   input: SessionDiagnosticsInput
 ): SessionDiagnostics {
   const { backend, messages, usage } = input;
-  const latest = usage[usage.length - 1];
+  const latest = usage.at(-1);
 
   const sessionTokens = usage.reduce((sum, signal) => sum + (signalTokens(signal) ?? 0), 0);
   const usdSignals = usage.filter((signal) => signal.totalUsd !== undefined);
@@ -97,7 +97,7 @@ export function computeSessionDiagnostics(
       : undefined;
 
   const span = elapsedMs(messages);
-  const minutes = span !== undefined ? span / 60_000 : undefined;
+  const minutes = span === undefined ? undefined : span / 60_000;
 
   const recommendations: string[] = [];
   if (sessionTokens >= LONG_SESSION_TOKENS) {

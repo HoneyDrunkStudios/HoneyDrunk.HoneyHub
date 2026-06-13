@@ -5,9 +5,9 @@ import { formatUsd } from "../usageFormat";
 // and never render an estimate as an exact number. The fidelity-aware USD prefix
 // lives in `usageFormat` (shared with the diagnostics panel); the always-visible
 // fidelity tag below makes the band explicit.
-export function UsageBadge({ usage }: { usage: UsageSignal }) {
+export function UsageBadge({ usage }: Readonly<{ usage: UsageSignal }>) {
   const usd =
-    usage.totalUsd !== undefined ? formatUsd(usage.totalUsd, usage.fidelity) : undefined;
+    usage.totalUsd === undefined ? undefined : formatUsd(usage.totalUsd, usage.fidelity);
 
   return (
     <span

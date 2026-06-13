@@ -21,7 +21,11 @@ function formatTokens(tokens: number | undefined): string {
   return tokens === undefined ? "—" : tokens.toLocaleString();
 }
 
-export function SessionDiagnostics({ backend, messages, usage }: SessionDiagnosticsProps) {
+export function SessionDiagnostics({
+  backend,
+  messages,
+  usage
+}: Readonly<SessionDiagnosticsProps>) {
   const diagnostics = computeSessionDiagnostics({ backend, messages, usage });
   const elapsedMin =
     diagnostics.elapsedMs === undefined

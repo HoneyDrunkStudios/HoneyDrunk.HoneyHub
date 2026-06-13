@@ -444,93 +444,7 @@ where
                 "stream event session id does not match managed run session",
             ));
         }
-
-        match &event.payload {
-            BridgeEventPayload::Message { message } => {
-                if message.run_id != event.run_id || message.session_id != event.session_id {
-                    return Err(BridgeError::new(
-                        "event_message_mismatch",
-                        "stream message ids do not match containing event",
-                    ));
-                }
-            }
-            BridgeEventPayload::Control { event: control } => {
-                if control.run_id != event.run_id || control.session_id != event.session_id {
-                    return Err(BridgeError::new(
-                        "event_control_mismatch",
-                        "stream control event ids do not match containing event",
-                    ));
-                }
-            }
-            BridgeEventPayload::Usage { signal } => {
-                if signal.run_id != event.run_id || signal.session_id != event.session_id {
-                    return Err(BridgeError::new(
-                        "event_usage_mismatch",
-                        "stream usage signal ids do not match containing event",
-                    ));
-                }
-                if signal.backend != self.adapter.backend() {
-                    return Err(BridgeError::new(
-                        "event_backend_mismatch",
-                        "stream usage backend does not match bridge adapter",
-                    ));
-                }
-            }
-            BridgeEventPayload::PolicyHint { hint } => {
-                if hint.session_id != event.session_id
-                    || hint
-                        .run_id
-                        .as_ref()
-                        .is_some_and(|run_id| run_id != &event.run_id)
-                {
-                    return Err(BridgeError::new(
-                        "event_policy_hint_mismatch",
-                        "stream policy hint ids do not match containing event",
-                    ));
-                }
-            }
-            BridgeEventPayload::Status { status } => {
-                if status.backend != self.adapter.backend() {
-                    return Err(BridgeError::new(
-                        "event_backend_mismatch",
-                        "stream status backend does not match bridge adapter",
-                    ));
-                }
-            }
-            BridgeEventPayload::Artifact { artifact } => {
-                if artifact.run_id != event.run_id || artifact.session_id != event.session_id {
-                    return Err(BridgeError::new(
-                        "event_artifact_mismatch",
-                        "stream artifact ids do not match containing event",
-                    ));
-                }
-            }
-            BridgeEventPayload::UsageSummary { .. } => {
-                // A usage summary is a device-wide, host-synthesized response to a
-                // client query — never an event an adapter streams from a run. Seeing
-                // one here means a backend emitted a frame it must not.
-                return Err(BridgeError::new(
-                    "event_unexpected_usage_summary",
-                    "a backend stream must not emit a device-wide usage summary",
-                ));
-            }
-            BridgeEventPayload::CoachingHints { .. } => {
-                // Likewise device-wide and host-synthesized — never adapter-streamed.
-                return Err(BridgeError::new(
-                    "event_unexpected_coaching_hints",
-                    "a backend stream must not emit device-wide coaching hints",
-                ));
-            }
-            BridgeEventPayload::AgentCatalog { .. } => {
-                // Device-wide, host-synthesized discovery result — never streamed.
-                return Err(BridgeError::new(
-                    "event_unexpected_agent_catalog",
-                    "a backend stream must not emit a device-wide agent catalog",
-                ));
-            }
-        }
-
-        Ok(())
+        validate_stream_payload(&event.payload, event, self.adapter.backend())
     }
 
     pub fn run(&self, run_id: &str) -> Result<&ManagedRun, BridgeError> {
@@ -868,6 +782,106 @@ where
             Ok(())
         }
     }
+}
+
+/// True when a payload's own run/session ids match its containing event.
+fn ids_match(payload_run_id: &str, payload_session_id: &str, event: &BridgeEvent) -> bool {
+    payload_run_id == event.run_id && payload_session_id == event.session_id
+}
+
+/// Validate one stream payload against its containing event and the bridge adapter's
+/// backend. The device-wide, host-synthesized payloads are never adapter-streamed and
+/// are rejected outright.
+fn validate_stream_payload(
+    payload: &BridgeEventPayload,
+    event: &BridgeEvent,
+    backend: AgentBackend,
+) -> Result<(), BridgeError> {
+    match payload {
+        BridgeEventPayload::Message { message } => {
+            if !ids_match(&message.run_id, &message.session_id, event) {
+                return Err(BridgeError::new(
+                    "event_message_mismatch",
+                    "stream message ids do not match containing event",
+                ));
+            }
+        }
+        BridgeEventPayload::Control { event: control } => {
+            if !ids_match(&control.run_id, &control.session_id, event) {
+                return Err(BridgeError::new(
+                    "event_control_mismatch",
+                    "stream control event ids do not match containing event",
+                ));
+            }
+        }
+        BridgeEventPayload::Usage { signal } => {
+            if !ids_match(&signal.run_id, &signal.session_id, event) {
+                return Err(BridgeError::new(
+                    "event_usage_mismatch",
+                    "stream usage signal ids do not match containing event",
+                ));
+            }
+            if signal.backend != backend {
+                return Err(BridgeError::new(
+                    "event_backend_mismatch",
+                    "stream usage backend does not match bridge adapter",
+                ));
+            }
+        }
+        BridgeEventPayload::PolicyHint { hint } => {
+            let run_mismatch = hint
+                .run_id
+                .as_ref()
+                .is_some_and(|run_id| run_id != &event.run_id);
+            if hint.session_id != event.session_id || run_mismatch {
+                return Err(BridgeError::new(
+                    "event_policy_hint_mismatch",
+                    "stream policy hint ids do not match containing event",
+                ));
+            }
+        }
+        BridgeEventPayload::Status { status } => {
+            if status.backend != backend {
+                return Err(BridgeError::new(
+                    "event_backend_mismatch",
+                    "stream status backend does not match bridge adapter",
+                ));
+            }
+        }
+        BridgeEventPayload::Artifact { artifact } => {
+            if !ids_match(&artifact.run_id, &artifact.session_id, event) {
+                return Err(BridgeError::new(
+                    "event_artifact_mismatch",
+                    "stream artifact ids do not match containing event",
+                ));
+            }
+        }
+        BridgeEventPayload::UsageSummary { .. } => {
+            // A usage summary is a device-wide, host-synthesized response to a client
+            // query — never an event an adapter streams from a run. Seeing one here
+            // means a backend emitted a frame it must not.
+            return Err(BridgeError::new(
+                "event_unexpected_usage_summary",
+                "a backend stream must not emit a device-wide usage summary",
+            ));
+        }
+        BridgeEventPayload::CoachingHints { .. } => {
+            // Likewise device-wide and host-synthesized — never adapter-streamed.
+            return Err(BridgeError::new(
+                "event_unexpected_coaching_hints",
+                "a backend stream must not emit device-wide coaching hints",
+            ));
+        }
+        BridgeEventPayload::AgentCatalog { .. } => {
+            // Device-wide, host-synthesized discovery result — never streamed.
+            return Err(BridgeError::new(
+                "event_unexpected_agent_catalog",
+                "a backend stream must not emit a device-wide agent catalog",
+            ));
+        }
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]

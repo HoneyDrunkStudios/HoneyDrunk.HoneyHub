@@ -60,6 +60,46 @@ impl ClaudeLocalAdapter {
             .map_err(|_| BridgeError::new("lock_poisoned", "claude adapter lock was poisoned"))
     }
 
+    /// Off-lock finalization for an exited run: drain the child's final lines (the
+    /// closing `result` line carries exact tokens + USD), carry any tail-discovered
+    /// vendor session id back to the retired slot, then push the terminal transition.
+    fn finalize_exited_run(
+        &self,
+        success: bool,
+        run_id: &str,
+        session_id: &str,
+        retired: Option<Box<ChildRun>>,
+        events: &mut Vec<BridgeEvent>,
+    ) {
+        let mut tail_session_id = None;
+        if let Some(mut child) = retired {
+            for line in child.drain_remaining(std::time::Duration::from_secs(2)) {
+                events.extend(parse_line(
+                    &self.clock,
+                    &line,
+                    run_id,
+                    session_id,
+                    &mut child.backend_session_id,
+                ));
+            }
+            tail_session_id = child.backend_session_id.clone();
+            // `child` drops here, off-lock: reader-thread join (and the one-time tree
+            // kill that forces stdout EOF) happen without the lock held.
+        }
+
+        // Sync any tail-discovered vendor session id into the retired `Done` slot.
+        if tail_session_id.is_some() {
+            if let Ok(mut guard) = self.lock_runs() {
+                if let Some(slot) = guard.get_mut(run_id) {
+                    slot.set_done_backend_session_id(tail_session_id);
+                }
+            }
+        }
+
+        let now = (self.clock)();
+        push_terminal_status(events, success, session_id, run_id, &now);
+    }
+
     fn base_command(&self) -> Command {
         let mut command = Command::new(&self.program);
         command
@@ -183,6 +223,39 @@ fn terminal_status(
             link: None,
         },
     )
+}
+
+/// Push the terminal transition events (exactly once) after the tail usage line, so
+/// ordering is `[..usage, finalizing, completed]` on a clean exit or `[..usage, failed]`
+/// on a non-zero exit.
+fn push_terminal_status(
+    events: &mut Vec<BridgeEvent>,
+    success: bool,
+    session_id: &str,
+    run_id: &str,
+    now: &str,
+) {
+    if success {
+        events.push(terminal_status(
+            session_id,
+            run_id,
+            now,
+            DispatchRunState::Finalizing,
+        ));
+        events.push(terminal_status(
+            session_id,
+            run_id,
+            now,
+            DispatchRunState::Completed,
+        ));
+    } else {
+        events.push(terminal_status(
+            session_id,
+            run_id,
+            now,
+            DispatchRunState::Failed,
+        ));
+    }
 }
 
 /// Parse one JSONL line from the CLI into zero or more `BridgeEvent`s. Unknown or
@@ -390,61 +463,7 @@ impl AgentBackendAdapter for ClaudeLocalAdapter {
         drop(guard);
 
         if let Some(success) = exit {
-            let mut tail_session_id = None;
-            if let Some(mut child) = retired {
-                // Drain the final lines the CLI flushed on exit (the closing `result`
-                // line carries the exact tokens + USD) before the child is dropped.
-                for line in child.drain_remaining(std::time::Duration::from_secs(2)) {
-                    events.extend(parse_line(
-                        &self.clock,
-                        &line,
-                        run_id,
-                        &session_id,
-                        &mut child.backend_session_id,
-                    ));
-                }
-                // The vendor session id is normally captured early (the `system`
-                // event), but if it only arrived in this drained tail, carry it back
-                // to the retired slot below so a later resume still sees it.
-                tail_session_id = child.backend_session_id.clone();
-                // `child` drops here, off-lock: reader-thread join (and the one-time
-                // tree kill that forces stdout EOF) happen without the lock held.
-            }
-
-            // Sync any tail-discovered vendor session id into the retired `Done` slot.
-            if tail_session_id.is_some() {
-                if let Ok(mut guard) = self.lock_runs() {
-                    if let Some(slot) = guard.get_mut(run_id) {
-                        slot.set_done_backend_session_id(tail_session_id);
-                    }
-                }
-            }
-
-            // Emit the terminal transition (exactly once) after the tail usage line,
-            // so ordering is [..usage, finalizing, completed]. A clean exit finalizes
-            // then completes; a non-zero exit fails.
-            let now = (self.clock)();
-            if success {
-                events.push(terminal_status(
-                    &session_id,
-                    run_id,
-                    &now,
-                    DispatchRunState::Finalizing,
-                ));
-                events.push(terminal_status(
-                    &session_id,
-                    run_id,
-                    &now,
-                    DispatchRunState::Completed,
-                ));
-            } else {
-                events.push(terminal_status(
-                    &session_id,
-                    run_id,
-                    &now,
-                    DispatchRunState::Failed,
-                ));
-            }
+            self.finalize_exited_run(success, run_id, &session_id, retired, &mut events);
         }
 
         Ok(events)

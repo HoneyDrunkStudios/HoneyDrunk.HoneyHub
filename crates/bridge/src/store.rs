@@ -77,6 +77,24 @@ struct StoredSession {
     runs: BTreeMap<String, StoredRun>,
 }
 
+/// A session is prunable when it is unpinned, has runs, all of them are terminal, and
+/// its newest completion is strictly before `cutoff`. RFC3339 UTC strings sort
+/// lexicographically in chronological order.
+fn is_prunable(stored: &StoredSession, cutoff: &str) -> bool {
+    if stored.pinned || stored.runs.is_empty() {
+        return false;
+    }
+    if !stored.runs.values().all(|run| run.run.state.is_terminal()) {
+        return false;
+    }
+    stored
+        .runs
+        .values()
+        .filter_map(|run| run.run.completed_at.as_deref())
+        .max()
+        .is_some_and(|newest| newest < cutoff)
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct StoreData {
@@ -348,53 +366,46 @@ impl LocalStore {
     /// the host computes `now - retention_window`). Durable records survive — only
     /// the transcript bodies are removed. Returns the number of sessions pruned.
     pub fn prune(&mut self, cutoff: &str) -> Result<usize, StoreError> {
-        let mut prunable: Vec<String> = Vec::new();
-        for (session_id, stored) in &self.data.sessions {
-            if stored.pinned || stored.runs.is_empty() {
-                continue;
-            }
-            let all_terminal = stored.runs.values().all(|run| run.run.state.is_terminal());
-            if !all_terminal {
-                continue;
-            }
-            let newest_completion = stored
-                .runs
-                .values()
-                .filter_map(|run| run.run.completed_at.as_deref())
-                .max();
-            // RFC3339 UTC strings sort lexicographically in chronological order.
-            if let Some(newest) = newest_completion {
-                if newest < cutoff {
-                    prunable.push(session_id.clone());
-                }
-            }
-        }
+        let prunable: Vec<String> = self
+            .data
+            .sessions
+            .iter()
+            .filter(|(_, stored)| is_prunable(stored, cutoff))
+            .map(|(session_id, _)| session_id.clone())
+            .collect();
 
         for session_id in &prunable {
-            let run_ids: Vec<String> = self
-                .data
-                .sessions
-                .get(session_id)
-                .map(|stored| stored.runs.keys().cloned().collect())
-                .unwrap_or_default();
-            for run_id in run_ids {
-                let path = self.transcript_path(&run_id);
-                if path.exists() {
-                    fs::remove_file(&path)
-                        .map_err(|error| StoreError::io("prune transcript", error))?;
-                }
-                if let Some(stored) = self.data.sessions.get_mut(session_id) {
-                    if let Some(run) = stored.runs.get_mut(&run_id) {
-                        run.transcript_pruned = true;
-                    }
-                }
-            }
+            self.prune_session(session_id)?;
         }
 
         if !prunable.is_empty() {
             self.save()?;
         }
         Ok(prunable.len())
+    }
+
+    /// Remove the transcript files for every run of one session and mark each run's
+    /// body as pruned. Durable records survive — only the transcript bodies go.
+    fn prune_session(&mut self, session_id: &str) -> Result<(), StoreError> {
+        let run_ids: Vec<String> = self
+            .data
+            .sessions
+            .get(session_id)
+            .map(|stored| stored.runs.keys().cloned().collect())
+            .unwrap_or_default();
+        for run_id in run_ids {
+            let path = self.transcript_path(&run_id);
+            if path.exists() {
+                fs::remove_file(&path)
+                    .map_err(|error| StoreError::io("prune transcript", error))?;
+            }
+            if let Some(stored) = self.data.sessions.get_mut(session_id) {
+                if let Some(run) = stored.runs.get_mut(&run_id) {
+                    run.transcript_pruned = true;
+                }
+            }
+        }
+        Ok(())
     }
 
     pub fn transcript_pruned(&self, session_id: &str, run_id: &str) -> bool {
