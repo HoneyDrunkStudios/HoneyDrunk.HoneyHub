@@ -1,5 +1,9 @@
 # Changelog
 
+## [0.15.0] - 2026-06-09
+
+- Reworked the `AgentDefinition` mirror to the bridge's new **one-entry-per-name, multi-backend** model: an agent is now `{ id, name, backends }` where each `AgentBackendBinding` (`backend`, `description`, `model?`, `sourcePath`, `scope`, `workspaceLabel`) carries that backend's winning metadata. Added the `AgentScope` type (`"project" | "global"`). The same agent name defined on more than one backend is a single entry listing all of them. No absolute path crosses the wire (`id` is an opaque hash of the name; paths are relative; a global binding's `workspaceLabel` is the constant `"global"`).
+
 ## [0.14.0] - 2026-06-08
 
 - Added the `AgentDefinition` type and the `discover_agents` `ClientCommand` (with an optional `workspaceRoot`) + the `agent_catalog` `BridgeEventPayload`, mirroring the bridge's agent-discovery surface.

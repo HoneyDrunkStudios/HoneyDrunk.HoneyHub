@@ -1,5 +1,9 @@
 # Changelog
 
+## [0.14.0] - 2026-06-09
+
+- Workspace version alignment for the agent-discovery rework release (no shell behavior change).
+
 ## [0.10.0] - 2026-06-08
 
 - Updated workspace package version alignment for the session-diagnostics release.

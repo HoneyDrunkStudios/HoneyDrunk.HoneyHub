@@ -1,5 +1,9 @@
 # Changelog
 
+## [0.21.0] - 2026-06-09
+
+- Added the `HONEYHUB_GLOBAL_AGENTS` env opt-in: when set to a non-empty value the host enables user-global agent discovery (`~/.claude/agents`, `~/.copilot/agents`) via `BridgeRuntime::with_global_home(user_home())`. Off by default — that scope reads outside the workspace allowlist (the user's own home config), so it is only scanned when the operator explicitly enables it (ADR-0090).
+
 ## [0.17.0] - 2026-06-08
 
 - Version alignment for the `copilot.local` adapter (no host code change).

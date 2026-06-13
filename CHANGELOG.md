@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.14.0] - 2026-06-09
+
+- Agent discovery (§3f-bis) rework (operator-decided): Copilot agents now come from **`.copilot/agents/*.md`** (its real convention, replacing the `.github/*agent*` guess); the cockpit can also scan the **user-global** folders `~/.claude/agents` and `~/.copilot/agents` — **opt-in, off by default** (set `HONEYHUB_GLOBAL_AGENTS`), since that reads the user's own home config outside the workspace allowlist (ADR-0090); when enabled it is read once, metadata-only, with symlink containment. Definitions dedupe by **name** into **one entry runnable on the set of backends** that define it (a project definition shadows a global one within a backend). The Agents tab now shows one row per agent name with a badge per backend. Everything stays read-only and local; no prompt body or absolute path leaves the device. Discovery is filtered to the backends the runtime can actually launch (its adapter's backend, and only when allowlisted), so it never advertises an agent that `start` would reject.
+- Bumped the bridge crate to 0.21.0 and the TS packages (types 0.15.0; ui/shell/root 0.14.0).
+
 ## [0.13.0] - 2026-06-08
 
 - Added **agent discovery** (packet 09 §3f-bis): the cockpit auto-discovers the user's own agent definitions — every `.claude/agents/*.md` (Claude) and `.github/` files named `*agent*` (Copilot) — from within the workspace allowlist, read-only, and surfaces them in a new **Agents** tab grouped by backend. The bridge does the discovery (`BridgeRuntime::discover_agents`, allowlist-gated) and answers a new `discover_agents` wire query. Codex has no folder-of-agents convention, so it is not scanned. Metadata only; nothing is read outside the allowlist and no prompt body or absolute path leaves the device.

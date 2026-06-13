@@ -1,5 +1,9 @@
 # Changelog
 
+## [0.14.0] - 2026-06-09
+
+- Reworked the **Agents** tab for the new one-entry-per-name model: instead of grouping by backend, each discovered agent is now **one row** showing a **badge per backend** it can run on, with that backend's own metadata (model, description, scope, workspace label, relative source path). The scope copy now names both `.claude/agents/` and `.copilot/agents/` and explains that discovery spans both allowlisted workspaces and the user-global config. Replaced `groupAgents` with `sortAgents`/`sortBackends` (pure ordering, cockpit backend order, unknown backends last). Updated for the `AgentDefinition { id, name, backends }` shape (types 0.15.0). Read-only, no absolute path rendered, host queried only while active — unchanged.
+
 ## [0.13.0] - 2026-06-08
 
 - Added an **Agents** tab: the user's own agent definitions, auto-discovered from `.claude/agents/` (Claude) and `.github/` files named `*agent*` (Copilot) within the allowlisted workspaces, listed grouped by backend with name, description, model, and the workspace-relative source path. Read-only and local; an empty state guides adding one; a generic error never leaks raw host text; queries the host only while active. Added `discoverAgents` to the `WireClient` seam (WebSocket + offline mock). Extracted the shared `backendLabel` helper so the spend/agents surfaces share one backend-naming source.

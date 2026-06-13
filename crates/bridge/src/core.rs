@@ -1,5 +1,5 @@
 use crate::adapter::{AgentBackend, AgentBackendAdapter, BridgeError, RunHandle, StartRunRequest};
-use crate::agents::{discover_agents_in_root, AgentDefinition};
+use crate::agents::{discover_raw_global_in, discover_raw_in_root, merge_agents, AgentDefinition};
 use crate::artifact::DispatchArtifact;
 use crate::coaching::{coach, CoachingSnapshot};
 use crate::pairing::{BackendAllowlist, WorkspaceAllowlist};
@@ -37,6 +37,11 @@ where
     adapter: A,
     workspace_allowlist: WorkspaceAllowlist,
     backend_allowlist: BackendAllowlist,
+    /// Parent of the user-global agent folders (`~/.claude/agents`, `~/.copilot/agents`).
+    /// **`None` by default** — global discovery is opt-in, since that path is outside the
+    /// workspace allowlist (ADR-0090); the host enables it explicitly via
+    /// [`BridgeRuntime::with_global_home`]. Injectable so tests pin it to a temp dir.
+    global_home: Option<PathBuf>,
     runs: HashMap<String, ManagedRun>,
 }
 
@@ -53,8 +58,23 @@ where
             adapter,
             workspace_allowlist,
             backend_allowlist,
+            // Global discovery is **opt-in, off by default**: reading the user-global
+            // `~/.claude/agents` / `~/.copilot/agents` is outside the workspace allowlist,
+            // so the runtime does not do it unless the host explicitly enables it via
+            // `with_global_home` (ADR-0090 keeps discovery within configured roots).
+            global_home: None,
             runs: HashMap::new(),
         }
+    }
+
+    /// Opt **in** to user-global agent discovery by setting the home directory whose
+    /// `~/.claude/agents` / `~/.copilot/agents` folders should be scanned (resolve it
+    /// dependency-free with [`user_home`]). This reads outside the workspace allowlist —
+    /// the user's own home config — so it is deliberately not enabled by default; the host
+    /// turns it on explicitly. `None` (the default) disables it. Tests pin it to a temp dir.
+    pub fn with_global_home(mut self, global_home: Option<PathBuf>) -> Self {
+        self.global_home = global_home;
+        self
     }
 
     pub fn start(
@@ -523,31 +543,56 @@ where
     /// within the workspace allowlist. With `Some(root)` it scans that one root (which
     /// **must** be allowlisted — discovery never reads outside the allowlist); with
     /// `None` it scans **every** allowlisted root. Best-effort per root (a missing
-    /// `.claude/agents`/`.github` folder is simply empty).
+    /// `.claude/agents`/`.copilot/agents` folder is simply empty).
     ///
-    /// Results are filtered to the **backend allowlist**: an agent is only surfaced as
-    /// a runnable dispatch target if its backend is one the bridge is actually allowed
-    /// to launch (the same gate `start` enforces), so the catalog never advertises an
-    /// agent that could not be run.
+    /// When (and only when) user-global discovery is **opted in** via
+    /// [`Self::with_global_home`], it also scans the **user-global** folders
+    /// (`~/.claude/agents`, `~/.copilot/agents`) once — the user's own home config, read
+    /// outside the workspace allowlist by explicit configuration (off by default). A
+    /// **project** definition shadows a **global** one within a backend; definitions dedupe
+    /// by **name** into one entry runnable on the set of backends that define it (see
+    /// [`merge_agents`]).
+    ///
+    /// Results are filtered before merging to the backends this runtime can **actually
+    /// launch** — its single adapter's backend, and only when that backend is allowlisted
+    /// (both gates `start` enforces). A backend is dropped from an entry if it is not
+    /// launchable, and an entry is dropped only if no launchable backend remains — so the
+    /// catalog never advertises an agent that could not be run.
     pub fn discover_agents(
         &self,
         workspace_root: Option<&str>,
     ) -> Result<Vec<AgentDefinition>, BridgeError> {
-        let mut discovered = match workspace_root {
+        let mut raws = match workspace_root {
             Some(root) => {
                 self.ensure_workspace_allowed(root)?;
-                discover_agents_in_root(root)
+                discover_raw_in_root(root)
             }
             None => {
                 let mut all = Vec::new();
                 for root in self.workspace_allowlist.roots() {
-                    all.extend(discover_agents_in_root(root));
+                    all.extend(discover_raw_in_root(root));
                 }
                 all
             }
         };
-        discovered.retain(|agent| self.backend_allowlist.allows(&agent.backend));
-        Ok(discovered)
+        // The global scope is not gated by the workspace allowlist (it is the user's own
+        // home), and is read once independent of how many workspaces were scanned.
+        if let Some(home) = &self.global_home {
+            raws.extend(discover_raw_global_in(home));
+        }
+        // Filter per-backend to what this runtime can ACTUALLY launch, so the catalog
+        // never advertises a binding that `start` would then reject. `start` requires the
+        // session backend to equal this runtime's single adapter backend AND that backend
+        // to be allowlisted, so the launchable set is exactly `{ adapter.backend() }` when
+        // it is allowlisted, else empty. Filtering on the allowlist alone is not enough: a
+        // Claude-adapter runtime whose allowlist also contains Copilot would otherwise
+        // advertise `copilot.local` bindings it would reject at launch with
+        // `backend_mismatch`. (A future multi-adapter host would widen `launchable`.) A
+        // name surviving on only its launchable backends becomes an entry listing just
+        // those; a name with no launchable backend produces no entry at all.
+        let launchable = self.adapter.backend();
+        raws.retain(|raw| raw.backend == launchable && self.backend_allowlist.allows(&raw.backend));
+        Ok(merge_agents(raws))
     }
 
     /// A device-wide "your spend" summary over every run this runtime holds. Usage
@@ -1773,10 +1818,10 @@ mod tests {
         .expect("write agent");
         // A Copilot agent in the same workspace; the backend allowlist below does NOT
         // include copilot.local, so discovery must not surface it as runnable.
-        let github_dir = std::path::Path::new(&workspace_root).join(".github");
-        fs::create_dir_all(&github_dir).expect("github dir");
+        let copilot_dir = std::path::Path::new(&workspace_root).join(".copilot/agents");
+        fs::create_dir_all(&copilot_dir).expect("copilot agents dir");
         fs::write(
-            github_dir.join("release-agent.md"),
+            copilot_dir.join("release.md"),
             "---\nname: Release Agent\n---\nbody\n",
         )
         .expect("write copilot agent");
@@ -1784,12 +1829,16 @@ mod tests {
         let adapter = FakeAdapter::new(CapabilityFlags::claude_local());
         // Allowlist the workspace root itself, so both the scoped and the scan-all
         // paths look in the folder that holds the agent. Only claude.local is in the
-        // backend allowlist.
+        // backend allowlist. Pin the global home to an empty temp dir so the developer's
+        // real `~/.claude/agents` can never leak into the assertions.
+        let empty_home = std::env::temp_dir().join(format!("honeyhub-home-{}", Uuid::new_v4()));
+        fs::create_dir_all(&empty_home).expect("empty home");
         let runtime = BridgeRuntime::new(
             adapter,
             WorkspaceAllowlist::new(vec![workspace_root.clone()]),
             BackendAllowlist::new(vec![AgentBackend::ClaudeLocal]),
-        );
+        )
+        .with_global_home(Some(empty_home.clone()));
 
         // Scanning the allowlisted root finds the Claude agent — and filters out the
         // Copilot one, whose backend is not in the allowlist (can't be launched).
@@ -1802,7 +1851,8 @@ mod tests {
             "copilot agent filtered by backend allowlist"
         );
         assert_eq!(scoped[0].name, "Reviewer");
-        assert_eq!(scoped[0].backend, AgentBackend::ClaudeLocal);
+        assert_eq!(scoped[0].backends.len(), 1);
+        assert_eq!(scoped[0].backends[0].backend, AgentBackend::ClaudeLocal);
 
         // Scanning every allowlisted root finds it too.
         assert_eq!(runtime.discover_agents(None).expect("scans all").len(), 1);
@@ -1812,5 +1862,113 @@ mod tests {
             .discover_agents(Some("/etc"))
             .expect_err("non-allowlisted root is refused");
         assert_eq!(error.code, "workspace_not_allowed");
+
+        let _ = fs::remove_dir_all(&empty_home);
+    }
+
+    #[test]
+    fn discover_agents_includes_the_user_global_scope() {
+        let (_, workspace_root) = workspace_paths();
+        // A project Claude agent in the allowlisted workspace.
+        let project_dir = std::path::Path::new(&workspace_root).join(".claude/agents");
+        fs::create_dir_all(&project_dir).expect("project agent dir");
+        fs::write(
+            project_dir.join("project-only.md"),
+            "---\nname: Project Only\n---\nbody\n",
+        )
+        .expect("write project agent");
+
+        // A user-global Claude agent under a pinned temp home (not the real home).
+        let home = std::env::temp_dir().join(format!("honeyhub-home-{}", Uuid::new_v4()));
+        let global_dir = home.join(".claude/agents");
+        fs::create_dir_all(&global_dir).expect("global agent dir");
+        fs::write(
+            global_dir.join("global-only.md"),
+            "---\nname: Global Only\n---\nbody\n",
+        )
+        .expect("write global agent");
+
+        let runtime = BridgeRuntime::new(
+            FakeAdapter::new(CapabilityFlags::claude_local()),
+            WorkspaceAllowlist::new(vec![workspace_root.clone()]),
+            BackendAllowlist::new(vec![AgentBackend::ClaudeLocal]),
+        )
+        .with_global_home(Some(home.clone()));
+
+        // The global scope is scanned even when discovery is scoped to one workspace root.
+        let scoped = runtime
+            .discover_agents(Some(&workspace_root))
+            .expect("scoped scan");
+        assert!(scoped.iter().any(|a| a.name == "Project Only"));
+        let global = scoped
+            .iter()
+            .find(|a| a.name == "Global Only")
+            .expect("global agent surfaced");
+        assert_eq!(
+            global.backends[0].scope,
+            crate::agents::AgentScope::Global,
+            "the global definition is tagged global scope"
+        );
+
+        // Disabling the global home drops the global agent but keeps the project one.
+        let no_global = runtime
+            .with_global_home(None)
+            .discover_agents(Some(&workspace_root))
+            .expect("scoped scan without global");
+        assert!(no_global.iter().any(|a| a.name == "Project Only"));
+        assert!(!no_global.iter().any(|a| a.name == "Global Only"));
+
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn discover_agents_never_advertises_a_backend_the_runtime_cannot_launch() {
+        // A single-adapter runtime can only launch its adapter's backend (`start` rejects
+        // any other with `backend_mismatch`). Even if the backend allowlist is broader,
+        // discovery must not advertise a binding that could not be launched.
+        let (_, workspace_root) = workspace_paths();
+        // A Claude agent and a Copilot agent in the same workspace.
+        let claude_dir = std::path::Path::new(&workspace_root).join(".claude/agents");
+        fs::create_dir_all(&claude_dir).expect("claude dir");
+        fs::write(
+            claude_dir.join("reviewer.md"),
+            "---\nname: Reviewer\n---\nbody\n",
+        )
+        .expect("write claude agent");
+        let copilot_dir = std::path::Path::new(&workspace_root).join(".copilot/agents");
+        fs::create_dir_all(&copilot_dir).expect("copilot dir");
+        fs::write(
+            copilot_dir.join("reviewer.md"),
+            "---\nname: Reviewer\n---\nbody\n",
+        )
+        .expect("write copilot agent");
+
+        let empty_home = std::env::temp_dir().join(format!("honeyhub-home-{}", Uuid::new_v4()));
+        fs::create_dir_all(&empty_home).expect("empty home");
+        // Claude adapter, but the allowlist *also* contains Copilot — the loophole the
+        // Grid flagged. `start` would still reject a Copilot session, so the catalog must
+        // not advertise the Copilot binding.
+        let runtime = BridgeRuntime::new(
+            FakeAdapter::new(CapabilityFlags::claude_local()),
+            WorkspaceAllowlist::new(vec![workspace_root.clone()]),
+            BackendAllowlist::new(vec![AgentBackend::ClaudeLocal, AgentBackend::CopilotLocal]),
+        )
+        .with_global_home(Some(empty_home.clone()));
+
+        let agents = runtime
+            .discover_agents(Some(&workspace_root))
+            .expect("scan");
+        // One entry by name, runnable on Claude only — the Copilot binding is dropped
+        // because this runtime's adapter cannot launch it.
+        assert_eq!(agents.len(), 1);
+        assert_eq!(agents[0].name, "Reviewer");
+        assert_eq!(
+            agents[0].backends.len(),
+            1,
+            "only the launchable backend is advertised"
+        );
+        assert_eq!(agents[0].backends[0].backend, AgentBackend::ClaudeLocal);
+
+        let _ = fs::remove_dir_all(&empty_home);
     }
 }

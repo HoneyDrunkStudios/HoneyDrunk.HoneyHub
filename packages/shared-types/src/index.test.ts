@@ -199,12 +199,17 @@ test("discover_agents carries an optional root and answers with an agent catalog
         kind: "agent_catalog",
         agents: [
           {
-            id: "a1b2c3d4e5f6a7b8:.claude/agents/reviewer.md",
+            id: "a1b2c3d4e5f6a7b8",
             name: "Reviewer",
-            description: "Reviews diffs",
-            backend: "claude.local",
-            sourcePath: ".claude/agents/reviewer.md",
-            workspaceLabel: "work"
+            backends: [
+              {
+                backend: "claude.local",
+                description: "Reviews diffs",
+                sourcePath: ".claude/agents/reviewer.md",
+                scope: "project",
+                workspaceLabel: "work"
+              }
+            ]
           }
         ]
       }
