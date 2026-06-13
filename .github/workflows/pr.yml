@@ -104,7 +104,7 @@ jobs:
         run: rustup component add llvm-tools-preview
 
       - name: Install cargo-llvm-cov
-        uses: taiki-e/install-action@v2
+        uses: taiki-e/install-action@7a79fe8c3a13344501c80d99cae481c1c9085912 # v2
         with:
           tool: cargo-llvm-cov
 
@@ -120,7 +120,7 @@ jobs:
           cargo llvm-cov --workspace --lib --lcov --output-path coverage/rust.lcov
 
       - name: SonarQube Cloud scan
-        uses: SonarSource/sonarqube-scan-action@v8.2.0 # pinned to the latest release
+        uses: SonarSource/sonarqube-scan-action@713881670b6b3676cda39549040e2d88c70d582e # v8.2.0
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
