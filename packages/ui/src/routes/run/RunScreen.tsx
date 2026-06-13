@@ -46,7 +46,11 @@ export function RunScreen({
 }: RunScreenProps) {
   // Offer the user's configured backends; before they configure any, fall back to the
   // proven-initial backend only (the bridge still enforces its allowlist on launch).
-  const routableBackends = availableBackends.length > 0 ? availableBackends : INITIAL_BACKENDS;
+  // Memoized so the offered set has a stable identity for the pin-clearing effect below.
+  const routableBackends = useMemo(
+    () => (availableBackends.length > 0 ? availableBackends : INITIAL_BACKENDS),
+    [availableBackends]
+  );
   const [task, setTask] = useState("");
   const [workspaceRoot, setWorkspaceRoot] = useState(workspaceRoots[0] ?? "");
   const [runId, setRunId] = useState<string | undefined>(undefined);
@@ -81,6 +85,16 @@ export function RunScreen({
     pinnedBackend !== undefined && routableBackends.includes(pinnedBackend)
       ? pinnedBackend
       : recommendation.backend;
+
+  // Clear a pin that has fallen out of the offered set (the user removed that backend
+  // from their configured allowlist). Masking it in `backend` above is not enough on
+  // its own: without clearing the state, removing the backend and later re-adding it
+  // would silently resurrect the old pin and override the live suggestion.
+  useEffect(() => {
+    if (pinnedBackend !== undefined && !routableBackends.includes(pinnedBackend)) {
+      setPinnedBackend(undefined);
+    }
+  }, [pinnedBackend, routableBackends]);
 
   // Keep the active run id available to the event handler without re-subscribing.
   const runIdRef = useRef<string | undefined>(undefined);

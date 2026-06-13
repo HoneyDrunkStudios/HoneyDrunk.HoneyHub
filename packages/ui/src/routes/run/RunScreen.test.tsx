@@ -169,6 +169,30 @@ describe("RunScreen", () => {
     expect(["codex.local", "copilot.local"]).toContain(select.value);
   });
 
+  it("does not resurrect a pin after its backend is removed and later re-added", () => {
+    const client = new MockWireClient();
+    const { rerender } = render(<RunScreen client={client} availableBackends={ALL_BACKENDS} />);
+    const select = screen.getByLabelText("Backend") as HTMLSelectElement;
+
+    // With no override, the select shows the router's live suggestion.
+    const suggested = select.value;
+    // Pin a backend that differs from the suggestion.
+    const pick = ALL_BACKENDS.find((b) => b !== suggested) ?? "copilot.local";
+    fireEvent.change(select, { target: { value: pick } });
+    expect(select.value).toBe(pick);
+
+    // Remove the pinned backend from the configured set: the pin is dropped.
+    rerender(
+      <RunScreen client={client} availableBackends={ALL_BACKENDS.filter((b) => b !== pick)} />
+    );
+    expect(select.value).not.toBe(pick);
+
+    // Re-add it. The cleared pin must NOT silently resume — the select stays on the
+    // live suggestion rather than resurrecting the old override.
+    rerender(<RunScreen client={client} availableBackends={ALL_BACKENDS} />);
+    expect(select.value).toBe(suggested);
+  });
+
   it("freezes the active run's backend in diagnostics across a mid-run config change", async () => {
     const client = new MockWireClient();
     const { rerender } = render(
