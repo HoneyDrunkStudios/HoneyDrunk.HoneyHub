@@ -3,6 +3,10 @@ name: pr
 on:
   pull_request:
     branches: [main]
+  # push:main runs the SonarQube Cloud analysis standalone so the project's Overview
+  # dashboard and leak-period baseline are populated from the merged main branch.
+  push:
+    branches: [main]
 
 permissions:
   contents: read
@@ -10,6 +14,9 @@ permissions:
 jobs:
   build:
     name: build
+    # The bespoke Rust+TS build/test/lint is the PR gate; on push:main only the
+    # SonarQube job runs (the baseline analysis).
+    if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
@@ -54,3 +61,66 @@ jobs:
 
       - name: Lint Rust workspace
         run: cargo clippy --workspace --all-targets --features honeyhub-bridge/test-fixtures -- -D warnings
+
+  sonarcloud:
+    name: SonarQube Cloud
+    # Same gate the .NET repos use: PR-time analysis for same-repo PRs (a fork PR has
+    # no access to SONAR_TOKEN, so skip it rather than fail), plus push:main for the
+    # baseline. Produces the `SonarCloud Code Analysis` check the org ruleset requires.
+    if: |
+      (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) ||
+      (github.event_name == 'push' && github.ref == 'refs/heads/main')
+    runs-on: ubuntu-latest
+    # Inherits the top-level least-privilege `contents: read`. PR decoration (the
+    # `SonarCloud Code Analysis` check) is posted by the SonarQube Cloud GitHub App
+    # under its own installation token, not GITHUB_TOKEN, so no pull-requests/checks
+    # write scopes are needed here — and the push:main baseline run stays read-only.
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          # SonarQube Cloud needs full history for blame/new-code attribution.
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+
+      - name: Install npm dependencies
+        run: npm ci
+
+      # Build first so shared-types' dist exists for the UI, then collect TS coverage
+      # (vitest v8 → packages/ui/coverage/lcov.info).
+      - name: Build Node workspace
+        run: npm run build
+
+      - name: Collect TypeScript coverage
+        run: npm run -w @honeydrunk/honeyhub-ui test:coverage
+
+      - name: Install Rust components
+        run: rustup component add llvm-tools-preview
+
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@7a79fe8c3a13344501c80d99cae481c1c9085912 # v2
+        with:
+          tool: cargo-llvm-cov
+
+      # Rust coverage from the library unit tests only (`--lib`). The live-process
+      # integration tests (tests/*.rs) spawn and KILL child CLIs (process-tree stop),
+      # and an instrumented child that is killed mid-write leaves a corrupt `.profraw`
+      # that fails `llvm-profdata merge`. `--lib` covers the core logic (agents/core/
+      # wire/coaching/usage — where the analyzed source lives) without spawning, and so
+      # needs no test-fixtures. The full integration suite still runs in the `build` job.
+      - name: Collect Rust coverage
+        run: |
+          mkdir -p coverage
+          cargo llvm-cov --workspace --lib --lcov --output-path coverage/rust.lcov
+
+      - name: SonarQube Cloud scan
+        uses: SonarSource/sonarqube-scan-action@713881670b6b3676cda39549040e2d88c70d582e # v8.2.0
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
