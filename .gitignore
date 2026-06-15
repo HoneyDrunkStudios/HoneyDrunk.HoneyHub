@@ -5,6 +5,9 @@ coverage/
 .next/
 target/
 .tauri/
+# .NET build output (tools/honeyhub-sb-explorer)
+bin/
+obj/
 *.log
 .env
 .env.*

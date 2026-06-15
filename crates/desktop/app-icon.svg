@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" role="img" aria-label="HoneyHub icon">
+  <rect width="1024" height="1024" rx="192" fill="#101418"/>
+  <g fill="none" stroke="#f6c343" stroke-width="76" stroke-linecap="round" stroke-linejoin="round">
+    <polyline points="380,336 232,512 380,688"/>
+    <polyline points="644,336 792,512 644,688"/>
+    <line x1="456" y1="724" x2="568" y2="300"/>
+  </g>
+</svg>

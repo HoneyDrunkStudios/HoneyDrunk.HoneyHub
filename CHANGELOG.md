@@ -1,5 +1,67 @@
 # Changelog
 
+## [0.16.0] - 2026-06-15
+
+HoneyHub grows from the v1 run cockpit into the local-first **control hub**: a Tauri
+desktop app plus a set of new surfaces, multi-provider runs, and durable history. All
+local-first and BYOK — the bridge still never holds vendor auth.
+
+- **Desktop app** (`crates/desktop`, ADR-0091 §3f): a Tauri shell that folds the bridge +
+  host **in-process** and opens the cockpit in a native window — one `cargo run -p
+  honeyhub-desktop`, no browser, no sidecar. Binds a stable loopback port so webview
+  storage persists; global agent discovery defaults on.
+- **Multi-provider runtime**: the runtime now dispatches by backend across several adapters
+  (Claude + Codex), so one cockpit drives both CLIs. Per-run **model** and Codex
+  **reasoning-effort** (`-c model_reasoning_effort=`) are honored; models + reasoning levels
+  are read from each CLI's real source (Codex cache; Claude aliases). Copilot is retained in
+  the abstraction but not offered in the UI.
+- **Agents**: launch a discovered agent from the chat (`--agent`, Claude), **author** new
+  Claude agents in-app (the bridge's first guarded write path), and discovery now reaches
+  **one level into sub-repos** so a parent-folder workspace surfaces per-repo agents.
+- **New surfaces**: a **Runs** dashboard (every run's status/model/cost), bounded **Goals**
+  (objective + caps → re-run loop feeding the runs board), a priorities/projects **Plan**
+  roadmap (Now/Next/Later), a **Jobs** view (local processes + known-job health), **Git**
+  (branch/ahead-behind/dirty + read-only diff), and **Updates** (installed CLI versions +
+  new-model detection). All read-only where they touch the machine.
+- **Activity**: tool/file activity (`tool_use` for Claude, `item.completed` for Codex) is
+  surfaced in the chat right-panel — metadata only, never tool input/output.
+- **Durable history**: the runtime mirrors sessions/runs/transcripts/usage to the
+  local-first `LocalStore` (`HONEYHUB_STORE_DIR`, else `~/.honeyhub/store`); the cockpit
+  lists synced sessions and reopens them read-only. (Continuing a past session across
+  restarts — vendor-session reattach — is a follow-up.)
+- **Composer**: chat-style run surface with a HoneyHub-native slash menu, an agent picker,
+  a reasoning-effort picker, Enter-to-send, a non-typable workspace picker, and a
+  read-only file **Browse** view (search + viewer). Cyberpunk-honey theme.
+- **Read-only filesystem + workspace files**: directory browse, gated file reads,
+  recursive filename search, and `.code-workspace` resolution to add several repos at once.
+- **Connectors framework** (ADR-0094): an opt-in, read-only integrations registry — nothing
+  on by default, each connector configured (and only then shown), no host-side secrets
+  (reuses your existing `gh`/`az` sign-ins; Grafana/Sentry tokens held in the cockpit and
+  passed per request). v1 catalog over two hubs — **Work** (GitHub assigned issues + your
+  PRs + review requests; Azure DevOps work items) and **Observe** (Azure Service Bus
+  queue/subscription + dead-letter counts; Grafana health + dashboards; Sentry unresolved
+  errors) — plus a **Hub** overview that pulls each enabled connector's headline number into
+  one glance. Per-panel "updated N ago" + auto-refresh; a Settings "Test connection".
+- **Azure Service Bus explorer** (ADR-0094 D5): full data-plane parity behind an optional
+  `honeyhub-sb-explorer` .NET helper (Azure SDK + `DefaultAzureCredential`, no connection
+  string) — **peek** (browse a queue/subscription/dead-letter queue), **resubmit** a
+  dead-letter message to its source, **purge**, **send**, and **receive** — read-only by
+  default, with every destructive action behind an explicit in-UI confirmation.
+- **Floating chat dock**: a popup AI chat docked on every screen but the full Chat tab,
+  mounted app-wide so a conversation persists while you move between tabs (same run seam,
+  streamed replies, follow-up continuity).
+- **Connect a phone** (ADR-0091 mobile pairing): the bridge reports its reachable
+  (tailnet/LAN) addresses; Settings + an onboarding step show a QR + URL — honest that a
+  reachable bind (not just the QR) is what a phone needs.
+- **Configurable jobs**: add your own job patterns to the Jobs view (matched on process name
+  + command line); the agent-job set is now user-extensible.
+- Refreshed brand: a centered `</>` mark (app icon + in-app) and cyan/neon-pink cyberpunk
+  accents across the cockpit.
+
+Versions: workspace crates 0.21.0 → 0.22.0; TS packages (root/ui/shell/types) 0.15.0 →
+0.16.0. The optional `tools/honeyhub-sb-explorer` .NET helper is standalone (not in the npm
+or cargo build) and is the only path that performs Service Bus data-plane writes.
+
 ## [0.15.0] - 2026-06-13
 
 - Added the **routing engine** (ADR-0092 D3 / packet 09 §3d): an app-tier router suggests which backend to run a task on — capability-first for complex tasks, cost-first for light ones — reading a **bundled** cost-rate/policy snapshot (permitted for local-first apps under the invariant-45 local-first carve-out; HoneyHub owns the consumer schema; a HoneyDrunk.AI producer and fetch-and-cache delivery are follow-ups, since published model rates move only a few times a year). The run screen shows the suggestion + rationale and lets the user override. App-tier only — no new bridge/wire plumbing. The recent-usage ("optimize your own subscriptions") tiebreak ships as a tested hook but is not yet wired to live usage.

@@ -1,5 +1,8 @@
 use crate::adapter::{AgentBackend, AgentBackendAdapter, BridgeError, RunHandle, StartRunRequest};
-use crate::agents::{discover_raw_global_in, discover_raw_in_root, merge_agents, AgentDefinition};
+use crate::agents::{
+    discover_raw_global_in, discover_raw_in_root_recursive, merge_agents, write_claude_agent,
+    AgentDefinition, AgentScope, AgentWriteOutcome,
+};
 use crate::artifact::DispatchArtifact;
 use crate::coaching::{coach, CoachingSnapshot};
 use crate::pairing::{BackendAllowlist, WorkspaceAllowlist};
@@ -8,6 +11,7 @@ use crate::session::{
     DispatchControlEvent, DispatchControlEventKind, DispatchMessage, DispatchRun,
     DispatchRunRecord, DispatchRunState, DispatchSession, PolicyHint, UsageSignal, UsageSummary,
 };
+use crate::store::LocalStore;
 use crate::wire::{BridgeEvent, BridgeEventPayload, ReconnectRequest};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -30,11 +34,10 @@ pub struct ManagedRun {
     pub artifacts: Vec<DispatchArtifact>,
 }
 
-pub struct BridgeRuntime<A>
-where
-    A: AgentBackendAdapter,
-{
-    adapter: A,
+pub struct BridgeRuntime {
+    /// Adapters keyed by backend. A run is dispatched to the adapter for its backend,
+    /// so the host can drive several CLIs (Claude, Codex, …) from one runtime.
+    adapters: HashMap<AgentBackend, Box<dyn AgentBackendAdapter + Send>>,
     workspace_allowlist: WorkspaceAllowlist,
     backend_allowlist: BackendAllowlist,
     /// Parent of the user-global agent folders (`~/.claude/agents`, `~/.copilot/agents`).
@@ -43,19 +46,24 @@ where
     /// [`BridgeRuntime::with_global_home`]. Injectable so tests pin it to a temp dir.
     global_home: Option<PathBuf>,
     runs: HashMap<String, ManagedRun>,
+    /// Optional local-first persistence (ADR-0092 D1). When set, the runtime mirrors
+    /// sessions/runs/transcripts/usage/artifacts into the [`LocalStore`] as they happen, so
+    /// the cockpit can list + reopen past sessions across restarts. Best-effort: a store
+    /// write never fails a run (the live event stream is the source of truth in-session).
+    store: Option<LocalStore>,
 }
 
-impl<A> BridgeRuntime<A>
-where
-    A: AgentBackendAdapter,
-{
+impl BridgeRuntime {
     pub fn new(
-        adapter: A,
+        adapter: impl AgentBackendAdapter + Send + 'static,
         workspace_allowlist: WorkspaceAllowlist,
         backend_allowlist: BackendAllowlist,
     ) -> Self {
+        let mut adapters: HashMap<AgentBackend, Box<dyn AgentBackendAdapter + Send>> =
+            HashMap::new();
+        adapters.insert(adapter.backend(), Box::new(adapter));
         Self {
-            adapter,
+            adapters,
             workspace_allowlist,
             backend_allowlist,
             // Global discovery is **opt-in, off by default**: reading the user-global
@@ -64,7 +72,17 @@ where
             // `with_global_home` (ADR-0090 keeps discovery within configured roots).
             global_home: None,
             runs: HashMap::new(),
+            store: None,
         }
+    }
+
+    /// Opt **in** to local-first persistence by giving the runtime a [`LocalStore`]. When
+    /// set, sessions/runs/transcripts/usage/artifacts are mirrored to disk as they happen so
+    /// the cockpit can list and reopen past sessions across restarts. Off by default (the
+    /// store is the host's choice of location).
+    pub fn with_store(mut self, store: LocalStore) -> Self {
+        self.store = Some(store);
+        self
     }
 
     /// Opt **in** to user-global agent discovery by setting the home directory whose
@@ -77,29 +95,76 @@ where
         self
     }
 
+    /// Register an additional backend adapter (chainable), so one runtime can drive
+    /// several CLIs. Runs are dispatched to the adapter matching their backend.
+    pub fn with_adapter(mut self, adapter: impl AgentBackendAdapter + Send + 'static) -> Self {
+        self.adapters.insert(adapter.backend(), Box::new(adapter));
+        self
+    }
+
+    /// The adapter for a backend, or a `backend_unavailable` error when none is
+    /// registered (the host didn't wire that CLI).
+    fn adapter_for(
+        &self,
+        backend: AgentBackend,
+    ) -> Result<&(dyn AgentBackendAdapter + Send), BridgeError> {
+        self.adapters.get(&backend).map(Box::as_ref).ok_or_else(|| {
+            BridgeError::new(
+                "backend_unavailable",
+                format!("no adapter registered for backend {backend:?}"),
+            )
+        })
+    }
+
+    /// Replace the workspace allowlist (packet 09 §3). The cockpit sends the repo
+    /// locations the user picked so file reads — and agent launches — are scoped to
+    /// exactly those roots, unifying the UI's chosen locations with the bridge's
+    /// security boundary.
+    pub fn set_workspace_roots(&mut self, roots: Vec<String>) {
+        self.workspace_allowlist = WorkspaceAllowlist::new(roots);
+    }
+
+    /// Whether a path lies within an allowlisted workspace root. Used to gate
+    /// read-only file access to the roots the user added.
+    pub fn workspace_allows(&self, path: &str) -> bool {
+        self.workspace_allowlist.allows(path)
+    }
+
+    /// The allowlisted workspace roots (cloned). Used by the host to autodetect a sibling
+    /// `HoneyDrunk.Architecture` repo for the roadmap view.
+    pub fn workspace_roots(&self) -> Vec<String> {
+        self.workspace_allowlist.roots().to_vec()
+    }
+
     pub fn start(
         &mut self,
         mut request: StartRunRequest,
         created_at: impl Into<String>,
     ) -> Result<RunHandle, BridgeError> {
         let created_at = created_at.into();
-        self.ensure_backend_allowed()?;
-        self.ensure_workspace_allowed(&request.workspace_root)?;
-        self.ensure_request_workspace_matches(&request)?;
+        let backend = request.session.backend;
+        self.ensure_backend_allowed(backend)?;
+        // A "just chat" run carries no workspace root: run it in the user's home dir
+        // and skip the allowlist. This is the user's explicit choice (no repo selected),
+        // not an agent reaching into an un-allowlisted workspace — which the allowlist
+        // still gates whenever a root IS provided.
+        if request.workspace_root.trim().is_empty() {
+            let home = crate::agents::user_home()
+                .map(|path| path.to_string_lossy().to_string())
+                .unwrap_or_else(|| ".".to_string());
+            request.workspace_root = home.clone();
+            request.session.workspace_root = home;
+        } else {
+            self.ensure_workspace_allowed(&request.workspace_root)?;
+            self.ensure_request_workspace_matches(&request)?;
+        }
         if request.requested_run_id.is_none() {
             request.requested_run_id = Some(Uuid::new_v4().to_string());
         }
         if let Some(requested_run_id) = &request.requested_run_id {
             self.ensure_run_id_available(requested_run_id)?;
         }
-        if request.session.backend != self.adapter.backend() {
-            return Err(BridgeError::new(
-                "backend_mismatch",
-                "request backend does not match bridge adapter",
-            ));
-        }
-
-        let handle = self.adapter.start(request.clone())?;
+        let handle = self.adapter_for(backend)?.start(request.clone())?;
         self.ensure_run_id_available(&handle.run_id)?;
         let mut record = DispatchRunRecord::new(DispatchRun::new(
             handle.run_id.clone(),
@@ -136,11 +201,22 @@ where
             },
         );
 
+        // Mirror the new session + run to the local store (best-effort).
+        if let Some(managed) = self.runs.get(&handle.run_id) {
+            let session = managed.session.clone();
+            let run = managed.record.run.clone();
+            if let Some(store) = self.store.as_mut() {
+                let _ = store.upsert_session(&session);
+                let _ = store.put_run(&run);
+            }
+        }
+
         Ok(handle)
     }
 
     pub fn stream_events(&mut self, run_id: &str) -> Result<Vec<BridgeEvent>, BridgeError> {
-        if !self.adapter.capabilities().streaming_output {
+        let backend = self.run(run_id)?.session.backend;
+        if !self.adapter_for(backend)?.capabilities().streaming_output {
             return Err(BridgeError::new(
                 "unsupported_capability",
                 "backend adapter does not declare streaming_output",
@@ -148,27 +224,46 @@ where
         }
         let session_id = self.run(run_id)?.session.id.clone();
 
-        let events = self.adapter.stream(run_id)?;
+        let events = self.adapter_for(backend)?.stream(run_id)?;
         for event in &events {
-            self.validate_stream_event(event, run_id, &session_id)?;
+            self.validate_stream_event(event, run_id, &session_id, backend)?;
         }
 
         for event in &events {
             match &event.payload {
                 BridgeEventPayload::Message { message } => {
                     self.run_mut(run_id)?.transcript.push(message.clone());
+                    if let Some(store) = self.store.as_mut() {
+                        let _ = store.append_transcript(message);
+                    }
                 }
                 BridgeEventPayload::Control { event } => {
                     self.run_mut(run_id)?
                         .record
                         .control_events
                         .push(event.clone());
+                    if let Some(store) = self.store.as_mut() {
+                        let _ = store.put_control_event(&session_id, event);
+                    }
                 }
                 BridgeEventPayload::Status { status } => {
                     self.transition_run(run_id, status.state.clone(), event.created_at.clone())?;
+                    // Persist the updated run record (state/completed_at changed).
+                    let run = self.run(run_id)?.record.run.clone();
+                    if let Some(store) = self.store.as_mut() {
+                        let _ = store.put_run(&run);
+                    }
                 }
                 BridgeEventPayload::Artifact { artifact } => {
                     self.run_mut(run_id)?.artifacts.push(artifact.clone());
+                    if let Some(store) = self.store.as_mut() {
+                        let _ = store.put_artifact(&session_id, artifact);
+                    }
+                }
+                BridgeEventPayload::Usage { signal } => {
+                    if let Some(store) = self.store.as_mut() {
+                        let _ = store.put_usage(&session_id, signal);
+                    }
                 }
                 _ => {}
             }
@@ -185,8 +280,9 @@ where
         created_at: impl Into<String>,
     ) -> Result<ReplyOutcome, BridgeError> {
         let created_at = created_at.into();
+        let backend = self.run(run_id)?.session.backend;
         let current = self.run(run_id)?.record.run.state.clone();
-        let capabilities = self.adapter.capabilities();
+        let capabilities = self.adapter_for(backend)?.capabilities();
         if current.is_terminal() {
             // A resume-based backend (interactive_reply = false + resume_session) can
             // continue a **cleanly completed** turn by starting a follow-up run that
@@ -206,7 +302,7 @@ where
             }
         }
         if capabilities.interactive_reply {
-            self.adapter.reply(run_id, text)?;
+            self.adapter_for(backend)?.reply(run_id, text)?;
             let managed = self.run_mut(run_id)?;
             if managed.record.run.state == DispatchRunState::NeedsInput {
                 let event = managed
@@ -235,6 +331,9 @@ where
             session,
             workspace_root,
             task: text.to_string(),
+            model: None,
+            agent: None,
+            effort: None,
             requested_run_id: Some(Uuid::new_v4().to_string()),
             follow_up_to_run_id: Some(run_id.to_string()),
             transcript,
@@ -243,7 +342,7 @@ where
         if let Some(requested_run_id) = &request.requested_run_id {
             self.ensure_run_id_available(requested_run_id)?;
         }
-        let handle = self.adapter.start(request.clone())?;
+        let handle = self.adapter_for(backend)?.start(request.clone())?;
         self.ensure_run_id_available(&handle.run_id)?;
 
         {
@@ -305,7 +404,8 @@ where
 
     pub fn stop(&mut self, run_id: &str, created_at: impl Into<String>) -> Result<(), BridgeError> {
         let created_at = created_at.into();
-        if !self.adapter.capabilities().stop_signal {
+        let backend = self.run(run_id)?.session.backend;
+        if !self.adapter_for(backend)?.capabilities().stop_signal {
             return Err(BridgeError::new(
                 "unsupported_capability",
                 "backend adapter does not declare stop_signal",
@@ -319,7 +419,7 @@ where
             ));
         }
 
-        self.adapter.stop(run_id)?;
+        self.adapter_for(backend)?.stop(run_id)?;
         let managed = self.run_mut(run_id)?;
         let event = managed
             .record
@@ -431,6 +531,7 @@ where
         event: &BridgeEvent,
         expected_run_id: &str,
         expected_session_id: &str,
+        backend: AgentBackend,
     ) -> Result<(), BridgeError> {
         if event.run_id != expected_run_id {
             return Err(BridgeError::new(
@@ -444,7 +545,7 @@ where
                 "stream event session id does not match managed run session",
             ));
         }
-        validate_stream_payload(&event.payload, event, self.adapter.backend())
+        validate_stream_payload(&event.payload, event, backend)
     }
 
     pub fn run(&self, run_id: &str) -> Result<&ManagedRun, BridgeError> {
@@ -456,8 +557,10 @@ where
     /// Discover the user's own agent definitions (packet 09 §3f-bis), read-only, from
     /// within the workspace allowlist. With `Some(root)` it scans that one root (which
     /// **must** be allowlisted — discovery never reads outside the allowlist); with
-    /// `None` it scans **every** allowlisted root. Best-effort per root (a missing
-    /// `.claude/agents`/`.copilot/agents` folder is simply empty).
+    /// `None` it scans **every** allowlisted root. Each root is scanned **and its immediate
+    /// subdirectories** (depth 1), so a parent folder holding many repos surfaces each
+    /// repo's `.claude/agents` without adding every repo as its own root. Best-effort per
+    /// root (a missing `.claude/agents`/`.copilot/agents` folder is simply empty).
     ///
     /// When (and only when) user-global discovery is **opted in** via
     /// [`Self::with_global_home`], it also scans the **user-global** folders
@@ -479,12 +582,12 @@ where
         let mut raws = match workspace_root {
             Some(root) => {
                 self.ensure_workspace_allowed(root)?;
-                discover_raw_in_root(root)
+                discover_raw_in_root_recursive(root)
             }
             None => {
                 let mut all = Vec::new();
                 for root in self.workspace_allowlist.roots() {
-                    all.extend(discover_raw_in_root(root));
+                    all.extend(discover_raw_in_root_recursive(root));
                 }
                 all
             }
@@ -504,9 +607,81 @@ where
         // `backend_mismatch`. (A future multi-adapter host would widen `launchable`.) A
         // name surviving on only its launchable backends becomes an entry listing just
         // those; a name with no launchable backend produces no entry at all.
-        let launchable = self.adapter.backend();
-        raws.retain(|raw| raw.backend == launchable && self.backend_allowlist.allows(&raw.backend));
+        // Launchable = a backend that has a registered adapter AND is allowlisted (both
+        // gates `start` enforces). With several adapters wired, the set widens accordingly.
+        raws.retain(|raw| {
+            self.adapters.contains_key(&raw.backend) && self.backend_allowlist.allows(&raw.backend)
+        });
         Ok(merge_agents(raws))
+    }
+
+    /// Author a Claude agent definition (packet 09 §3d — make agents in-app). A
+    /// `Some(workspace_root)` writes a **project** agent under that root's
+    /// `.claude/agents` — gated by the workspace allowlist exactly like discovery, so the
+    /// cockpit can never author outside an added repo. A `None` writes a **global** agent
+    /// under `~/.claude/agents`, which is only permitted when user-global config is opted
+    /// in via [`Self::with_global_home`] (the same boundary discovery honors). The written
+    /// path returned is relative to its scan root (no absolute local path crosses the wire).
+    pub fn write_agent(
+        &self,
+        workspace_root: Option<&str>,
+        name: &str,
+        description: &str,
+        body: &str,
+        model: Option<&str>,
+    ) -> Result<AgentWriteOutcome, BridgeError> {
+        match workspace_root {
+            Some(root) => {
+                self.ensure_workspace_allowed(root)?;
+                write_claude_agent(
+                    std::path::Path::new(root),
+                    name,
+                    description,
+                    model,
+                    body,
+                    AgentScope::Project,
+                )
+                .map_err(|message| BridgeError::new("agent_write_failed", message))
+            }
+            None => {
+                let home = self.global_home.as_ref().ok_or_else(|| {
+                    BridgeError::new(
+                        "global_agents_disabled",
+                        "global agent authoring is not enabled on this host",
+                    )
+                })?;
+                write_claude_agent(home, name, description, model, body, AgentScope::Global)
+                    .map_err(|message| BridgeError::new("agent_write_failed", message))
+            }
+        }
+    }
+
+    /// The persisted sessions (newest activity first is the store's natural order), or an
+    /// empty list when no store is configured. Backs the cockpit's durable history list.
+    pub fn stored_sessions(&self) -> Vec<DispatchSession> {
+        self.store
+            .as_ref()
+            .map(|store| store.sessions())
+            .unwrap_or_default()
+    }
+
+    /// A persisted session's runs plus its concatenated transcript (across runs, in run
+    /// order), for reopening a past chat. Empty when no store or unknown session.
+    pub fn stored_session_detail(
+        &self,
+        session_id: &str,
+    ) -> (Vec<DispatchRun>, Vec<DispatchMessage>) {
+        match &self.store {
+            Some(store) => {
+                let runs = store.runs(session_id);
+                let mut transcript = Vec::new();
+                for run in &runs {
+                    transcript.extend(store.read_transcript(&run.id).unwrap_or_default());
+                }
+                (runs, transcript)
+            }
+            None => (Vec::new(), Vec::new()),
+        }
     }
 
     /// A device-wide "your spend" summary over every run this runtime holds. Usage
@@ -718,15 +893,15 @@ where
         )
     }
 
-    fn ensure_backend_allowed(&self) -> Result<(), BridgeError> {
-        if self.backend_allowlist.allows(&self.adapter.backend()) {
-            Ok(())
-        } else {
-            Err(BridgeError::new(
+    fn ensure_backend_allowed(&self, backend: AgentBackend) -> Result<(), BridgeError> {
+        if !self.backend_allowlist.allows(&backend) {
+            return Err(BridgeError::new(
                 "backend_not_allowed",
                 "backend is not on the configured bridge allowlist",
-            ))
+            ));
         }
+        // It must also have a wired adapter, or the run can't be driven.
+        self.adapter_for(backend).map(|_| ())
     }
 
     fn ensure_workspace_allowed(&self, workspace_root: &str) -> Result<(), BridgeError> {
@@ -856,6 +1031,14 @@ fn validate_stream_payload(
                 ));
             }
         }
+        BridgeEventPayload::Activity { activity } => {
+            if !ids_match(&activity.run_id, &activity.session_id, event) {
+                return Err(BridgeError::new(
+                    "event_activity_mismatch",
+                    "stream activity ids do not match containing event",
+                ));
+            }
+        }
         BridgeEventPayload::UsageSummary { .. } => {
             // A usage summary is a device-wide, host-synthesized response to a client
             // query — never an event an adapter streams from a run. Seeing one here
@@ -879,6 +1062,167 @@ fn validate_stream_payload(
                 "a backend stream must not emit a device-wide agent catalog",
             ));
         }
+        BridgeEventPayload::BackendCatalog { .. } => {
+            // Device-wide, host-synthesized detection result — never streamed.
+            return Err(BridgeError::new(
+                "event_unexpected_backend_catalog",
+                "a backend stream must not emit a device-wide backend catalog",
+            ));
+        }
+        BridgeEventPayload::DirListing { .. } => {
+            // Device-wide, host-synthesized browse result — never streamed.
+            return Err(BridgeError::new(
+                "event_unexpected_dir_listing",
+                "a backend stream must not emit a device-wide directory listing",
+            ));
+        }
+        BridgeEventPayload::FileContents { .. } => {
+            // Device-wide, host-synthesized file read — never streamed.
+            return Err(BridgeError::new(
+                "event_unexpected_file_contents",
+                "a backend stream must not emit device-wide file contents",
+            ));
+        }
+        BridgeEventPayload::SearchResults { .. } => {
+            // Device-wide, host-synthesized search result — never streamed.
+            return Err(BridgeError::new(
+                "event_unexpected_search_results",
+                "a backend stream must not emit device-wide search results",
+            ));
+        }
+        BridgeEventPayload::WorkspaceFolders { .. } => {
+            // Device-wide, host-synthesized workspace-file resolution — never streamed.
+            return Err(BridgeError::new(
+                "event_unexpected_workspace_folders",
+                "a backend stream must not emit device-wide workspace folders",
+            ));
+        }
+        BridgeEventPayload::AgentWritten { .. } => {
+            // Device-wide, host-synthesized agent-authoring ack — never streamed.
+            return Err(BridgeError::new(
+                "event_unexpected_agent_written",
+                "a backend stream must not emit device-wide agent-written events",
+            ));
+        }
+        BridgeEventPayload::JobSnapshot { .. } => {
+            // Device-wide, host-synthesized local-jobs snapshot — never streamed.
+            return Err(BridgeError::new(
+                "event_unexpected_job_snapshot",
+                "a backend stream must not emit device-wide job snapshots",
+            ));
+        }
+        BridgeEventPayload::EnvironmentInfo { .. } => {
+            // Device-wide, host-synthesized CLI-environment snapshot — never streamed.
+            return Err(BridgeError::new(
+                "event_unexpected_environment_info",
+                "a backend stream must not emit device-wide environment info",
+            ));
+        }
+        BridgeEventPayload::NetworkInfo { .. } => {
+            // Device-wide, host-synthesized reachable-addresses snapshot — never streamed.
+            return Err(BridgeError::new(
+                "event_unexpected_network_info",
+                "a backend stream must not emit device-wide network info",
+            ));
+        }
+        BridgeEventPayload::WorkSnapshot { .. } => {
+            // Device-wide, host-synthesized work-connectors snapshot — never streamed.
+            return Err(BridgeError::new(
+                "event_unexpected_work_snapshot",
+                "a backend stream must not emit device-wide work snapshots",
+            ));
+        }
+        BridgeEventPayload::ServiceBusSnapshot { .. } => {
+            // Device-wide, host-synthesized Service Bus snapshot — never streamed.
+            return Err(BridgeError::new(
+                "event_unexpected_service_bus_snapshot",
+                "a backend stream must not emit device-wide service bus snapshots",
+            ));
+        }
+        BridgeEventPayload::ServiceBusPeek { .. } => {
+            // Device-wide, host-synthesized Service Bus peek — never streamed.
+            return Err(BridgeError::new(
+                "event_unexpected_service_bus_peek",
+                "a backend stream must not emit device-wide service bus peeks",
+            ));
+        }
+        BridgeEventPayload::ServiceBusResubmit { .. } => {
+            // Device-wide, host-synthesized Service Bus resubmit result — never streamed.
+            return Err(BridgeError::new(
+                "event_unexpected_service_bus_resubmit",
+                "a backend stream must not emit device-wide service bus resubmit results",
+            ));
+        }
+        BridgeEventPayload::ServiceBusPurge { .. } => {
+            // Device-wide, host-synthesized Service Bus purge result — never streamed.
+            return Err(BridgeError::new(
+                "event_unexpected_service_bus_purge",
+                "a backend stream must not emit device-wide service bus purge results",
+            ));
+        }
+        BridgeEventPayload::ServiceBusSend { .. } => {
+            // Device-wide, host-synthesized Service Bus send result — never streamed.
+            return Err(BridgeError::new(
+                "event_unexpected_service_bus_send",
+                "a backend stream must not emit device-wide service bus send results",
+            ));
+        }
+        BridgeEventPayload::ServiceBusReceive { .. } => {
+            // Device-wide, host-synthesized Service Bus receive result — never streamed.
+            return Err(BridgeError::new(
+                "event_unexpected_service_bus_receive",
+                "a backend stream must not emit device-wide service bus receive results",
+            ));
+        }
+        BridgeEventPayload::GrafanaSummary { .. } => {
+            // Device-wide, host-synthesized Grafana summary — never streamed.
+            return Err(BridgeError::new(
+                "event_unexpected_grafana_summary",
+                "a backend stream must not emit device-wide grafana summaries",
+            ));
+        }
+        BridgeEventPayload::SentrySummary { .. } => {
+            // Device-wide, host-synthesized Sentry summary — never streamed.
+            return Err(BridgeError::new(
+                "event_unexpected_sentry_summary",
+                "a backend stream must not emit device-wide sentry summaries",
+            ));
+        }
+        BridgeEventPayload::GitStatus { .. } => {
+            // Device-wide, host-synthesized git status — never streamed.
+            return Err(BridgeError::new(
+                "event_unexpected_git_status",
+                "a backend stream must not emit device-wide git status",
+            ));
+        }
+        BridgeEventPayload::GitDiff { .. } => {
+            // Device-wide, host-synthesized git diff — never streamed.
+            return Err(BridgeError::new(
+                "event_unexpected_git_diff",
+                "a backend stream must not emit device-wide git diff",
+            ));
+        }
+        BridgeEventPayload::SessionList { .. } => {
+            // Device-wide, host-synthesized persisted-session list — never streamed.
+            return Err(BridgeError::new(
+                "event_unexpected_session_list",
+                "a backend stream must not emit device-wide session lists",
+            ));
+        }
+        BridgeEventPayload::SessionDetail { .. } => {
+            // Device-wide, host-synthesized persisted-session detail — never streamed.
+            return Err(BridgeError::new(
+                "event_unexpected_session_detail",
+                "a backend stream must not emit device-wide session detail",
+            ));
+        }
+        BridgeEventPayload::Roadmap { .. } => {
+            // Device-wide, host-synthesized roadmap snapshot — never streamed.
+            return Err(BridgeError::new(
+                "event_unexpected_roadmap",
+                "a backend stream must not emit device-wide roadmap snapshots",
+            ));
+        }
     }
 
     Ok(())
@@ -890,33 +1234,42 @@ mod tests {
     use crate::adapter::{AgentBackend, CapabilityFlags};
     use crate::session::DispatchMessageRole;
     use crate::wire::BridgeStatusEvent;
-    use std::cell::RefCell;
     use std::fs;
+    use std::sync::{Arc, Mutex};
+
+    /// Shared call-counters so a test can inspect the fake after it is moved into the
+    /// (boxed, multi-adapter) runtime — capture `adapter.probe()` before constructing it.
+    #[derive(Clone, Default)]
+    struct FakeProbe {
+        starts: Arc<Mutex<u64>>,
+        start_requests: Arc<Mutex<Vec<StartRunRequest>>>,
+        replies: Arc<Mutex<Vec<String>>>,
+        stops: Arc<Mutex<Vec<String>>>,
+    }
 
     struct FakeAdapter {
         capabilities: CapabilityFlags,
-        starts: RefCell<u64>,
-        start_requests: RefCell<Vec<StartRunRequest>>,
-        stream_events: RefCell<Option<Vec<BridgeEvent>>>,
-        replies: RefCell<Vec<String>>,
-        stops: RefCell<Vec<String>>,
+        // Set once at construction, then read-only — no interior mutability needed.
+        stream_events: Option<Vec<BridgeEvent>>,
+        probe: FakeProbe,
     }
 
     impl FakeAdapter {
         fn new(capabilities: CapabilityFlags) -> Self {
             Self {
                 capabilities,
-                starts: RefCell::new(0),
-                start_requests: RefCell::new(Vec::new()),
-                stream_events: RefCell::new(None),
-                replies: RefCell::new(Vec::new()),
-                stops: RefCell::new(Vec::new()),
+                stream_events: None,
+                probe: FakeProbe::default(),
             }
         }
 
-        fn with_stream_events(self, events: Vec<BridgeEvent>) -> Self {
-            *self.stream_events.borrow_mut() = Some(events);
+        fn with_stream_events(mut self, events: Vec<BridgeEvent>) -> Self {
+            self.stream_events = Some(events);
             self
+        }
+
+        fn probe(&self) -> FakeProbe {
+            self.probe.clone()
         }
     }
 
@@ -930,9 +1283,16 @@ mod tests {
         }
 
         fn start(&self, request: StartRunRequest) -> Result<RunHandle, BridgeError> {
-            let mut starts = self.starts.borrow_mut();
-            *starts += 1;
-            self.start_requests.borrow_mut().push(request.clone());
+            let starts = {
+                let mut count = self.probe.starts.lock().unwrap();
+                *count += 1;
+                *count
+            };
+            self.probe
+                .start_requests
+                .lock()
+                .unwrap()
+                .push(request.clone());
             Ok(RunHandle {
                 run_id: request
                     .requested_run_id
@@ -942,7 +1302,7 @@ mod tests {
         }
 
         fn stream(&self, run_id: &str) -> Result<Vec<BridgeEvent>, BridgeError> {
-            if let Some(events) = self.stream_events.borrow().clone() {
+            if let Some(events) = self.stream_events.clone() {
                 return Ok(events);
             }
 
@@ -982,12 +1342,12 @@ mod tests {
         }
 
         fn reply(&self, run_id: &str, _text: &str) -> Result<(), BridgeError> {
-            self.replies.borrow_mut().push(run_id.to_string());
+            self.probe.replies.lock().unwrap().push(run_id.to_string());
             Ok(())
         }
 
         fn stop(&self, run_id: &str) -> Result<(), BridgeError> {
-            self.stops.borrow_mut().push(run_id.to_string());
+            self.probe.stops.lock().unwrap().push(run_id.to_string());
             Ok(())
         }
 
@@ -1026,6 +1386,9 @@ mod tests {
             session: session(workspace_root),
             workspace_root: workspace_root.to_string(),
             task: "ship bridge core".to_string(),
+            model: None,
+            agent: None,
+            effort: None,
             requested_run_id: None,
             follow_up_to_run_id: None,
             transcript: Vec::new(),
@@ -1035,6 +1398,58 @@ mod tests {
                 "secret-value".to_string(),
             ]),
         }
+    }
+
+    #[test]
+    fn with_store_persists_session_run_and_transcript_for_reopen() {
+        let (allowlist_root, workspace_root) = workspace_paths();
+        let store_root =
+            std::env::temp_dir().join(format!("honeyhub-core-store-{}", uuid::Uuid::new_v4()));
+        let message = DispatchMessage {
+            id: "m1".to_string(),
+            session_id: "session-1".to_string(),
+            run_id: "run-fixed".to_string(),
+            role: DispatchMessageRole::Agent,
+            body: "did the thing".to_string(),
+            created_at: "2026-06-07T12:01:00Z".to_string(),
+            is_partial: Some(false),
+        };
+        let adapter = FakeAdapter::new(CapabilityFlags::claude_local()).with_stream_events(vec![
+            BridgeEvent::message(
+                "event-1",
+                "session-1",
+                "run-fixed",
+                1,
+                "2026-06-07T12:01:00Z",
+                message,
+            ),
+        ]);
+        let mut runtime = BridgeRuntime::new(
+            adapter,
+            WorkspaceAllowlist::new(vec![allowlist_root]),
+            BackendAllowlist::new(vec![AgentBackend::ClaudeLocal]),
+        )
+        .with_store(LocalStore::open(&store_root).expect("store opens"));
+
+        let mut start = request(&workspace_root);
+        start.requested_run_id = Some("run-fixed".to_string());
+        let handle = runtime
+            .start(start, "2026-06-07T12:00:00Z")
+            .expect("starts");
+        runtime.stream_events(&handle.run_id).expect("streams");
+
+        // The session + run + transcript were mirrored to the store.
+        let sessions = runtime.stored_sessions();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].id, "session-1");
+        let (runs, transcript) = runtime.stored_session_detail("session-1");
+        assert_eq!(runs.len(), 1);
+        // Durable run record carries no raw prompt (task redacted in the store).
+        assert!(runs[0].task.is_empty());
+        assert_eq!(transcript.len(), 1);
+        assert_eq!(transcript[0].body, "did the thing");
+
+        let _ = fs::remove_dir_all(&store_root);
     }
 
     #[test]
@@ -1120,6 +1535,7 @@ mod tests {
     fn refuses_backend_outside_allowlist() {
         let (allowlist_root, workspace_root) = workspace_paths();
         let adapter = FakeAdapter::new(CapabilityFlags::claude_local());
+        let probe = adapter.probe();
         let mut runtime = BridgeRuntime::new(
             adapter,
             WorkspaceAllowlist::new(vec![allowlist_root]),
@@ -1131,7 +1547,7 @@ mod tests {
             .expect_err("disallowed backend is denied");
 
         assert_eq!(error.code, "backend_not_allowed");
-        assert_eq!(*runtime.adapter.starts.borrow(), 0);
+        assert_eq!(*probe.starts.lock().unwrap(), 0);
     }
 
     #[test]
@@ -1140,6 +1556,7 @@ mod tests {
         let mut capabilities = CapabilityFlags::claude_local();
         capabilities.interactive_reply = false;
         let adapter = FakeAdapter::new(capabilities);
+        let probe = adapter.probe();
         let mut runtime = BridgeRuntime::new(
             adapter,
             WorkspaceAllowlist::new(vec![allowlist_root]),
@@ -1165,7 +1582,7 @@ mod tests {
                 .state,
             DispatchRunState::Completed
         );
-        let start_requests = runtime.adapter.start_requests.borrow();
+        let start_requests = probe.start_requests.lock().unwrap();
         assert_eq!(start_requests.len(), 2);
         assert_eq!(
             start_requests[1].follow_up_to_run_id,
@@ -1377,6 +1794,7 @@ mod tests {
         let (allowlist_root, workspace_root) = workspace_paths();
         let (_other_root, other_workspace) = workspace_paths();
         let adapter = FakeAdapter::new(CapabilityFlags::claude_local());
+        let probe = adapter.probe();
         let mut runtime = BridgeRuntime::new(
             adapter,
             WorkspaceAllowlist::new(vec![allowlist_root]),
@@ -1390,7 +1808,7 @@ mod tests {
             .expect_err("mismatched session workspace is rejected");
 
         assert_eq!(error.code, "workspace_mismatch");
-        assert_eq!(*runtime.adapter.starts.borrow(), 0);
+        assert_eq!(*probe.starts.lock().unwrap(), 0);
     }
 
     #[test]
@@ -1442,6 +1860,7 @@ mod tests {
     fn terminal_runs_reject_replies_and_ignore_late_exit_transitions() {
         let (allowlist_root, workspace_root) = workspace_paths();
         let adapter = FakeAdapter::new(CapabilityFlags::claude_local());
+        let probe = adapter.probe();
         let mut runtime = BridgeRuntime::new(
             adapter,
             WorkspaceAllowlist::new(vec![allowlist_root]),
@@ -1482,7 +1901,7 @@ mod tests {
         let managed = runtime.run(&handle.run_id).expect("run exists");
         assert_eq!(managed.record.run.state, DispatchRunState::Completed);
         assert_eq!(error.code, "terminal_run_reply");
-        assert!(runtime.adapter.replies.borrow().is_empty());
+        assert!(probe.replies.lock().unwrap().is_empty());
     }
 
     #[test]
@@ -1496,6 +1915,7 @@ mod tests {
         let mut capabilities = CapabilityFlags::claude_local();
         capabilities.interactive_reply = false; // resume_session stays true
         let adapter = FakeAdapter::new(capabilities);
+        let probe = adapter.probe();
         let mut runtime = BridgeRuntime::new(
             adapter,
             WorkspaceAllowlist::new(vec![allowlist_root]),
@@ -1528,7 +1948,7 @@ mod tests {
             .reply(&handle.run_id, "continue", "2026-06-07T12:02:00Z")
             .expect("terminal resume-based run replies via a follow-up run");
         assert!(matches!(outcome, ReplyOutcome::FollowUpRunStarted(_)));
-        let start_requests = runtime.adapter.start_requests.borrow();
+        let start_requests = probe.start_requests.lock().unwrap();
         assert_eq!(start_requests.len(), 2);
         assert_eq!(
             start_requests[1].follow_up_to_run_id,
@@ -1545,6 +1965,7 @@ mod tests {
         let mut capabilities = CapabilityFlags::claude_local();
         capabilities.interactive_reply = false; // resume_session stays true
         let adapter = FakeAdapter::new(capabilities);
+        let probe = adapter.probe();
         let mut runtime = BridgeRuntime::new(
             adapter,
             WorkspaceAllowlist::new(vec![allowlist_root]),
@@ -1580,7 +2001,7 @@ mod tests {
             .expect_err("a failed terminal run is not a valid reply target");
         assert_eq!(error.code, "terminal_run_reply");
         // No follow-up run was started.
-        assert_eq!(runtime.adapter.start_requests.borrow().len(), 1);
+        assert_eq!(probe.start_requests.lock().unwrap().len(), 1);
     }
 
     #[test]
@@ -2254,6 +2675,133 @@ mod tests {
         assert_eq!(
             err_code(BridgeEventPayload::AgentCatalog { agents: Vec::new() }),
             "event_unexpected_agent_catalog"
+        );
+        assert_eq!(
+            err_code(BridgeEventPayload::BackendCatalog {
+                backends: Vec::new()
+            }),
+            "event_unexpected_backend_catalog"
+        );
+        assert_eq!(
+            err_code(BridgeEventPayload::DirListing {
+                listing: crate::fsbrowse::DirListing {
+                    path: String::new(),
+                    parent: None,
+                    entries: Vec::new(),
+                    truncated: false,
+                },
+            }),
+            "event_unexpected_dir_listing"
+        );
+        assert_eq!(
+            err_code(BridgeEventPayload::FileContents {
+                file: crate::fsbrowse::FileContents {
+                    path: "x".to_string(),
+                    content: String::new(),
+                    truncated: false,
+                    byte_size: 0,
+                },
+            }),
+            "event_unexpected_file_contents"
+        );
+        assert_eq!(
+            err_code(BridgeEventPayload::SearchResults {
+                results: crate::fsbrowse::SearchResults {
+                    root: "r".to_string(),
+                    query: "q".to_string(),
+                    hits: Vec::new(),
+                    truncated: false,
+                },
+            }),
+            "event_unexpected_search_results"
+        );
+        assert_eq!(
+            err_code(BridgeEventPayload::WorkspaceFolders {
+                folders: crate::fsbrowse::WorkspaceFolders {
+                    workspace_file: "w".to_string(),
+                    folders: Vec::new(),
+                },
+            }),
+            "event_unexpected_workspace_folders"
+        );
+        assert_eq!(
+            err_code(BridgeEventPayload::AgentWritten {
+                agent: AgentWriteOutcome {
+                    name: "x".to_string(),
+                    source_path: ".claude/agents/x.md".to_string(),
+                    scope: AgentScope::Global,
+                },
+            }),
+            "event_unexpected_agent_written"
+        );
+        assert_eq!(
+            err_code(BridgeEventPayload::JobSnapshot {
+                snapshot: crate::jobs::JobSnapshot {
+                    known: Vec::new(),
+                    scheduled: Vec::new(),
+                    processes: Vec::new(),
+                    truncated: false,
+                },
+            }),
+            "event_unexpected_job_snapshot"
+        );
+        assert_eq!(
+            err_code(BridgeEventPayload::EnvironmentInfo {
+                environment: crate::environment::EnvironmentInfo {
+                    backends: Vec::new()
+                },
+            }),
+            "event_unexpected_environment_info"
+        );
+        assert_eq!(
+            err_code(BridgeEventPayload::GitStatus {
+                status: crate::git::GitStatus {
+                    root: "/r".to_string(),
+                    branch: None,
+                    upstream: None,
+                    ahead: 0,
+                    behind: 0,
+                    files: Vec::new(),
+                    clean: true,
+                },
+            }),
+            "event_unexpected_git_status"
+        );
+        assert_eq!(
+            err_code(BridgeEventPayload::GitDiff {
+                diff: crate::git::GitDiff {
+                    root: "/r".to_string(),
+                    path: None,
+                    patch: String::new(),
+                    truncated: false,
+                },
+            }),
+            "event_unexpected_git_diff"
+        );
+        assert_eq!(
+            err_code(BridgeEventPayload::SessionList {
+                sessions: Vec::new()
+            }),
+            "event_unexpected_session_list"
+        );
+        assert_eq!(
+            err_code(BridgeEventPayload::SessionDetail {
+                session_id: "s".to_string(),
+                runs: Vec::new(),
+                transcript: Vec::new(),
+            }),
+            "event_unexpected_session_detail"
+        );
+        assert_eq!(
+            err_code(BridgeEventPayload::Roadmap {
+                roadmap: crate::roadmap::RoadmapSnapshot {
+                    found: false,
+                    source: String::new(),
+                    last_reviewed: None,
+                    lanes: Vec::new(),
+                },
+            }),
+            "event_unexpected_roadmap"
         );
     }
 }

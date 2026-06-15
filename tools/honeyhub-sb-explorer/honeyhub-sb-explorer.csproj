@@ -1,0 +1,27 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    HoneyHub Service Bus explorer helper (ADR-0094 D5).
+    A tiny optional CLI the HoneyHub bridge shells for Service Bus DATA-PLANE operations that
+    `az` cannot do (message browse/peek, and later send/receive/dead-letter management). It
+    authenticates with DefaultAzureCredential (reuses the operator's `az login`; no connection
+    string), so it needs the "Azure Service Bus Data Receiver" role for peek (and Data
+    Sender / Data Owner for the write verbs added later). Read-only verbs only at this stage:
+    `peek`. Output is a single JSON document on stdout; errors go to stderr with a non-zero exit.
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AssemblyName>honeyhub-sb-explorer</AssemblyName>
+    <RootNamespace>HoneyHub.SbExplorer</RootNamespace>
+    <InvariantGlobalization>true</InvariantGlobalization>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Azure.Messaging.ServiceBus" Version="7.18.2" />
+    <PackageReference Include="Azure.Identity" Version="1.13.1" />
+  </ItemGroup>
+
+</Project>

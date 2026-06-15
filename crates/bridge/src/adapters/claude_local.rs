@@ -17,6 +17,7 @@
 //! capability flags, the `stream-json` line parsing, and the same-process reply
 //! framing.
 
+use crate::activity::{ActivityKind, DispatchActivity};
 use crate::adapter::{
     AgentBackend, AgentBackendAdapter, BridgeError, CapabilityFlags, RunHandle, StartRunRequest,
 };
@@ -107,7 +108,11 @@ impl ClaudeLocalAdapter {
         );
     }
 
-    fn base_command(&self) -> Command {
+    /// Build the base CLI command. `model_override` (the user's per-run pick) takes
+    /// precedence over the adapter's configured default; when neither is set the CLI
+    /// uses its own default model. `agent_override` (the chat agent picker) maps to
+    /// Claude's `--agent <name>`, overriding the session's default agent.
+    fn base_command(&self, model_override: Option<&str>, agent_override: Option<&str>) -> Command {
         let mut command = Command::new(&self.program);
         command
             .arg("-p")
@@ -117,8 +122,15 @@ impl ClaudeLocalAdapter {
             .arg("stream-json")
             .arg("--include-partial-messages")
             .arg("--verbose");
-        if let Some(model) = &self.model {
+        let model = model_override.or(self.model.as_deref());
+        if let Some(model) = model {
             command.arg("--model").arg(model);
+        }
+        if let Some(agent) = agent_override {
+            let agent = agent.trim();
+            if !agent.is_empty() {
+                command.arg("--agent").arg(agent);
+            }
         }
         command
     }
@@ -150,6 +162,80 @@ fn assistant_text(value: &Value) -> String {
             .join(""),
         _ => String::new(),
     }
+}
+
+/// Map a Claude tool name to an activity kind. Names follow Claude Code's tool set.
+fn classify_tool(name: &str) -> ActivityKind {
+    match name {
+        "Read" | "Glob" | "LS" | "NotebookRead" => ActivityKind::Read,
+        "Edit" | "MultiEdit" | "Write" | "NotebookEdit" => ActivityKind::Edit,
+        "Bash" | "BashOutput" | "KillBash" => ActivityKind::Command,
+        "Grep" => ActivityKind::Search,
+        "WebFetch" | "WebSearch" => ActivityKind::Fetch,
+        _ => ActivityKind::Tool,
+    }
+}
+
+/// A short, non-sensitive detail for a tool call: a path, command, pattern, or url, trimmed
+/// to a reasonable length. Returns `None` when nothing concise is available.
+fn tool_detail(name: &str, input: &Value) -> Option<String> {
+    let pick = |keys: &[&str]| {
+        keys.iter()
+            .find_map(|key| input.get(*key).and_then(Value::as_str))
+            .map(str::to_string)
+    };
+    let raw = match name {
+        "Bash" => pick(&["command", "description"]),
+        "Grep" => pick(&["pattern"]),
+        "WebFetch" | "WebSearch" => pick(&["url", "query"]),
+        _ => pick(&["file_path", "path", "notebook_path", "pattern"]),
+    };
+    raw.map(|detail| {
+        let trimmed = detail.trim();
+        if trimmed.chars().count() > 120 {
+            format!("{}…", trimmed.chars().take(120).collect::<String>())
+        } else {
+            trimmed.to_string()
+        }
+    })
+    .filter(|detail| !detail.is_empty())
+}
+
+/// Extract activity events from an assistant message's `tool_use` content blocks, so the UI
+/// can show what the agent is doing (metadata only — never the tool's full input/output).
+fn tool_activities(value: &Value, session_id: &str, run_id: &str, now: &str) -> Vec<BridgeEvent> {
+    let Some(blocks) = value
+        .get("message")
+        .and_then(|message| message.get("content"))
+        .and_then(Value::as_array)
+    else {
+        return Vec::new();
+    };
+    blocks
+        .iter()
+        .filter(|block| block.get("type").and_then(Value::as_str) == Some("tool_use"))
+        .filter_map(|block| {
+            let name = block.get("name").and_then(Value::as_str)?;
+            let empty = Value::Object(serde_json::Map::new());
+            let input = block.get("input").unwrap_or(&empty);
+            Some(BridgeEvent::activity(
+                Uuid::new_v4().to_string(),
+                session_id,
+                run_id,
+                0,
+                now.to_string(),
+                DispatchActivity {
+                    id: Uuid::new_v4().to_string(),
+                    session_id: session_id.to_string(),
+                    run_id: run_id.to_string(),
+                    kind: classify_tool(name),
+                    label: name.to_string(),
+                    detail: tool_detail(name, input),
+                    created_at: now.to_string(),
+                },
+            ))
+        })
+        .collect()
 }
 
 fn usage_signal(value: &Value, session_id: &str, run_id: &str, now: &str) -> UsageSignal {
@@ -238,23 +324,29 @@ fn parse_line(
             Vec::new()
         }
         "assistant" => {
+            // Surface tool calls as activity events; emit the prose message only when the
+            // turn carries text (a tool-only turn has an empty body).
+            let mut events = tool_activities(&value, session_id, run_id, &now);
             let body = assistant_text(&value);
-            vec![BridgeEvent::message(
-                Uuid::new_v4().to_string(),
-                session_id,
-                run_id,
-                0,
-                now.clone(),
-                DispatchMessage {
-                    id: Uuid::new_v4().to_string(),
-                    session_id: session_id.to_string(),
-                    run_id: run_id.to_string(),
-                    role: DispatchMessageRole::Agent,
-                    body,
-                    created_at: now,
-                    is_partial: Some(false),
-                },
-            )]
+            if !body.is_empty() {
+                events.push(BridgeEvent::message(
+                    Uuid::new_v4().to_string(),
+                    session_id,
+                    run_id,
+                    0,
+                    now.clone(),
+                    DispatchMessage {
+                        id: Uuid::new_v4().to_string(),
+                        session_id: session_id.to_string(),
+                        run_id: run_id.to_string(),
+                        role: DispatchMessageRole::Agent,
+                        body,
+                        created_at: now,
+                        is_partial: Some(false),
+                    },
+                ));
+            }
+            events
         }
         "stream_event" => {
             let delta = value
@@ -365,7 +457,7 @@ impl AgentBackendAdapter for ClaudeLocalAdapter {
             .clone()
             .unwrap_or_else(|| Uuid::new_v4().to_string());
 
-        let mut command = self.base_command();
+        let mut command = self.base_command(request.model.as_deref(), request.agent.as_deref());
         command.current_dir(&request.workspace_root);
         let mut run = ChildRun::spawn(command, request.session.id.clone(), None)?;
         let process_id = run.process_id();
@@ -450,7 +542,7 @@ impl AgentBackendAdapter for ClaudeLocalAdapter {
 
     fn resume(&self, session_id_or_transcript: &str) -> Result<RunHandle, BridgeError> {
         let run_id = Uuid::new_v4().to_string();
-        let mut command = self.base_command();
+        let mut command = self.base_command(None, None);
         command.arg("-r").arg(session_id_or_transcript);
         let run = ChildRun::spawn(
             command,
@@ -585,6 +677,53 @@ mod tests {
     }
 
     #[test]
+    fn parses_tool_use_blocks_into_activity_events() {
+        let mut backend_session = None;
+        // A turn with a tool call AND prose: one activity + one message.
+        let events = parse_line(
+            &test_clock(),
+            r#"{"type":"assistant","message":{"role":"assistant","content":[
+                {"type":"tool_use","name":"Edit","input":{"file_path":"src/app.rs"}},
+                {"type":"text","text":"editing now"}
+            ]}}"#,
+            "run-1",
+            "session-1",
+            &mut backend_session,
+        );
+        match &events[0].payload {
+            crate::wire::BridgeEventPayload::Activity { activity } => {
+                assert_eq!(activity.kind, ActivityKind::Edit);
+                assert_eq!(activity.label, "Edit");
+                assert_eq!(activity.detail.as_deref(), Some("src/app.rs"));
+            }
+            other => panic!("expected an activity payload, got {other:?}"),
+        }
+        assert!(matches!(
+            events[1].payload,
+            crate::wire::BridgeEventPayload::Message { .. }
+        ));
+
+        // A tool-only turn (no text) yields only the activity, no empty message.
+        let tool_only = parse_line(
+            &test_clock(),
+            r#"{"type":"assistant","message":{"role":"assistant","content":[
+                {"type":"tool_use","name":"Bash","input":{"command":"cargo test"}}
+            ]}}"#,
+            "run-1",
+            "session-1",
+            &mut backend_session,
+        );
+        assert_eq!(tool_only.len(), 1);
+        match &tool_only[0].payload {
+            crate::wire::BridgeEventPayload::Activity { activity } => {
+                assert_eq!(activity.kind, ActivityKind::Command);
+                assert_eq!(activity.detail.as_deref(), Some("cargo test"));
+            }
+            other => panic!("expected an activity payload, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn ignores_unparseable_and_unknown_lines() {
         let mut backend_session = None;
         assert!(parse_line(&test_clock(), "not json", "r", "s", &mut backend_session).is_empty());
@@ -654,6 +793,9 @@ mod tests {
             },
             workspace_root: ".".to_string(),
             task: "do it".to_string(),
+            model: None,
+            agent: None,
+            effort: None,
             requested_run_id: Some("run-1".to_string()),
             follow_up_to_run_id: None,
             transcript: Vec::new(),

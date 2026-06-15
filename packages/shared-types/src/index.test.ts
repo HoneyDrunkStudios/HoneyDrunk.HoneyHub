@@ -218,6 +218,48 @@ test("discover_agents carries an optional root and answers with an agent catalog
   assert.equal(event.event?.payload.kind, "agent_catalog");
 });
 
+test("discover_backends is a fieldless query and answers with a backend catalog", () => {
+  const query: WireFrame = {
+    protocol: wireProtocolVersion,
+    frameId: "frame-bq",
+    kind: "client_command",
+    createdAt: "2026-06-07T12:00:00Z",
+    command: { kind: "discover_backends" }
+  };
+  assert.equal(query.command?.kind, "discover_backends");
+
+  const event: WireFrame = {
+    protocol: wireProtocolVersion,
+    frameId: "frame-be",
+    kind: "server_event",
+    createdAt: "2026-06-07T12:00:00Z",
+    event: {
+      id: "e1",
+      sessionId: "",
+      runId: "",
+      sequence: 0,
+      createdAt: "2026-06-07T12:00:00Z",
+      payload: {
+        kind: "backend_catalog",
+        backends: [
+          {
+            backend: "claude.local",
+            program: "claude",
+            available: true,
+            capabilities: defaultClaudeCapabilities,
+            models: [{ id: "opus", label: "Claude Opus 4.8" }],
+            modelSource: "bridge_known"
+          }
+        ]
+      }
+    }
+  };
+  assert.equal(event.event?.payload.kind, "backend_catalog");
+  if (event.event?.payload.kind === "backend_catalog") {
+    assert.equal(event.event.payload.backends[0]?.available, true);
+  }
+});
+
 test("coaching_hints is a fieldless query and a hint-bearing event", () => {
   const query: WireFrame = {
     protocol: wireProtocolVersion,

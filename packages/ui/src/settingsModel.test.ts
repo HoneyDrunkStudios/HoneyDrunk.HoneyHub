@@ -5,10 +5,13 @@ import {
   defaultPairingFactory,
   emptyBridgeSettings,
   isAbsoluteWorkspaceRoot,
+  isModelEnabled,
   pairDevice,
   removeWorkspaceRoot,
   revokeDevice,
   setBackendAllowed,
+  setModelAllowed,
+  type BridgeSettingsState,
   type PairingFactory
 } from "./settingsModel";
 
@@ -95,5 +98,51 @@ describe("bridge settings model", () => {
     state = setBackendAllowed(state, "claude.local", false);
     expect(state.backends).toEqual([]);
     expect(setBackendAllowed(state, "claude.local", false)).toBe(state);
+  });
+});
+
+describe("per-model allowlist", () => {
+  const all = ["a", "b", "c"];
+
+  it("treats an absent entry as all-models-enabled (the default)", () => {
+    expect(isModelEnabled(emptyBridgeSettings, "claude.local", "a")).toBe(true);
+    expect(isModelEnabled(emptyBridgeSettings, "codex.local", "anything")).toBe(true);
+  });
+
+  it("disabling one model records the remaining set as the restriction", () => {
+    const next = setModelAllowed(emptyBridgeSettings, "claude.local", "a", false, all);
+    expect(next.enabledModels["claude.local"]).toEqual(["b", "c"]);
+    expect(isModelEnabled(next, "claude.local", "a")).toBe(false);
+    expect(isModelEnabled(next, "claude.local", "b")).toBe(true);
+  });
+
+  it("re-enabling the full set drops back to the unrestricted default", () => {
+    const off = setModelAllowed(emptyBridgeSettings, "claude.local", "a", false, all);
+    expect(off.enabledModels["claude.local"]).toBeDefined();
+    const on = setModelAllowed(off, "claude.local", "a", true, all);
+    // Covers everything again → entry removed so it reads as "all on".
+    expect(on.enabledModels["claude.local"]).toBeUndefined();
+  });
+
+  it("enabling an already-enabled model is a no-op on the set", () => {
+    const off = setModelAllowed(emptyBridgeSettings, "claude.local", "a", false, all);
+    const again = setModelAllowed(off, "claude.local", "b", true, all);
+    // "b" was already in {b,c}; still restricted (a is off), set unchanged.
+    expect(again.enabledModels["claude.local"]).toEqual(["b", "c"]);
+  });
+
+  it("refuses to disable the last remaining model", () => {
+    let state: BridgeSettingsState = setModelAllowed(
+      emptyBridgeSettings,
+      "claude.local",
+      "a",
+      false,
+      all
+    );
+    state = setModelAllowed(state, "claude.local", "b", false, all);
+    // Only "c" remains; disabling it must be a no-op (same reference).
+    const blocked = setModelAllowed(state, "claude.local", "c", false, all);
+    expect(blocked).toBe(state);
+    expect(isModelEnabled(blocked, "claude.local", "c")).toBe(true);
   });
 });

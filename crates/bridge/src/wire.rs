@@ -1,9 +1,25 @@
+use crate::activity::DispatchActivity;
 use crate::adapter::{AgentBackend, BridgeError, StartRunRequest};
-use crate::agents::AgentDefinition;
+use crate::agents::{AgentDefinition, AgentWriteOutcome};
 use crate::artifact::DispatchArtifact;
-use crate::session::{
-    DispatchControlEvent, DispatchMessage, DispatchRunState, PolicyHint, UsageSignal, UsageSummary,
+use crate::backend_catalog::BackendCapability;
+use crate::environment::EnvironmentInfo;
+use crate::fsbrowse::{DirListing, FileContents, SearchResults, WorkspaceFolders};
+use crate::git::{GitDiff, GitStatus};
+use crate::grafana::GrafanaSummary;
+use crate::jobs::{JobProbe, JobSnapshot};
+use crate::network::NetworkInfo;
+use crate::roadmap::RoadmapSnapshot;
+use crate::sentry::SentrySummary;
+use crate::servicebus::{
+    ServiceBusPeek, ServiceBusPurge, ServiceBusReceive, ServiceBusResubmit, ServiceBusSend,
+    ServiceBusSnapshot,
 };
+use crate::session::{
+    DispatchControlEvent, DispatchMessage, DispatchRun, DispatchRunState, DispatchSession,
+    PolicyHint, UsageSignal, UsageSummary,
+};
+use crate::work::WorkSnapshot;
 use serde::{Deserialize, Serialize};
 
 pub const WIRE_PROTOCOL_VERSION: &str = "honeyhub.bridge.v1";
@@ -142,6 +158,203 @@ pub enum ClientCommand {
         #[serde(skip_serializing_if = "Option::is_none")]
         workspace_root: Option<String>,
     },
+    /// Discover which backend CLIs are installed on this machine and the models they
+    /// offer (packet 09 §3 / ADR-0092). The webview cannot probe the host, so it asks
+    /// the bridge. A read-only query carrying no fields; the host answers with a single
+    /// [`BridgeEventPayload::BackendCatalog`].
+    DiscoverBackends,
+    /// Replace the workspace allowlist with the repo locations the user picked in the
+    /// cockpit (packet 09 §3). Scopes file reads — and launches — to those roots. The
+    /// host applies it and acks (no event).
+    SetWorkspaceRoots {
+        roots: Vec<String>,
+    },
+    /// Browse a directory for the repo/file picker (read-only, names + kinds only, no
+    /// contents). An omitted/empty `path` returns the top level (drive roots on
+    /// Windows, `/` on Unix). The host answers with a [`BridgeEventPayload::DirListing`].
+    BrowseDir {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        path: Option<String>,
+    },
+    /// Read a file's UTF-8 text for the viewer (read-only). The host gates `path`
+    /// against the workspace allowlist and answers with a
+    /// [`BridgeEventPayload::FileContents`] (or an error for binary/oversized/denied).
+    ReadFile {
+        path: String,
+    },
+    /// Recursively search a root for files whose name contains `query` (read-only).
+    /// The host gates `root` against the allowlist and answers with a
+    /// [`BridgeEventPayload::SearchResults`].
+    SearchFiles {
+        root: String,
+        query: String,
+    },
+    /// Resolve a VS Code `.code-workspace` file to the repo folders it references, so
+    /// the picker can add several repos at once. Read-only; answered with a
+    /// [`BridgeEventPayload::WorkspaceFolders`].
+    ResolveWorkspaceFile {
+        path: String,
+    },
+    /// Author a Claude agent definition (packet 09 §3d — make agents in-app). Writes
+    /// `<root>/.claude/agents/<name>.md`; an omitted `workspace_root` targets the user's
+    /// global `~/.claude/agents`. The host gates a project `workspace_root` against the
+    /// allowlist and answers with a [`BridgeEventPayload::AgentWritten`], then the UI
+    /// re-discovers. `model` is an optional default model for the agent's frontmatter.
+    WriteAgent {
+        name: String,
+        description: String,
+        body: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        workspace_root: Option<String>,
+    },
+    /// Snapshot the local processes + curated known-job health (control-hub roadmap #7).
+    /// A read-only query; the host merges the user's `extra_probes` /
+    /// `extra_task_keywords` (configurable job patterns) onto the built-in set and answers
+    /// with a single [`BridgeEventPayload::JobSnapshot`]. Both default to empty.
+    ListJobs {
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        extra_probes: Vec<JobProbe>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        extra_task_keywords: Vec<String>,
+    },
+    /// Detect each backend CLI's installed version (control-hub roadmap #8). A read-only
+    /// query carrying no fields; the host answers with a single
+    /// [`BridgeEventPayload::EnvironmentInfo`].
+    DetectEnvironment,
+    /// List this host's reachable (non-loopback) addresses for **mobile pairing** ("Connect
+    /// a phone"). A read-only query carrying no fields; the host answers with a single
+    /// [`BridgeEventPayload::NetworkInfo`].
+    ListNetwork,
+    /// Fetch work items from the opt-in **work connectors** the cockpit has enabled (by id,
+    /// e.g. `github`). Read-only; the host queries ONLY the listed `sources` and answers with
+    /// a single [`BridgeEventPayload::WorkSnapshot`]. Empty `sources` = query nothing.
+    ListWork {
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        sources: Vec<String>,
+    },
+    /// Snapshot Azure Service Bus (opt-in observability connector): namespaces + queue /
+    /// subscription message counts. Read-only (management plane only); the host answers with
+    /// a single [`BridgeEventPayload::ServiceBusSnapshot`].
+    ListServiceBus,
+    /// Browse (non-destructive peek) messages from a Service Bus queue, or a topic
+    /// subscription when `subscription` is set; `dead_letter` peeks the dead-letter sub-queue.
+    /// Read-only data-plane (ADR-0094 D5) via the optional explorer helper; the host answers
+    /// with a single [`BridgeEventPayload::ServiceBusPeek`].
+    PeekServiceBus {
+        namespace: String,
+        entity: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        subscription: Option<String>,
+        #[serde(default)]
+        dead_letter: bool,
+        #[serde(default)]
+        count: u32,
+    },
+    /// **Write op** (ADR-0094 D5): move up to `count` dead-letter messages of a queue (or topic
+    /// subscription) back to the source. Destructive; the cockpit gates it behind an explicit
+    /// confirmation. The host answers with a single [`BridgeEventPayload::ServiceBusResubmit`].
+    ResubmitDeadLetter {
+        namespace: String,
+        entity: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        subscription: Option<String>,
+        #[serde(default)]
+        count: u32,
+    },
+    /// **Write op** (ADR-0094 D5): drain ALL messages from a queue / subscription (or its
+    /// dead-letter sub-queue). Irreversibly destructive; the cockpit gates it behind an
+    /// explicit confirmation. The host answers with [`BridgeEventPayload::ServiceBusPurge`].
+    PurgeServiceBus {
+        namespace: String,
+        entity: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        subscription: Option<String>,
+        #[serde(default)]
+        dead_letter: bool,
+    },
+    /// **Write op** (ADR-0094 D5): publish a message to a queue / topic. The cockpit gates it
+    /// behind an explicit confirmation. The host answers with
+    /// [`BridgeEventPayload::ServiceBusSend`].
+    SendServiceBus {
+        namespace: String,
+        entity: String,
+        body: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        subject: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        content_type: Option<String>,
+    },
+    /// **Write op** (ADR-0094 D5): consume + remove the next single message from a queue /
+    /// subscription (or its dead-letter sub-queue). Destructive; confirmation-gated. The host
+    /// answers with [`BridgeEventPayload::ServiceBusReceive`].
+    ReceiveServiceBus {
+        namespace: String,
+        entity: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        subscription: Option<String>,
+        #[serde(default)]
+        dead_letter: bool,
+    },
+    /// Summarize a Grafana instance (opt-in observability connector): health + dashboards.
+    /// The config (`base_url` + optional `token`) is held in the cockpit and passed per
+    /// request — the host doesn't persist it. Read-only; the host answers with a single
+    /// [`BridgeEventPayload::GrafanaSummary`].
+    GrafanaSummary {
+        base_url: String,
+        #[serde(default)]
+        token: String,
+    },
+    /// Summarize a Sentry project's unresolved issues (opt-in observability connector). Config
+    /// (`base_url` + `org` + `project` + `token`) is held in the cockpit and passed per request
+    /// — the host doesn't persist it. Read-only; answered with [`BridgeEventPayload::SentrySummary`].
+    SentrySummary {
+        #[serde(default)]
+        base_url: String,
+        org: String,
+        project: String,
+        #[serde(default)]
+        token: String,
+    },
+    /// Read a repo's git status (branch / ahead-behind / dirty files). The host gates
+    /// `root` against the allowlist and answers with [`BridgeEventPayload::GitStatus`].
+    GitStatus {
+        root: String,
+    },
+    /// Read a repo's read-only unified diff (against `HEAD`), optionally one path. The
+    /// host gates `root` against the allowlist and answers with
+    /// [`BridgeEventPayload::GitDiff`].
+    GitDiff {
+        root: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        path: Option<String>,
+    },
+    /// List the locally-persisted sessions (durable chat history). A read-only query;
+    /// the host answers with a single [`BridgeEventPayload::SessionList`].
+    ListSessions,
+    /// Read one persisted session's runs + transcript, to reopen a past chat. The host
+    /// answers with a single [`BridgeEventPayload::SessionDetail`].
+    SessionDetail {
+        session_id: String,
+    },
+    /// Read the roadmap snapshot from the Architecture repo's `initiatives/current-focus.md`
+    /// (control-hub #6). A read-only query carrying no fields; the host answers with a single
+    /// [`BridgeEventPayload::Roadmap`] (`found: false` when no repo is present).
+    Roadmap,
+    /// Scaffold a starter Architecture repo (control-hub #6 — Plan empty-state create). An
+    /// omitted `name` defaults to `architecture`; an omitted `location` defaults next to a
+    /// workspace root. The host answers with a [`BridgeEventPayload::Roadmap`] of the freshly
+    /// created repo (or an error, e.g. `already_exists`).
+    ScaffoldArchitecture {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        location: Option<String>,
+    },
+    /// Fast-forward (`git pull --ff-only`) the Architecture repo, then re-read it. Answers
+    /// with a [`BridgeEventPayload::Roadmap`] of the refreshed repo (or a git error).
+    PullArchitecture,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -274,6 +487,26 @@ impl BridgeEvent {
         }
     }
 
+    /// A per-run tool/file activity event (what the agent is doing). Scoped to its run +
+    /// session like a message; the core re-stamps the sequence.
+    pub fn activity(
+        id: impl Into<String>,
+        session_id: impl Into<String>,
+        run_id: impl Into<String>,
+        sequence: u64,
+        created_at: impl Into<String>,
+        activity: DispatchActivity,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            session_id: session_id.into(),
+            run_id: run_id.into(),
+            sequence,
+            created_at: created_at.into(),
+            payload: BridgeEventPayload::Activity { activity },
+        }
+    }
+
     /// A device-wide usage summary event. It is **not** scoped to a single run or
     /// session (it aggregates across all of them), so `session_id`/`run_id` are
     /// empty and `sequence` is `0`; the client dispatches on the payload kind.
@@ -327,20 +560,506 @@ impl BridgeEvent {
             payload: BridgeEventPayload::AgentCatalog { agents },
         }
     }
+
+    /// A device-wide backend-catalog event (the detected providers + their models).
+    /// Not scoped to a run or session, so the envelope's `session_id`/`run_id` are
+    /// empty and `sequence` is `0`.
+    pub fn backend_catalog(
+        id: impl Into<String>,
+        created_at: impl Into<String>,
+        backends: Vec<BackendCapability>,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            session_id: String::new(),
+            run_id: String::new(),
+            sequence: 0,
+            created_at: created_at.into(),
+            payload: BridgeEventPayload::BackendCatalog { backends },
+        }
+    }
+
+    /// A device-wide directory-listing event (the file/repo picker). Not scoped to a
+    /// run or session, so `session_id`/`run_id` are empty and `sequence` is `0`.
+    pub fn dir_listing(
+        id: impl Into<String>,
+        created_at: impl Into<String>,
+        listing: DirListing,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            session_id: String::new(),
+            run_id: String::new(),
+            sequence: 0,
+            created_at: created_at.into(),
+            payload: BridgeEventPayload::DirListing { listing },
+        }
+    }
+
+    /// A device-wide file-contents event (the read-only viewer). Not scoped to a run
+    /// or session, so `session_id`/`run_id` are empty and `sequence` is `0`.
+    pub fn file_contents(
+        id: impl Into<String>,
+        created_at: impl Into<String>,
+        file: FileContents,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            session_id: String::new(),
+            run_id: String::new(),
+            sequence: 0,
+            created_at: created_at.into(),
+            payload: BridgeEventPayload::FileContents { file },
+        }
+    }
+
+    /// A device-wide file-search-results event. Not scoped to a run or session, so
+    /// `session_id`/`run_id` are empty and `sequence` is `0`.
+    pub fn search_results(
+        id: impl Into<String>,
+        created_at: impl Into<String>,
+        results: SearchResults,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            session_id: String::new(),
+            run_id: String::new(),
+            sequence: 0,
+            created_at: created_at.into(),
+            payload: BridgeEventPayload::SearchResults { results },
+        }
+    }
+
+    /// A device-wide workspace-folders event (a `.code-workspace`'s repo folders). Not
+    /// scoped to a run or session, so `session_id`/`run_id` are empty and `sequence` is `0`.
+    pub fn workspace_folders(
+        id: impl Into<String>,
+        created_at: impl Into<String>,
+        folders: WorkspaceFolders,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            session_id: String::new(),
+            run_id: String::new(),
+            sequence: 0,
+            created_at: created_at.into(),
+            payload: BridgeEventPayload::WorkspaceFolders { folders },
+        }
+    }
+
+    /// A device-wide agent-written event (an authored definition). Not scoped to a run or
+    /// session, so `session_id`/`run_id` are empty and `sequence` is `0`.
+    pub fn agent_written(
+        id: impl Into<String>,
+        created_at: impl Into<String>,
+        agent: AgentWriteOutcome,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            session_id: String::new(),
+            run_id: String::new(),
+            sequence: 0,
+            created_at: created_at.into(),
+            payload: BridgeEventPayload::AgentWritten { agent },
+        }
+    }
+
+    /// A device-wide local-jobs snapshot. Not scoped to a run or session, so
+    /// `session_id`/`run_id` are empty and `sequence` is `0`.
+    pub fn job_snapshot(
+        id: impl Into<String>,
+        created_at: impl Into<String>,
+        snapshot: JobSnapshot,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            session_id: String::new(),
+            run_id: String::new(),
+            sequence: 0,
+            created_at: created_at.into(),
+            payload: BridgeEventPayload::JobSnapshot { snapshot },
+        }
+    }
+
+    /// A device-wide CLI-environment snapshot (installed versions). Not scoped to a run or
+    /// session, so `session_id`/`run_id` are empty and `sequence` is `0`.
+    pub fn environment_info(
+        id: impl Into<String>,
+        created_at: impl Into<String>,
+        environment: EnvironmentInfo,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            session_id: String::new(),
+            run_id: String::new(),
+            sequence: 0,
+            created_at: created_at.into(),
+            payload: BridgeEventPayload::EnvironmentInfo { environment },
+        }
+    }
+
+    /// A device-wide reachable-addresses snapshot (mobile pairing). Not scoped to a run or
+    /// session, so `session_id`/`run_id` are empty and `sequence` is `0`.
+    pub fn network_info(
+        id: impl Into<String>,
+        created_at: impl Into<String>,
+        network: NetworkInfo,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            session_id: String::new(),
+            run_id: String::new(),
+            sequence: 0,
+            created_at: created_at.into(),
+            payload: BridgeEventPayload::NetworkInfo { network },
+        }
+    }
+
+    /// A device-wide work-connectors snapshot. Not scoped to a run or session, so
+    /// `session_id`/`run_id` are empty and `sequence` is `0`.
+    pub fn work_snapshot(
+        id: impl Into<String>,
+        created_at: impl Into<String>,
+        snapshot: WorkSnapshot,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            session_id: String::new(),
+            run_id: String::new(),
+            sequence: 0,
+            created_at: created_at.into(),
+            payload: BridgeEventPayload::WorkSnapshot { snapshot },
+        }
+    }
+
+    /// A device-wide Service Bus snapshot. Not scoped to a run or session, so
+    /// `session_id`/`run_id` are empty and `sequence` is `0`.
+    pub fn service_bus_snapshot(
+        id: impl Into<String>,
+        created_at: impl Into<String>,
+        snapshot: ServiceBusSnapshot,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            session_id: String::new(),
+            run_id: String::new(),
+            sequence: 0,
+            created_at: created_at.into(),
+            payload: BridgeEventPayload::ServiceBusSnapshot { snapshot },
+        }
+    }
+
+    /// A device-wide Service Bus message peek. Not scoped to a run or session, so
+    /// `session_id`/`run_id` are empty and `sequence` is `0`.
+    pub fn service_bus_peek(
+        id: impl Into<String>,
+        created_at: impl Into<String>,
+        peek: ServiceBusPeek,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            session_id: String::new(),
+            run_id: String::new(),
+            sequence: 0,
+            created_at: created_at.into(),
+            payload: BridgeEventPayload::ServiceBusPeek { peek },
+        }
+    }
+
+    /// A device-wide Service Bus dead-letter resubmit result. Not scoped to a run or session,
+    /// so `session_id`/`run_id` are empty and `sequence` is `0`.
+    pub fn service_bus_resubmit(
+        id: impl Into<String>,
+        created_at: impl Into<String>,
+        result: ServiceBusResubmit,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            session_id: String::new(),
+            run_id: String::new(),
+            sequence: 0,
+            created_at: created_at.into(),
+            payload: BridgeEventPayload::ServiceBusResubmit { result },
+        }
+    }
+
+    /// A device-wide Service Bus purge result. Not scoped to a run or session, so
+    /// `session_id`/`run_id` are empty and `sequence` is `0`.
+    pub fn service_bus_purge(
+        id: impl Into<String>,
+        created_at: impl Into<String>,
+        result: ServiceBusPurge,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            session_id: String::new(),
+            run_id: String::new(),
+            sequence: 0,
+            created_at: created_at.into(),
+            payload: BridgeEventPayload::ServiceBusPurge { result },
+        }
+    }
+
+    /// A device-wide Service Bus send result. Not scoped to a run or session, so
+    /// `session_id`/`run_id` are empty and `sequence` is `0`.
+    pub fn service_bus_send(
+        id: impl Into<String>,
+        created_at: impl Into<String>,
+        result: ServiceBusSend,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            session_id: String::new(),
+            run_id: String::new(),
+            sequence: 0,
+            created_at: created_at.into(),
+            payload: BridgeEventPayload::ServiceBusSend { result },
+        }
+    }
+
+    /// A device-wide Service Bus receive result. Not scoped to a run or session, so
+    /// `session_id`/`run_id` are empty and `sequence` is `0`.
+    pub fn service_bus_receive(
+        id: impl Into<String>,
+        created_at: impl Into<String>,
+        result: ServiceBusReceive,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            session_id: String::new(),
+            run_id: String::new(),
+            sequence: 0,
+            created_at: created_at.into(),
+            payload: BridgeEventPayload::ServiceBusReceive { result },
+        }
+    }
+
+    /// A device-wide Grafana summary. Not scoped to a run or session, so
+    /// `session_id`/`run_id` are empty and `sequence` is `0`.
+    pub fn grafana_summary(
+        id: impl Into<String>,
+        created_at: impl Into<String>,
+        summary: GrafanaSummary,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            session_id: String::new(),
+            run_id: String::new(),
+            sequence: 0,
+            created_at: created_at.into(),
+            payload: BridgeEventPayload::GrafanaSummary { summary },
+        }
+    }
+
+    /// A device-wide Sentry summary. Not scoped to a run or session, so
+    /// `session_id`/`run_id` are empty and `sequence` is `0`.
+    pub fn sentry_summary(
+        id: impl Into<String>,
+        created_at: impl Into<String>,
+        summary: SentrySummary,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            session_id: String::new(),
+            run_id: String::new(),
+            sequence: 0,
+            created_at: created_at.into(),
+            payload: BridgeEventPayload::SentrySummary { summary },
+        }
+    }
+
+    /// A device-wide git-status event. Not scoped to a run or session, so
+    /// `session_id`/`run_id` are empty and `sequence` is `0`.
+    pub fn git_status(
+        id: impl Into<String>,
+        created_at: impl Into<String>,
+        status: GitStatus,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            session_id: String::new(),
+            run_id: String::new(),
+            sequence: 0,
+            created_at: created_at.into(),
+            payload: BridgeEventPayload::GitStatus { status },
+        }
+    }
+
+    /// A device-wide git-diff event. Not scoped to a run or session, so
+    /// `session_id`/`run_id` are empty and `sequence` is `0`.
+    pub fn git_diff(id: impl Into<String>, created_at: impl Into<String>, diff: GitDiff) -> Self {
+        Self {
+            id: id.into(),
+            session_id: String::new(),
+            run_id: String::new(),
+            sequence: 0,
+            created_at: created_at.into(),
+            payload: BridgeEventPayload::GitDiff { diff },
+        }
+    }
+
+    /// A device-wide persisted-session-list event. Not scoped to a run or session, so
+    /// `session_id`/`run_id` are empty and `sequence` is `0`.
+    pub fn session_list(
+        id: impl Into<String>,
+        created_at: impl Into<String>,
+        sessions: Vec<DispatchSession>,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            session_id: String::new(),
+            run_id: String::new(),
+            sequence: 0,
+            created_at: created_at.into(),
+            payload: BridgeEventPayload::SessionList { sessions },
+        }
+    }
+
+    /// A device-wide persisted-session-detail event (runs + transcript of one session).
+    /// Not scoped to a live run, so the envelope's `session_id`/`run_id` are empty.
+    pub fn session_detail(
+        id: impl Into<String>,
+        created_at: impl Into<String>,
+        session_id: String,
+        runs: Vec<DispatchRun>,
+        transcript: Vec<DispatchMessage>,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            session_id: String::new(),
+            run_id: String::new(),
+            sequence: 0,
+            created_at: created_at.into(),
+            payload: BridgeEventPayload::SessionDetail {
+                session_id,
+                runs,
+                transcript,
+            },
+        }
+    }
+
+    /// A device-wide roadmap snapshot (parsed Architecture initiatives). Not scoped to a run
+    /// or session, so `session_id`/`run_id` are empty and `sequence` is `0`.
+    pub fn roadmap(
+        id: impl Into<String>,
+        created_at: impl Into<String>,
+        roadmap: RoadmapSnapshot,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            session_id: String::new(),
+            run_id: String::new(),
+            sequence: 0,
+            created_at: created_at.into(),
+            payload: BridgeEventPayload::Roadmap { roadmap },
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum BridgeEventPayload {
-    Message { message: DispatchMessage },
-    Control { event: DispatchControlEvent },
-    Usage { signal: UsageSignal },
-    PolicyHint { hint: PolicyHint },
-    Status { status: BridgeStatusEvent },
-    Artifact { artifact: DispatchArtifact },
-    UsageSummary { summary: UsageSummary },
-    CoachingHints { hints: Vec<PolicyHint> },
-    AgentCatalog { agents: Vec<AgentDefinition> },
+    Message {
+        message: DispatchMessage,
+    },
+    Control {
+        event: DispatchControlEvent,
+    },
+    Usage {
+        signal: UsageSignal,
+    },
+    PolicyHint {
+        hint: PolicyHint,
+    },
+    Status {
+        status: BridgeStatusEvent,
+    },
+    Artifact {
+        artifact: DispatchArtifact,
+    },
+    Activity {
+        activity: DispatchActivity,
+    },
+    UsageSummary {
+        summary: UsageSummary,
+    },
+    CoachingHints {
+        hints: Vec<PolicyHint>,
+    },
+    AgentCatalog {
+        agents: Vec<AgentDefinition>,
+    },
+    BackendCatalog {
+        backends: Vec<BackendCapability>,
+    },
+    DirListing {
+        listing: DirListing,
+    },
+    FileContents {
+        file: FileContents,
+    },
+    SearchResults {
+        results: SearchResults,
+    },
+    WorkspaceFolders {
+        folders: WorkspaceFolders,
+    },
+    AgentWritten {
+        agent: AgentWriteOutcome,
+    },
+    JobSnapshot {
+        snapshot: JobSnapshot,
+    },
+    EnvironmentInfo {
+        environment: EnvironmentInfo,
+    },
+    NetworkInfo {
+        network: NetworkInfo,
+    },
+    WorkSnapshot {
+        snapshot: WorkSnapshot,
+    },
+    ServiceBusSnapshot {
+        snapshot: ServiceBusSnapshot,
+    },
+    ServiceBusPeek {
+        peek: ServiceBusPeek,
+    },
+    ServiceBusResubmit {
+        result: ServiceBusResubmit,
+    },
+    ServiceBusPurge {
+        result: ServiceBusPurge,
+    },
+    ServiceBusSend {
+        result: ServiceBusSend,
+    },
+    ServiceBusReceive {
+        result: ServiceBusReceive,
+    },
+    GrafanaSummary {
+        summary: GrafanaSummary,
+    },
+    SentrySummary {
+        summary: SentrySummary,
+    },
+    GitStatus {
+        status: GitStatus,
+    },
+    GitDiff {
+        diff: GitDiff,
+    },
+    SessionList {
+        sessions: Vec<DispatchSession>,
+    },
+    SessionDetail {
+        session_id: String,
+        runs: Vec<DispatchRun>,
+        transcript: Vec<DispatchMessage>,
+    },
+    Roadmap {
+        roadmap: RoadmapSnapshot,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -574,6 +1293,9 @@ mod tests {
                         },
                         workspace_root: "C:/work/honeyhub".to_string(),
                         task: "run with emoji-safe text: <>&".to_string(),
+                        model: None,
+                        agent: None,
+                        effort: None,
                         requested_run_id: Some("run-1".to_string()),
                         follow_up_to_run_id: None,
                         transcript: Vec::new(),
@@ -760,5 +1482,510 @@ mod tests {
             let round_trip: WireFrame = serde_json::from_value(value).expect("frame deserializes");
             assert_eq!(round_trip, frame);
         }
+    }
+
+    /// Exercise every `BridgeEvent::*` associated constructor so the unit-test pass counts
+    /// each one as covered (they are otherwise only hit by an integration test). Each
+    /// constructor is called with a freshly-built payload, then we assert the event
+    /// serializes to a non-empty string and carries the expected `BridgeEventPayload`
+    /// variant — which also drives the payload serialization paths.
+    #[test]
+    fn every_bridge_event_constructor_builds_and_serializes() {
+        let at = "2026-06-15T00:00:00Z";
+
+        // Helper: build a payload value from camelCase JSON (matches the crate's serde).
+        macro_rules! from_json {
+            ($ty:ty, $value:tt) => {{
+                let value = json!($value);
+                serde_json::from_value::<$ty>(value).expect("payload deserializes")
+            }};
+        }
+
+        // Helper: assert the event serializes to a non-empty string and matches a variant.
+        macro_rules! check {
+            ($event:expr, $pat:pat) => {{
+                let event = $event;
+                let text = serde_json::to_string(&event).expect("event serializes");
+                assert!(!text.is_empty(), "serialized event must be non-empty");
+                assert!(
+                    matches!(event.payload, $pat),
+                    "payload variant mismatch for {}",
+                    stringify!($pat)
+                );
+            }};
+        }
+
+        // --- run-scoped constructors (id, session, run, sequence, created_at, payload) ---
+        check!(
+            BridgeEvent::status(
+                "e",
+                "s",
+                "r",
+                1,
+                at,
+                BridgeStatusEvent {
+                    state: DispatchRunState::Running,
+                    backend: AgentBackend::ClaudeLocal,
+                    repo_hint: None,
+                    link: None,
+                },
+            ),
+            BridgeEventPayload::Status { .. }
+        );
+        check!(
+            BridgeEvent::message(
+                "e",
+                "s",
+                "r",
+                2,
+                at,
+                from_json!(DispatchMessage, {
+                    "id": "m1",
+                    "sessionId": "s",
+                    "runId": "r",
+                    "role": "agent",
+                    "body": "hello",
+                    "createdAt": at
+                }),
+            ),
+            BridgeEventPayload::Message { .. }
+        );
+        check!(
+            BridgeEvent::control(
+                "e",
+                "s",
+                "r",
+                3,
+                at,
+                from_json!(DispatchControlEvent, {
+                    "id": "c1",
+                    "sessionId": "s",
+                    "runId": "r",
+                    "kind": "reply",
+                    "createdAt": at,
+                    "summary": "ok"
+                }),
+            ),
+            BridgeEventPayload::Control { .. }
+        );
+        check!(
+            BridgeEvent::usage(
+                "e",
+                "s",
+                "r",
+                4,
+                at,
+                from_json!(UsageSignal, {
+                    "id": "u1",
+                    "sessionId": "s",
+                    "runId": "r",
+                    "backend": "claude.local",
+                    "fidelity": "exact",
+                    "recordedAt": at
+                }),
+            ),
+            BridgeEventPayload::Usage { .. }
+        );
+        let policy_hint = from_json!(PolicyHint, {
+            "id": "h1",
+            "sessionId": "s",
+            "code": "local_only",
+            "severity": "info",
+            "message": "stay local",
+            "createdAt": at
+        });
+        check!(
+            BridgeEvent::policy_hint("e", "s", "r", 5, at, policy_hint.clone()),
+            BridgeEventPayload::PolicyHint { .. }
+        );
+        check!(
+            BridgeEvent::artifact(
+                "e",
+                "s",
+                "r",
+                6,
+                at,
+                from_json!(DispatchArtifact, {
+                    "id": "a1",
+                    "sessionId": "s",
+                    "runId": "r",
+                    "kind": "branch",
+                    "label": "feature/x",
+                    "createdAt": at
+                }),
+            ),
+            BridgeEventPayload::Artifact { .. }
+        );
+        check!(
+            BridgeEvent::activity(
+                "e",
+                "s",
+                "r",
+                7,
+                at,
+                from_json!(DispatchActivity, {
+                    "id": "act1",
+                    "sessionId": "s",
+                    "runId": "r",
+                    "kind": "read",
+                    "label": "Read",
+                    "createdAt": at
+                }),
+            ),
+            BridgeEventPayload::Activity { .. }
+        );
+
+        // --- device-wide constructors (id, created_at, payload) ---
+        check!(
+            BridgeEvent::usage_summary(
+                "e",
+                at,
+                from_json!(UsageSummary, {
+                    "sessionCount": 0,
+                    "totalTurns": 0,
+                    "rollups": [],
+                    "totalPremiumRequests": 0
+                }),
+            ),
+            BridgeEventPayload::UsageSummary { .. }
+        );
+        check!(
+            BridgeEvent::coaching_hints("e", at, vec![policy_hint.clone()]),
+            BridgeEventPayload::CoachingHints { .. }
+        );
+        check!(
+            BridgeEvent::agent_catalog(
+                "e",
+                at,
+                vec![from_json!(AgentDefinition, {
+                    "id": "abc123",
+                    "name": "Reviewer",
+                    "backends": [{
+                        "backend": "claude.local",
+                        "description": "Reviews diffs",
+                        "model": "opus",
+                        "sourcePath": ".claude/agents/reviewer.md",
+                        "scope": "project",
+                        "workspaceLabel": "work"
+                    }]
+                })],
+            ),
+            BridgeEventPayload::AgentCatalog { .. }
+        );
+        check!(
+            BridgeEvent::backend_catalog(
+                "e",
+                at,
+                vec![from_json!(BackendCapability, {
+                    "backend": "claude.local",
+                    "program": "claude",
+                    "available": true,
+                    "capabilities": {
+                        "streaming_output": true,
+                        "interactive_reply": true,
+                        "resume_session": true,
+                        "stop_signal": true,
+                        "structured_events": true,
+                        "usage_exact": true,
+                        "usage_derived": false,
+                        "usage_estimated": false
+                    },
+                    "models": [{ "id": "opus", "label": "Opus" }],
+                    "modelSource": "cli_alias"
+                })],
+            ),
+            BridgeEventPayload::BackendCatalog { .. }
+        );
+        check!(
+            BridgeEvent::dir_listing(
+                "e",
+                at,
+                from_json!(DirListing, {
+                    "path": "C:/work",
+                    "entries": [{ "name": "src", "kind": "dir" }],
+                    "truncated": false
+                }),
+            ),
+            BridgeEventPayload::DirListing { .. }
+        );
+        check!(
+            BridgeEvent::file_contents(
+                "e",
+                at,
+                from_json!(FileContents, {
+                    "path": "C:/work/a.txt",
+                    "content": "hi",
+                    "truncated": false,
+                    "byteSize": 2
+                }),
+            ),
+            BridgeEventPayload::FileContents { .. }
+        );
+        check!(
+            BridgeEvent::search_results(
+                "e",
+                at,
+                from_json!(SearchResults, {
+                    "root": "C:/work",
+                    "query": "main",
+                    "hits": [{ "path": "C:/work/main.rs", "name": "main.rs" }],
+                    "truncated": false
+                }),
+            ),
+            BridgeEventPayload::SearchResults { .. }
+        );
+        check!(
+            BridgeEvent::workspace_folders(
+                "e",
+                at,
+                from_json!(WorkspaceFolders, {
+                    "workspaceFile": "C:/work/x.code-workspace",
+                    "folders": ["C:/work/a", "C:/work/b"]
+                }),
+            ),
+            BridgeEventPayload::WorkspaceFolders { .. }
+        );
+        check!(
+            BridgeEvent::agent_written(
+                "e",
+                at,
+                from_json!(AgentWriteOutcome, {
+                    "name": "reviewer",
+                    "sourcePath": ".claude/agents/reviewer.md",
+                    "scope": "project"
+                }),
+            ),
+            BridgeEventPayload::AgentWritten { .. }
+        );
+        check!(
+            BridgeEvent::job_snapshot(
+                "e",
+                at,
+                from_json!(JobSnapshot, {
+                    "known": [],
+                    "scheduled": [],
+                    "processes": [],
+                    "truncated": false
+                }),
+            ),
+            BridgeEventPayload::JobSnapshot { .. }
+        );
+        check!(
+            BridgeEvent::environment_info(
+                "e",
+                at,
+                from_json!(EnvironmentInfo, {
+                    "backends": [{
+                        "backend": "claude.local",
+                        "program": "claude",
+                        "available": true,
+                        "version": "1.2.3"
+                    }]
+                }),
+            ),
+            BridgeEventPayload::EnvironmentInfo { .. }
+        );
+        check!(
+            BridgeEvent::network_info(
+                "e",
+                at,
+                from_json!(NetworkInfo, {
+                    "addresses": [{ "ip": "100.64.0.1", "kind": "tailnet" }]
+                }),
+            ),
+            BridgeEventPayload::NetworkInfo { .. }
+        );
+        check!(
+            BridgeEvent::work_snapshot(
+                "e",
+                at,
+                from_json!(WorkSnapshot, {
+                    "sources": [{
+                        "source": "github",
+                        "available": true,
+                        "items": []
+                    }]
+                }),
+            ),
+            BridgeEventPayload::WorkSnapshot { .. }
+        );
+        check!(
+            BridgeEvent::service_bus_snapshot(
+                "e",
+                at,
+                from_json!(ServiceBusSnapshot, {
+                    "available": true,
+                    "namespaces": []
+                }),
+            ),
+            BridgeEventPayload::ServiceBusSnapshot { .. }
+        );
+        check!(
+            BridgeEvent::service_bus_peek(
+                "e",
+                at,
+                from_json!(ServiceBusPeek, {
+                    "available": true,
+                    "namespace": "ns.servicebus.windows.net",
+                    "entity": "orders",
+                    "deadLetter": false,
+                    "messages": []
+                }),
+            ),
+            BridgeEventPayload::ServiceBusPeek { .. }
+        );
+        check!(
+            BridgeEvent::service_bus_resubmit(
+                "e",
+                at,
+                from_json!(ServiceBusResubmit, {
+                    "ok": true,
+                    "moved": 2,
+                    "namespace": "ns.servicebus.windows.net",
+                    "entity": "orders"
+                }),
+            ),
+            BridgeEventPayload::ServiceBusResubmit { .. }
+        );
+        check!(
+            BridgeEvent::service_bus_purge(
+                "e",
+                at,
+                from_json!(ServiceBusPurge, {
+                    "ok": true,
+                    "purged": 5,
+                    "namespace": "ns.servicebus.windows.net",
+                    "entity": "orders",
+                    "deadLetter": true
+                }),
+            ),
+            BridgeEventPayload::ServiceBusPurge { .. }
+        );
+        check!(
+            BridgeEvent::service_bus_send(
+                "e",
+                at,
+                from_json!(ServiceBusSend, {
+                    "ok": true,
+                    "namespace": "ns.servicebus.windows.net",
+                    "entity": "orders"
+                }),
+            ),
+            BridgeEventPayload::ServiceBusSend { .. }
+        );
+        check!(
+            BridgeEvent::service_bus_receive(
+                "e",
+                at,
+                from_json!(ServiceBusReceive, {
+                    "ok": true,
+                    "empty": true,
+                    "namespace": "ns.servicebus.windows.net",
+                    "entity": "orders",
+                    "deadLetter": false
+                }),
+            ),
+            BridgeEventPayload::ServiceBusReceive { .. }
+        );
+        check!(
+            BridgeEvent::grafana_summary(
+                "e",
+                at,
+                from_json!(GrafanaSummary, {
+                    "available": true,
+                    "baseUrl": "https://grafana.example.com",
+                    "version": "10.4.2",
+                    "dashboards": []
+                }),
+            ),
+            BridgeEventPayload::GrafanaSummary { .. }
+        );
+        check!(
+            BridgeEvent::sentry_summary(
+                "e",
+                at,
+                from_json!(SentrySummary, {
+                    "available": true,
+                    "issues": []
+                }),
+            ),
+            BridgeEventPayload::SentrySummary { .. }
+        );
+        check!(
+            BridgeEvent::git_status(
+                "e",
+                at,
+                from_json!(GitStatus, {
+                    "root": "C:/work",
+                    "branch": "main",
+                    "ahead": 0,
+                    "behind": 0,
+                    "files": [],
+                    "clean": true
+                }),
+            ),
+            BridgeEventPayload::GitStatus { .. }
+        );
+        check!(
+            BridgeEvent::git_diff(
+                "e",
+                at,
+                from_json!(GitDiff, {
+                    "root": "C:/work",
+                    "patch": "diff --git a/x b/x",
+                    "truncated": false
+                }),
+            ),
+            BridgeEventPayload::GitDiff { .. }
+        );
+        check!(
+            BridgeEvent::session_list(
+                "e",
+                at,
+                vec![from_json!(DispatchSession, {
+                    "id": "s1",
+                    "backend": "claude.local",
+                    "title": "Bridge",
+                    "workspaceRoot": "C:/work",
+                    "createdAt": at,
+                    "updatedAt": at
+                })],
+            ),
+            BridgeEventPayload::SessionList { .. }
+        );
+        check!(
+            BridgeEvent::session_detail(
+                "e",
+                at,
+                "s1".to_string(),
+                vec![from_json!(DispatchRun, {
+                    "id": "r1",
+                    "sessionId": "s1",
+                    "state": "completed",
+                    "task": "build"
+                })],
+                vec![from_json!(DispatchMessage, {
+                    "id": "m1",
+                    "sessionId": "s1",
+                    "runId": "r1",
+                    "role": "agent",
+                    "body": "done",
+                    "createdAt": at
+                })],
+            ),
+            BridgeEventPayload::SessionDetail { .. }
+        );
+        check!(
+            BridgeEvent::roadmap(
+                "e",
+                at,
+                from_json!(RoadmapSnapshot, {
+                    "found": false,
+                    "source": "",
+                    "lanes": []
+                }),
+            ),
+            BridgeEventPayload::Roadmap { .. }
+        );
     }
 }
