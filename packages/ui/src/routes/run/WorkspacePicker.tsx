@@ -1,5 +1,6 @@
 import { useState } from "react";
 import type { WireClient } from "../../wire/client";
+import { basename } from "../../paths";
 import { FolderBrowser } from "../onboarding/FolderBrowser";
 
 export interface WorkspacePickerProps {
@@ -12,11 +13,6 @@ export interface WorkspacePickerProps {
   onSelect: (path: string) => void;
   /** Persist newly-browsed locations (folder or resolved .code-workspace repos). */
   onAddRoots: (paths: string[]) => void;
-}
-
-function basename(path: string): string {
-  const trimmed = path.replace(/[\\/]+$/, "");
-  return trimmed.split(/[\\/]/).pop() ?? trimmed;
 }
 
 /** A non-typable workspace chip: clicking it opens a panel to pick "no workspace", a
@@ -52,7 +48,12 @@ export function WorkspacePicker({
 
       {open && (
         <>
-          <div className="ws-backdrop" onClick={() => setOpen(false)} />
+          <button
+            type="button"
+            className="ws-backdrop"
+            aria-label="Close workspace picker"
+            onClick={() => setOpen(false)}
+          />
           <div className="ws-popover" role="dialog" aria-label="Select workspace">
             <button
               type="button"

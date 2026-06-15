@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { DirListing, FileContents, SearchResults } from "@honeydrunk/honeyhub-types";
 import type { WireClient } from "../../wire/client";
+import { basename } from "../../paths";
 import { FileViewer } from "./FileViewer";
 
 export interface BrowseViewProps {
@@ -20,10 +21,6 @@ function childPath(parent: string, name: string): string {
   return parent.endsWith(sep) ? `${parent}${name}` : `${parent}${sep}${name}`;
 }
 
-function basename(path: string): string {
-  const trimmed = path.replace(/[\\/]+$/, "");
-  return trimmed.split(/[\\/]/).pop() ?? trimmed;
-}
 
 /** Read-only repo/file browser (packet 09 §3): navigate the picked locations, search
     files by name, and view source (markdown rendered, code highlighted). All disk
