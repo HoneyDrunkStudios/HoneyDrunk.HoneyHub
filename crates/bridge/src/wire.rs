@@ -1483,4 +1483,509 @@ mod tests {
             assert_eq!(round_trip, frame);
         }
     }
+
+    /// Exercise every `BridgeEvent::*` associated constructor so the unit-test pass counts
+    /// each one as covered (they are otherwise only hit by an integration test). Each
+    /// constructor is called with a freshly-built payload, then we assert the event
+    /// serializes to a non-empty string and carries the expected `BridgeEventPayload`
+    /// variant — which also drives the payload serialization paths.
+    #[test]
+    fn every_bridge_event_constructor_builds_and_serializes() {
+        let at = "2026-06-15T00:00:00Z";
+
+        // Helper: build a payload value from camelCase JSON (matches the crate's serde).
+        macro_rules! from_json {
+            ($ty:ty, $value:tt) => {{
+                let value = json!($value);
+                serde_json::from_value::<$ty>(value).expect("payload deserializes")
+            }};
+        }
+
+        // Helper: assert the event serializes to a non-empty string and matches a variant.
+        macro_rules! check {
+            ($event:expr, $pat:pat) => {{
+                let event = $event;
+                let text = serde_json::to_string(&event).expect("event serializes");
+                assert!(!text.is_empty(), "serialized event must be non-empty");
+                assert!(
+                    matches!(event.payload, $pat),
+                    "payload variant mismatch for {}",
+                    stringify!($pat)
+                );
+            }};
+        }
+
+        // --- run-scoped constructors (id, session, run, sequence, created_at, payload) ---
+        check!(
+            BridgeEvent::status(
+                "e",
+                "s",
+                "r",
+                1,
+                at,
+                BridgeStatusEvent {
+                    state: DispatchRunState::Running,
+                    backend: AgentBackend::ClaudeLocal,
+                    repo_hint: None,
+                    link: None,
+                },
+            ),
+            BridgeEventPayload::Status { .. }
+        );
+        check!(
+            BridgeEvent::message(
+                "e",
+                "s",
+                "r",
+                2,
+                at,
+                from_json!(DispatchMessage, {
+                    "id": "m1",
+                    "sessionId": "s",
+                    "runId": "r",
+                    "role": "agent",
+                    "body": "hello",
+                    "createdAt": at
+                }),
+            ),
+            BridgeEventPayload::Message { .. }
+        );
+        check!(
+            BridgeEvent::control(
+                "e",
+                "s",
+                "r",
+                3,
+                at,
+                from_json!(DispatchControlEvent, {
+                    "id": "c1",
+                    "sessionId": "s",
+                    "runId": "r",
+                    "kind": "reply",
+                    "createdAt": at,
+                    "summary": "ok"
+                }),
+            ),
+            BridgeEventPayload::Control { .. }
+        );
+        check!(
+            BridgeEvent::usage(
+                "e",
+                "s",
+                "r",
+                4,
+                at,
+                from_json!(UsageSignal, {
+                    "id": "u1",
+                    "sessionId": "s",
+                    "runId": "r",
+                    "backend": "claude.local",
+                    "fidelity": "exact",
+                    "recordedAt": at
+                }),
+            ),
+            BridgeEventPayload::Usage { .. }
+        );
+        let policy_hint = from_json!(PolicyHint, {
+            "id": "h1",
+            "sessionId": "s",
+            "code": "local_only",
+            "severity": "info",
+            "message": "stay local",
+            "createdAt": at
+        });
+        check!(
+            BridgeEvent::policy_hint("e", "s", "r", 5, at, policy_hint.clone()),
+            BridgeEventPayload::PolicyHint { .. }
+        );
+        check!(
+            BridgeEvent::artifact(
+                "e",
+                "s",
+                "r",
+                6,
+                at,
+                from_json!(DispatchArtifact, {
+                    "id": "a1",
+                    "sessionId": "s",
+                    "runId": "r",
+                    "kind": "branch",
+                    "label": "feature/x",
+                    "createdAt": at
+                }),
+            ),
+            BridgeEventPayload::Artifact { .. }
+        );
+        check!(
+            BridgeEvent::activity(
+                "e",
+                "s",
+                "r",
+                7,
+                at,
+                from_json!(DispatchActivity, {
+                    "id": "act1",
+                    "sessionId": "s",
+                    "runId": "r",
+                    "kind": "read",
+                    "label": "Read",
+                    "createdAt": at
+                }),
+            ),
+            BridgeEventPayload::Activity { .. }
+        );
+
+        // --- device-wide constructors (id, created_at, payload) ---
+        check!(
+            BridgeEvent::usage_summary(
+                "e",
+                at,
+                from_json!(UsageSummary, {
+                    "sessionCount": 0,
+                    "totalTurns": 0,
+                    "rollups": [],
+                    "totalPremiumRequests": 0
+                }),
+            ),
+            BridgeEventPayload::UsageSummary { .. }
+        );
+        check!(
+            BridgeEvent::coaching_hints("e", at, vec![policy_hint.clone()]),
+            BridgeEventPayload::CoachingHints { .. }
+        );
+        check!(
+            BridgeEvent::agent_catalog(
+                "e",
+                at,
+                vec![from_json!(AgentDefinition, {
+                    "id": "abc123",
+                    "name": "Reviewer",
+                    "backends": [{
+                        "backend": "claude.local",
+                        "description": "Reviews diffs",
+                        "model": "opus",
+                        "sourcePath": ".claude/agents/reviewer.md",
+                        "scope": "project",
+                        "workspaceLabel": "work"
+                    }]
+                })],
+            ),
+            BridgeEventPayload::AgentCatalog { .. }
+        );
+        check!(
+            BridgeEvent::backend_catalog(
+                "e",
+                at,
+                vec![from_json!(BackendCapability, {
+                    "backend": "claude.local",
+                    "program": "claude",
+                    "available": true,
+                    "capabilities": {
+                        "streaming_output": true,
+                        "interactive_reply": true,
+                        "resume_session": true,
+                        "stop_signal": true,
+                        "structured_events": true,
+                        "usage_exact": true,
+                        "usage_derived": false,
+                        "usage_estimated": false
+                    },
+                    "models": [{ "id": "opus", "label": "Opus" }],
+                    "modelSource": "cli_alias"
+                })],
+            ),
+            BridgeEventPayload::BackendCatalog { .. }
+        );
+        check!(
+            BridgeEvent::dir_listing(
+                "e",
+                at,
+                from_json!(DirListing, {
+                    "path": "C:/work",
+                    "entries": [{ "name": "src", "kind": "dir" }],
+                    "truncated": false
+                }),
+            ),
+            BridgeEventPayload::DirListing { .. }
+        );
+        check!(
+            BridgeEvent::file_contents(
+                "e",
+                at,
+                from_json!(FileContents, {
+                    "path": "C:/work/a.txt",
+                    "content": "hi",
+                    "truncated": false,
+                    "byteSize": 2
+                }),
+            ),
+            BridgeEventPayload::FileContents { .. }
+        );
+        check!(
+            BridgeEvent::search_results(
+                "e",
+                at,
+                from_json!(SearchResults, {
+                    "root": "C:/work",
+                    "query": "main",
+                    "hits": [{ "path": "C:/work/main.rs", "name": "main.rs" }],
+                    "truncated": false
+                }),
+            ),
+            BridgeEventPayload::SearchResults { .. }
+        );
+        check!(
+            BridgeEvent::workspace_folders(
+                "e",
+                at,
+                from_json!(WorkspaceFolders, {
+                    "workspaceFile": "C:/work/x.code-workspace",
+                    "folders": ["C:/work/a", "C:/work/b"]
+                }),
+            ),
+            BridgeEventPayload::WorkspaceFolders { .. }
+        );
+        check!(
+            BridgeEvent::agent_written(
+                "e",
+                at,
+                from_json!(AgentWriteOutcome, {
+                    "name": "reviewer",
+                    "sourcePath": ".claude/agents/reviewer.md",
+                    "scope": "project"
+                }),
+            ),
+            BridgeEventPayload::AgentWritten { .. }
+        );
+        check!(
+            BridgeEvent::job_snapshot(
+                "e",
+                at,
+                from_json!(JobSnapshot, {
+                    "known": [],
+                    "scheduled": [],
+                    "processes": [],
+                    "truncated": false
+                }),
+            ),
+            BridgeEventPayload::JobSnapshot { .. }
+        );
+        check!(
+            BridgeEvent::environment_info(
+                "e",
+                at,
+                from_json!(EnvironmentInfo, {
+                    "backends": [{
+                        "backend": "claude.local",
+                        "program": "claude",
+                        "available": true,
+                        "version": "1.2.3"
+                    }]
+                }),
+            ),
+            BridgeEventPayload::EnvironmentInfo { .. }
+        );
+        check!(
+            BridgeEvent::network_info(
+                "e",
+                at,
+                from_json!(NetworkInfo, {
+                    "addresses": [{ "ip": "100.64.0.1", "kind": "tailnet" }]
+                }),
+            ),
+            BridgeEventPayload::NetworkInfo { .. }
+        );
+        check!(
+            BridgeEvent::work_snapshot(
+                "e",
+                at,
+                from_json!(WorkSnapshot, {
+                    "sources": [{
+                        "source": "github",
+                        "available": true,
+                        "items": []
+                    }]
+                }),
+            ),
+            BridgeEventPayload::WorkSnapshot { .. }
+        );
+        check!(
+            BridgeEvent::service_bus_snapshot(
+                "e",
+                at,
+                from_json!(ServiceBusSnapshot, {
+                    "available": true,
+                    "namespaces": []
+                }),
+            ),
+            BridgeEventPayload::ServiceBusSnapshot { .. }
+        );
+        check!(
+            BridgeEvent::service_bus_peek(
+                "e",
+                at,
+                from_json!(ServiceBusPeek, {
+                    "available": true,
+                    "namespace": "ns.servicebus.windows.net",
+                    "entity": "orders",
+                    "deadLetter": false,
+                    "messages": []
+                }),
+            ),
+            BridgeEventPayload::ServiceBusPeek { .. }
+        );
+        check!(
+            BridgeEvent::service_bus_resubmit(
+                "e",
+                at,
+                from_json!(ServiceBusResubmit, {
+                    "ok": true,
+                    "moved": 2,
+                    "namespace": "ns.servicebus.windows.net",
+                    "entity": "orders"
+                }),
+            ),
+            BridgeEventPayload::ServiceBusResubmit { .. }
+        );
+        check!(
+            BridgeEvent::service_bus_purge(
+                "e",
+                at,
+                from_json!(ServiceBusPurge, {
+                    "ok": true,
+                    "purged": 5,
+                    "namespace": "ns.servicebus.windows.net",
+                    "entity": "orders",
+                    "deadLetter": true
+                }),
+            ),
+            BridgeEventPayload::ServiceBusPurge { .. }
+        );
+        check!(
+            BridgeEvent::service_bus_send(
+                "e",
+                at,
+                from_json!(ServiceBusSend, {
+                    "ok": true,
+                    "namespace": "ns.servicebus.windows.net",
+                    "entity": "orders"
+                }),
+            ),
+            BridgeEventPayload::ServiceBusSend { .. }
+        );
+        check!(
+            BridgeEvent::service_bus_receive(
+                "e",
+                at,
+                from_json!(ServiceBusReceive, {
+                    "ok": true,
+                    "empty": true,
+                    "namespace": "ns.servicebus.windows.net",
+                    "entity": "orders",
+                    "deadLetter": false
+                }),
+            ),
+            BridgeEventPayload::ServiceBusReceive { .. }
+        );
+        check!(
+            BridgeEvent::grafana_summary(
+                "e",
+                at,
+                from_json!(GrafanaSummary, {
+                    "available": true,
+                    "baseUrl": "https://grafana.example.com",
+                    "version": "10.4.2",
+                    "dashboards": []
+                }),
+            ),
+            BridgeEventPayload::GrafanaSummary { .. }
+        );
+        check!(
+            BridgeEvent::sentry_summary(
+                "e",
+                at,
+                from_json!(SentrySummary, {
+                    "available": true,
+                    "issues": []
+                }),
+            ),
+            BridgeEventPayload::SentrySummary { .. }
+        );
+        check!(
+            BridgeEvent::git_status(
+                "e",
+                at,
+                from_json!(GitStatus, {
+                    "root": "C:/work",
+                    "branch": "main",
+                    "ahead": 0,
+                    "behind": 0,
+                    "files": [],
+                    "clean": true
+                }),
+            ),
+            BridgeEventPayload::GitStatus { .. }
+        );
+        check!(
+            BridgeEvent::git_diff(
+                "e",
+                at,
+                from_json!(GitDiff, {
+                    "root": "C:/work",
+                    "patch": "diff --git a/x b/x",
+                    "truncated": false
+                }),
+            ),
+            BridgeEventPayload::GitDiff { .. }
+        );
+        check!(
+            BridgeEvent::session_list(
+                "e",
+                at,
+                vec![from_json!(DispatchSession, {
+                    "id": "s1",
+                    "backend": "claude.local",
+                    "title": "Bridge",
+                    "workspaceRoot": "C:/work",
+                    "createdAt": at,
+                    "updatedAt": at
+                })],
+            ),
+            BridgeEventPayload::SessionList { .. }
+        );
+        check!(
+            BridgeEvent::session_detail(
+                "e",
+                at,
+                "s1".to_string(),
+                vec![from_json!(DispatchRun, {
+                    "id": "r1",
+                    "sessionId": "s1",
+                    "state": "completed",
+                    "task": "build"
+                })],
+                vec![from_json!(DispatchMessage, {
+                    "id": "m1",
+                    "sessionId": "s1",
+                    "runId": "r1",
+                    "role": "agent",
+                    "body": "done",
+                    "createdAt": at
+                })],
+            ),
+            BridgeEventPayload::SessionDetail { .. }
+        );
+        check!(
+            BridgeEvent::roadmap(
+                "e",
+                at,
+                from_json!(RoadmapSnapshot, {
+                    "found": false,
+                    "source": "",
+                    "lanes": []
+                }),
+            ),
+            BridgeEventPayload::Roadmap { .. }
+        );
+    }
 }
