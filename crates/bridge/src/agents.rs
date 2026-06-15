@@ -1,10 +1,13 @@
 //! Local agent-definition discovery (ADR-0090 / packet 09 §3f-bis).
 //!
 //! Reads the user's **own** agent definitions and surfaces them as runnable dispatch
-//! targets. **Read-only** — it never authors or mutates a definition, and it surfaces
-//! only metadata (name / description / model / source), never the prompt body. Each
-//! source is a folder where **every markdown file is one definition** (operator-decided
-//! conventions):
+//! targets. Discovery surfaces only metadata (name / description / model / source),
+//! never the prompt body. Authoring is the one deliberate write path:
+//! [`write_claude_agent`] creates a `.claude/agents/<name>.md` so the cockpit can make
+//! new agents (packet 09 §3d); the host gates the target folder against the workspace
+//! allowlist (project scope) or the home directory (global scope) before calling it.
+//! Each source is a folder where **every markdown file is one definition**
+//! (operator-decided conventions):
 //!  - `.claude/agents/*.md` — Claude Code subagents, backend `claude.local`.
 //!  - `.copilot/agents/*.md` — Copilot agents, backend `copilot.local`.
 //!
@@ -153,6 +156,33 @@ pub fn discover_raw_in_root(workspace_root: &str) -> Vec<RawAgent> {
     found
 }
 
+/// Discover raw **project** candidates under a workspace root **and its immediate
+/// subdirectories** (depth 1). This handles the common "a parent folder that holds many
+/// repos is the workspace root" case — each child repo's `.claude/agents` is found and
+/// labeled by the child's own basename, so per-repo agents surface without adding every
+/// repo as its own root. Bounded to one level (the root + its direct children) to avoid
+/// walking deep trees; deeper layouts are still covered by adding those roots directly or
+/// via a `.code-workspace`. Best-effort: unreadable entries are skipped.
+pub fn discover_raw_in_root_recursive(workspace_root: &str) -> Vec<RawAgent> {
+    let mut found = discover_raw_in_root(workspace_root);
+    let root = Path::new(workspace_root);
+    let Ok(entries) = fs::read_dir(root) else {
+        return found;
+    };
+    for entry in entries.flatten() {
+        let child = entry.path();
+        // Only descend into real directories within the root (skip files; skip a symlink
+        // that escapes the root, mirroring `scan_dir`'s containment posture).
+        if !child.is_dir() || !is_within_root(&child, root) {
+            continue;
+        }
+        if let Some(child_str) = child.to_str() {
+            found.extend(discover_raw_in_root(child_str));
+        }
+    }
+    found
+}
+
 /// Discover the raw **global** (user) candidates under `home` (the parent of
 /// `.claude/agents` / `.copilot/agents`). Scanned once, independent of any workspace.
 /// Best-effort, same as the project scan. Containment is checked against `home`, so a
@@ -226,6 +256,88 @@ pub fn merge_agents(mut raws: Vec<RawAgent>) -> Vec<AgentDefinition> {
 /// and applies the backend allowlist itself before merging.)
 pub fn discover_agents_in_root(workspace_root: &str) -> Vec<AgentDefinition> {
     merge_agents(discover_raw_in_root(workspace_root))
+}
+
+/// The result of authoring an agent: its name and the path it was written to, relative to
+/// the scan root (so no absolute local path crosses the wire), plus its scope.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentWriteOutcome {
+    pub name: String,
+    pub source_path: String,
+    pub scope: AgentScope,
+}
+
+/// Validate an agent name: a single path segment usable as a filename — letters, digits,
+/// `.`, `_`, `-`, non-empty, not a dotfile, no `..`, no separators. Mirrors the slug the
+/// CLIs accept and keeps the write inside `.claude/agents`.
+pub fn validate_agent_name(name: &str) -> Result<(), String> {
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        return Err("agent name is empty".to_string());
+    }
+    if trimmed.starts_with('.') {
+        return Err("agent name must not start with '.'".to_string());
+    }
+    if trimmed
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+    {
+        Ok(())
+    } else {
+        Err("agent name may contain only letters, digits, '.', '_', '-'".to_string())
+    }
+}
+
+/// Render the markdown for a Claude agent definition: YAML frontmatter (name +
+/// description, plus an optional model) followed by the prompt body.
+pub fn render_agent_markdown(
+    name: &str,
+    description: &str,
+    model: Option<&str>,
+    body: &str,
+) -> String {
+    let mut out = String::from("---\n");
+    out.push_str(&format!("name: {}\n", name.trim()));
+    out.push_str(&format!(
+        "description: {}\n",
+        description.trim().replace('\n', " ")
+    ));
+    if let Some(model) = model.map(str::trim).filter(|m| !m.is_empty()) {
+        out.push_str(&format!("model: {model}\n"));
+    }
+    out.push_str("---\n\n");
+    out.push_str(body.trim_end());
+    out.push('\n');
+    out
+}
+
+/// Author a Claude agent definition under `<dir>/.claude/agents/<name>.md`, creating the
+/// folder if needed. `dir` is the already-authorized target root (a workspace root for a
+/// project agent, or the home directory for a global one); the host enforces that gate.
+/// Returns the path written, **relative to `dir`** (e.g. `.claude/agents/x.md`).
+pub fn write_claude_agent(
+    dir: &Path,
+    name: &str,
+    description: &str,
+    model: Option<&str>,
+    body: &str,
+    scope: AgentScope,
+) -> Result<AgentWriteOutcome, String> {
+    validate_agent_name(name)?;
+    let name = name.trim();
+    let agents_dir = dir.join(".claude").join("agents");
+    fs::create_dir_all(&agents_dir)
+        .map_err(|error| format!("could not create agents folder: {error}"))?;
+    let file_path = agents_dir.join(format!("{name}.md"));
+    let contents = render_agent_markdown(name, description, model, body);
+    fs::write(&file_path, contents)
+        .map_err(|error| format!("could not write agent file: {error}"))?;
+    Ok(AgentWriteOutcome {
+        name: name.to_string(),
+        source_path: format!(".claude/agents/{name}.md"),
+        scope,
+    })
 }
 
 fn scan_dir(
@@ -437,6 +549,91 @@ mod tests {
     /// Find the single binding for a backend in a merged definition.
     fn binding(agent: &AgentDefinition, backend: AgentBackend) -> Option<&AgentBackendBinding> {
         agent.backends.iter().find(|b| b.backend == backend)
+    }
+
+    #[test]
+    fn recursive_discovery_finds_agents_in_immediate_subrepos() {
+        // A parent folder that holds two repos, each with its own .claude/agents.
+        let parent = temp_root();
+        write(
+            &parent.join("repo-a/.claude/agents/alpha.md"),
+            "---\nname: alpha\ndescription: A\n---\nbody\n",
+        );
+        write(
+            &parent.join("repo-b/.claude/agents/beta.md"),
+            "---\nname: beta\ndescription: B\n---\nbody\n",
+        );
+        // An agent directly at the parent root is found too.
+        write(
+            &parent.join(".claude/agents/root-agent.md"),
+            "---\nname: root-agent\ndescription: R\n---\nbody\n",
+        );
+
+        let raws = discover_raw_in_root_recursive(parent.to_str().unwrap());
+        let names: Vec<&str> = raws.iter().map(|raw| raw.name.as_str()).collect();
+        assert!(names.contains(&"alpha"));
+        assert!(names.contains(&"beta"));
+        assert!(names.contains(&"root-agent"));
+        // Per-repo agents are labeled by their own repo's basename, not the parent's.
+        let alpha = raws.iter().find(|raw| raw.name == "alpha").unwrap();
+        assert_eq!(alpha.workspace_label, "repo-a");
+    }
+
+    #[test]
+    fn validate_agent_name_accepts_slugs_and_rejects_paths() {
+        assert!(validate_agent_name("code-reviewer").is_ok());
+        assert!(validate_agent_name("Agent_1.v2").is_ok());
+        assert!(validate_agent_name("").is_err());
+        assert!(validate_agent_name(".hidden").is_err());
+        assert!(validate_agent_name("../escape").is_err());
+        assert!(validate_agent_name("a/b").is_err());
+        assert!(validate_agent_name("a b").is_err());
+    }
+
+    #[test]
+    fn render_agent_markdown_emits_frontmatter_and_optional_model() {
+        let with_model = render_agent_markdown("rev", "Reviews diffs", Some("opus"), "Body here");
+        assert!(with_model
+            .starts_with("---\nname: rev\ndescription: Reviews diffs\nmodel: opus\n---\n\n"));
+        assert!(with_model.ends_with("Body here\n"));
+
+        // No model -> no model line; a multi-line description collapses to one line.
+        let no_model = render_agent_markdown("rev", "Line one\nLine two", None, "Body");
+        assert!(!no_model.contains("model:"));
+        assert!(no_model.contains("description: Line one Line two\n"));
+    }
+
+    #[test]
+    fn write_claude_agent_round_trips_through_discovery() {
+        let root = temp_root();
+        fs::create_dir_all(&root).expect("create root");
+        let outcome = write_claude_agent(
+            &root,
+            "fixer",
+            "Fixes things",
+            Some("opus"),
+            "You fix things.",
+            AgentScope::Project,
+        )
+        .expect("write agent");
+        assert_eq!(outcome.name, "fixer");
+        assert_eq!(outcome.source_path, ".claude/agents/fixer.md");
+
+        let agents = discover_agents_in_root(root.to_str().unwrap());
+        let fixer = agents
+            .iter()
+            .find(|a| a.name == "fixer")
+            .expect("discovered");
+        let claude = binding(fixer, AgentBackend::ClaudeLocal).expect("claude binding");
+        assert_eq!(claude.description, "Fixes things");
+        assert_eq!(claude.model.as_deref(), Some("opus"));
+    }
+
+    #[test]
+    fn write_claude_agent_rejects_unsafe_name() {
+        let root = temp_root();
+        fs::create_dir_all(&root).expect("create root");
+        assert!(write_claude_agent(&root, "../evil", "x", None, "y", AgentScope::Project).is_err());
     }
 
     #[test]

@@ -1,6 +1,8 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 192 192" role="img" aria-label="HoneyHub icon">
   <rect width="192" height="192" rx="40" fill="#101418"/>
-  <path d="M96 26 154 60v72l-58 34-58-34V60l58-34Z" fill="#f6c343"/>
-  <path d="M96 47 136 70v48l-40 24-40-24V70l40-23Z" fill="#1b2328"/>
-  <path d="M76 82h40v16H76V82Zm0 28h40v16H76v-16Z" fill="#f6c343"/>
+  <g fill="none" stroke="#f6c343" stroke-width="15" stroke-linecap="round" stroke-linejoin="round">
+    <polyline points="71,63 44,96 71,129"/>
+    <polyline points="121,63 148,96 121,129"/>
+    <line x1="86" y1="136" x2="106" y2="56"/>
+  </g>
 </svg>

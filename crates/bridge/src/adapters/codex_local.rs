@@ -27,6 +27,7 @@
 //! fidelity, follow-up wiring — is independent of the precise flags and is covered by
 //! the `fake_codex` integration fixture.
 
+use crate::activity::{ActivityKind, DispatchActivity};
 use crate::adapter::{
     AgentBackend, AgentBackendAdapter, BridgeError, CapabilityFlags, RunHandle, StartRunRequest,
 };
@@ -95,15 +96,32 @@ impl CodexLocalAdapter {
 
     /// Build the `codex exec` command for one turn. A fresh turn runs
     /// `codex exec --json <task>`; a resumed turn runs
-    /// `codex exec --json resume <session> <task>`.
+    /// `codex exec --json resume <session> <task>`. The user's per-run model and
+    /// reasoning effort are passed as global config overrides
+    /// (`-c model=<id>`, `-c model_reasoning_effort=<level>`) ahead of `exec` —
+    /// Codex's documented way to set them non-interactively (parity polish #9).
     ///
     /// The `--json` option goes **immediately after `exec`, before the `resume`
     /// subcommand**, which is the shape the official CLI requires for reliable
     /// non-interactive resume + JSON output. This is the single CLI-shape-dependent
     /// surface (packet 09 §3a re-scope point); everything else in this module is
     /// independent of the precise flags.
-    fn exec_command(&self, task: &str, resume_session: Option<&str>) -> Command {
+    fn exec_command(
+        &self,
+        task: &str,
+        resume_session: Option<&str>,
+        model: Option<&str>,
+        effort: Option<&str>,
+    ) -> Command {
         let mut command = Command::new(&self.program);
+        if let Some(model) = model.map(str::trim).filter(|m| !m.is_empty()) {
+            command.arg("-c").arg(format!("model={model}"));
+        }
+        if let Some(effort) = effort.map(str::trim).filter(|e| !e.is_empty()) {
+            command
+                .arg("-c")
+                .arg(format!("model_reasoning_effort={effort}"));
+        }
         command.arg("exec").arg("--json");
         if let Some(session) = resume_session {
             command.arg("resume").arg(session);
@@ -217,6 +235,86 @@ fn is_agent_message_item(item_type: &str) -> bool {
     matches!(item_type, "agent_message" | "assistant_message" | "message")
 }
 
+/// Map a Codex `item.completed` item type to an activity kind, or `None` for items that are
+/// not user-visible "doing" (agent messages — surfaced as prose — and raw reasoning).
+///
+/// Codex's exact item-type strings are the spike's best-known shape (like the command
+/// shape); the match is substring-based so minor naming differences (`command_execution`
+/// vs `local_shell_call`) still classify, and an unknown tool-ish item falls back to
+/// `Tool` rather than being dropped.
+fn classify_codex_item(item_type: &str) -> Option<ActivityKind> {
+    let t = item_type.to_lowercase();
+    if is_agent_message_item(item_type) || t.contains("reasoning") {
+        return None;
+    }
+    if t.contains("command") || t.contains("shell") || t.contains("exec") {
+        Some(ActivityKind::Command)
+    } else if t.contains("file") || t.contains("patch") || t.contains("edit") || t.contains("apply")
+    {
+        Some(ActivityKind::Edit)
+    } else if t.contains("search") || t.contains("grep") {
+        Some(ActivityKind::Search)
+    } else if t.contains("web") || t.contains("fetch") {
+        Some(ActivityKind::Fetch)
+    } else if t.contains("tool") || t.contains("mcp") {
+        Some(ActivityKind::Tool)
+    } else {
+        None
+    }
+}
+
+/// A short, non-sensitive detail for a Codex item: command / path / query / url / name,
+/// trimmed. A command given as an array is joined. `None` when nothing concise is present.
+fn codex_item_detail(item: &Value) -> Option<String> {
+    let from_str = |key: &str| item.get(key).and_then(Value::as_str).map(str::to_string);
+    let command = item.get("command").and_then(|value| match value {
+        Value::String(text) => Some(text.clone()),
+        Value::Array(parts) => {
+            let joined = parts
+                .iter()
+                .filter_map(Value::as_str)
+                .collect::<Vec<_>>()
+                .join(" ");
+            (!joined.is_empty()).then_some(joined)
+        }
+        _ => None,
+    });
+    let raw = command
+        .or_else(|| from_str("path"))
+        .or_else(|| from_str("file"))
+        .or_else(|| from_str("query"))
+        .or_else(|| from_str("url"))
+        .or_else(|| from_str("name"));
+    raw.map(|detail| {
+        let trimmed = detail.trim();
+        if trimmed.chars().count() > 120 {
+            format!("{}…", trimmed.chars().take(120).collect::<String>())
+        } else {
+            trimmed.to_string()
+        }
+    })
+    .filter(|detail| !detail.is_empty())
+}
+
+/// A human label for a Codex activity item (the item type, prettified).
+fn codex_item_label(item_type: &str, kind: ActivityKind) -> String {
+    match kind {
+        ActivityKind::Command => "Command".to_string(),
+        ActivityKind::Edit => "Edit".to_string(),
+        ActivityKind::Search => "Search".to_string(),
+        ActivityKind::Fetch => "Fetch".to_string(),
+        ActivityKind::Read => "Read".to_string(),
+        ActivityKind::Tool => {
+            // Keep the raw type for an unrecognized tool so it is still identifiable.
+            if item_type.is_empty() {
+                "Tool".to_string()
+            } else {
+                item_type.to_string()
+            }
+        }
+    }
+}
+
 fn derived_usage_signal(
     usage: &Value,
     model: Option<&str>,
@@ -285,34 +383,53 @@ fn parse_line(
             }
             Vec::new()
         }
-        // A completed item — surface agent messages, ignore reasoning/tool items.
+        // A completed item — surface agent messages as prose, and command/file/search
+        // items as tool activity (raw reasoning is dropped). Parity polish #9.
         "item.completed" => {
             let item = value.get("item").unwrap_or(&Value::Null);
             let item_type = item.get("type").and_then(Value::as_str).unwrap_or_default();
-            if !is_agent_message_item(item_type) {
-                return Vec::new();
+            if is_agent_message_item(item_type) {
+                let body = item_text(item);
+                if body.is_empty() {
+                    return Vec::new();
+                }
+                return vec![BridgeEvent::message(
+                    Uuid::new_v4().to_string(),
+                    session_id,
+                    run_id,
+                    0,
+                    now.clone(),
+                    DispatchMessage {
+                        id: Uuid::new_v4().to_string(),
+                        session_id: session_id.to_string(),
+                        run_id: run_id.to_string(),
+                        role: DispatchMessageRole::Agent,
+                        body,
+                        created_at: now,
+                        // Codex streams whole messages (item.completed), not partials.
+                        is_partial: Some(false),
+                    },
+                )];
             }
-            let body = item_text(item);
-            if body.is_empty() {
-                return Vec::new();
+            match classify_codex_item(item_type) {
+                Some(kind) => vec![BridgeEvent::activity(
+                    Uuid::new_v4().to_string(),
+                    session_id,
+                    run_id,
+                    0,
+                    now.clone(),
+                    DispatchActivity {
+                        id: Uuid::new_v4().to_string(),
+                        session_id: session_id.to_string(),
+                        run_id: run_id.to_string(),
+                        kind,
+                        label: codex_item_label(item_type, kind),
+                        detail: codex_item_detail(item),
+                        created_at: now,
+                    },
+                )],
+                None => Vec::new(),
             }
-            vec![BridgeEvent::message(
-                Uuid::new_v4().to_string(),
-                session_id,
-                run_id,
-                0,
-                now.clone(),
-                DispatchMessage {
-                    id: Uuid::new_v4().to_string(),
-                    session_id: session_id.to_string(),
-                    run_id: run_id.to_string(),
-                    role: DispatchMessageRole::Agent,
-                    body,
-                    created_at: now,
-                    // Codex streams whole messages (item.completed), not partials.
-                    is_partial: Some(false),
-                },
-            )]
         }
         // Turn finished — carries the exact token usage for the derived signal.
         "turn.completed" | "thread.completed" => {
@@ -371,7 +488,12 @@ impl AgentBackendAdapter for CodexLocalAdapter {
             None => None,
         };
 
-        let mut command = self.exec_command(&request.task, resume_session.as_deref());
+        let mut command = self.exec_command(
+            &request.task,
+            resume_session.as_deref(),
+            request.model.as_deref(),
+            request.effort.as_deref(),
+        );
         command.current_dir(&request.workspace_root);
         let run = ChildRun::spawn(command, request.session.id.clone(), resume_session)?;
         let process_id = run.process_id();
@@ -448,7 +570,7 @@ impl AgentBackendAdapter for CodexLocalAdapter {
 
     fn resume(&self, session_id_or_transcript: &str) -> Result<RunHandle, BridgeError> {
         let run_id = Uuid::new_v4().to_string();
-        let command = self.exec_command("", Some(session_id_or_transcript));
+        let command = self.exec_command("", Some(session_id_or_transcript), None, None);
         let run = ChildRun::spawn(
             command,
             session_id_or_transcript.to_string(),
@@ -484,7 +606,7 @@ mod tests {
     #[test]
     fn fresh_command_puts_json_after_exec() {
         let adapter = CodexLocalAdapter::new("codex", test_clock());
-        let command = adapter.exec_command("do it", None);
+        let command = adapter.exec_command("do it", None, None, None);
         assert_eq!(command_args(&command), ["exec", "--json", "do it"]);
     }
 
@@ -492,10 +614,28 @@ mod tests {
     fn resumed_command_puts_json_before_the_resume_subcommand() {
         // Regression: `--json` must come immediately after `exec`, before `resume`.
         let adapter = CodexLocalAdapter::new("codex", test_clock());
-        let command = adapter.exec_command("continue", Some("sess-1"));
+        let command = adapter.exec_command("continue", Some("sess-1"), None, None);
         assert_eq!(
             command_args(&command),
             ["exec", "--json", "resume", "sess-1", "continue"]
+        );
+    }
+
+    #[test]
+    fn model_and_effort_become_config_overrides_before_exec() {
+        let adapter = CodexLocalAdapter::new("codex", test_clock());
+        let command = adapter.exec_command("go", None, Some("gpt-5-codex"), Some("high"));
+        assert_eq!(
+            command_args(&command),
+            [
+                "-c",
+                "model=gpt-5-codex",
+                "-c",
+                "model_reasoning_effort=high",
+                "exec",
+                "--json",
+                "go"
+            ]
         );
     }
 
@@ -590,6 +730,42 @@ mod tests {
             &mut backend_session,
         );
         assert!(events.is_empty());
+    }
+
+    #[test]
+    fn surfaces_command_and_file_items_as_activity() {
+        let mut backend_session = None;
+        let command = parse_line(
+            &test_clock(),
+            &no_rate_lookup(),
+            r#"{"type":"item.completed","item":{"type":"command_execution","command":["cargo","test"]}}"#,
+            "run-1",
+            "session-1",
+            &mut backend_session,
+        );
+        match &command[0].payload {
+            crate::wire::BridgeEventPayload::Activity { activity } => {
+                assert_eq!(activity.kind, ActivityKind::Command);
+                assert_eq!(activity.detail.as_deref(), Some("cargo test"));
+            }
+            other => panic!("expected an activity payload, got {other:?}"),
+        }
+
+        let file = parse_line(
+            &test_clock(),
+            &no_rate_lookup(),
+            r#"{"type":"item.completed","item":{"type":"file_change","path":"src/main.rs"}}"#,
+            "run-1",
+            "session-1",
+            &mut backend_session,
+        );
+        match &file[0].payload {
+            crate::wire::BridgeEventPayload::Activity { activity } => {
+                assert_eq!(activity.kind, ActivityKind::Edit);
+                assert_eq!(activity.detail.as_deref(), Some("src/main.rs"));
+            }
+            other => panic!("expected an activity payload, got {other:?}"),
+        }
     }
 
     #[test]
@@ -692,6 +868,9 @@ mod tests {
             },
             workspace_root: ".".to_string(),
             task: "continue".to_string(),
+            model: None,
+            agent: None,
+            effort: None,
             requested_run_id: Some("run-2".to_string()),
             follow_up_to_run_id: Some("does-not-exist".to_string()),
             transcript: Vec::new(),
@@ -756,6 +935,9 @@ mod tests {
             },
             workspace_root: ".".to_string(),
             task: "do it".to_string(),
+            model: None,
+            agent: None,
+            effort: None,
             requested_run_id: Some("run-1".to_string()),
             follow_up_to_run_id: None,
             transcript: Vec::new(),

@@ -98,6 +98,21 @@ pub struct StartRunRequest {
     pub session: DispatchSession,
     pub workspace_root: String,
     pub task: String,
+    /// The model the user picked for this run (e.g. `opus`). When `None`, the
+    /// adapter falls back to its configured/default model. Honored per-run so the
+    /// run-screen model picker actually changes what launches (packet 09 §3c).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// A named agent to run under (Claude `--agent <name>`). When `None`, the default
+    /// session agent is used. Codex has no agent-invocation flag, so this is ignored by
+    /// the Codex adapter (packet 09 §3d — agent launcher from chat).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
+    /// The reasoning effort the user picked (e.g. `high`). Maps to Codex's
+    /// `-c model_reasoning_effort=<effort>`. Claude has no effort flag, so the Claude
+    /// adapter ignores it (parity polish #9).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub requested_run_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]

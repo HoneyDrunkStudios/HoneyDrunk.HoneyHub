@@ -9,16 +9,23 @@ import type {
 // the wire protocol (packet 04). The transport lands with the relay work; this
 // keeps the trust-config logic pure and testable in the meantime.
 
-export const allBackends: AgentBackend[] = [
-  "claude.local",
-  "codex.local",
-  "copilot.local"
-];
+// Surfaced backends. Copilot is intentionally excluded (it exposes no enumerable
+// model list and reaching its model API would require holding vendor auth); the type
+// still includes it for the backend abstraction, it is just not offered.
+export const allBackends: AgentBackend[] = ["claude.local", "codex.local"];
+
+/** Per-provider enabled model ids. A backend absent from the map means **all** its
+    models are enabled (the default) — so a fresh cockpit restricts nothing. */
+export type EnabledModels = Partial<Record<AgentBackend, string[]>>;
 
 export interface BridgeSettingsState {
   devices: PairedDeviceView[];
   workspaceRoots: string[];
   backends: AgentBackend[];
+  // Which models are enabled per provider (Bridge settings, not onboarding). Absent
+  // entry = all models on. Both the manual model picker and the optimize-mode auto
+  // choice are restricted to these.
+  enabledModels: EnabledModels;
   // The most recent pairing token, surfaced exactly once for the user to copy to
   // the client device. It is cleared as soon as it is acknowledged.
   lastGrant?: PairingGrant;
@@ -27,7 +34,8 @@ export interface BridgeSettingsState {
 export const emptyBridgeSettings: BridgeSettingsState = {
   devices: [],
   workspaceRoots: [],
-  backends: []
+  backends: [],
+  enabledModels: {}
 };
 
 // Seams for id/token/timestamp generation so the reducer stays deterministic
@@ -141,4 +149,51 @@ export function setBackendAllowed(
     };
   }
   return state;
+}
+
+/** Whether a specific model is enabled for a backend. An absent map entry means all
+    models for that backend are enabled (the default). */
+export function isModelEnabled(
+  state: BridgeSettingsState,
+  backend: AgentBackend,
+  modelId: string
+): boolean {
+  const enabled = state.enabledModels[backend];
+  return enabled === undefined || enabled.includes(modelId);
+}
+
+/**
+ * Enable/disable one model for a backend. `allModelIds` is the backend's full model
+ * set (from detection), used to normalize "all enabled" back to an absent entry so
+ * the default stays "everything on". The last enabled model can never be turned off
+ * (the auto/optimize path must always have at least one model to choose).
+ */
+export function setModelAllowed(
+  state: BridgeSettingsState,
+  backend: AgentBackend,
+  modelId: string,
+  allowed: boolean,
+  allModelIds: string[]
+): BridgeSettingsState {
+  const current = state.enabledModels[backend] ?? [...allModelIds];
+  let next: string[];
+  if (allowed) {
+    next = current.includes(modelId) ? current : [...current, modelId];
+  } else {
+    next = current.filter((id) => id !== modelId);
+    if (next.length === 0) {
+      // Refuse to disable the last model — there must always be one to run.
+      return state;
+    }
+  }
+  const map: EnabledModels = { ...state.enabledModels };
+  const coversAll =
+    allModelIds.length > 0 && allModelIds.every((id) => next.includes(id));
+  if (coversAll) {
+    // Back to the default (everything on) — drop the entry so it reads as unrestricted.
+    delete map[backend];
+  } else {
+    map[backend] = next;
+  }
+  return { ...state, enabledModels: map };
 }

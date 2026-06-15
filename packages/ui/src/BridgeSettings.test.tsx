@@ -38,7 +38,7 @@ describe("BridgeSettings", () => {
   it("surfaces an explicit error for a relative workspace root", () => {
     render(<BridgeSettings factory={fixedFactory()} />);
 
-    fireEvent.change(screen.getByLabelText("Absolute path"), {
+    fireEvent.change(screen.getByLabelText("Or enter an absolute path"), {
       target: { value: "relative/path" }
     });
     fireEvent.click(screen.getByRole("button", { name: "Add root" }));
@@ -49,7 +49,7 @@ describe("BridgeSettings", () => {
   it("adds an absolute workspace root", () => {
     render(<BridgeSettings factory={fixedFactory()} />);
 
-    fireEvent.change(screen.getByLabelText("Absolute path"), {
+    fireEvent.change(screen.getByLabelText("Or enter an absolute path"), {
       target: { value: "/home/dev/work" }
     });
     fireEvent.click(screen.getByRole("button", { name: "Add root" }));

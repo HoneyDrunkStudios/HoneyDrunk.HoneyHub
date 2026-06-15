@@ -107,6 +107,19 @@ export interface DispatchArtifact {
   createdAt: string;
 }
 
+/** What an agent did during a run (tool/file activity), for the chat right-panel. */
+export type ActivityKind = "read" | "edit" | "command" | "search" | "fetch" | "tool";
+
+export interface DispatchActivity {
+  id: string;
+  sessionId: string;
+  runId: string;
+  kind: ActivityKind;
+  label: string;
+  detail?: string;
+  createdAt: string;
+}
+
 export interface UsageSignal {
   id: string;
   sessionId: string;
@@ -214,10 +227,430 @@ export interface StartRunRequest {
   session: DispatchSession;
   workspaceRoot: string;
   task: string;
+  /** The model the user picked for this run (e.g. `opus`). Omitted = the adapter's
+      configured/default model. Honored per-run so the model picker actually changes
+      what launches (packet 09 §3c). */
+  model?: string;
+  /** A named agent to run under (Claude `--agent <name>`). Omitted = the default
+      session agent. Codex has no agent flag, so it is ignored there (packet 09 §3d). */
+  agent?: string;
+  /** Reasoning effort (e.g. `high`) → Codex `-c model_reasoning_effort=`. Claude has no
+      effort flag, so it is ignored there (parity polish #9). */
+  effort?: string;
   requestedRunId?: string;
   followUpToRunId?: string;
   transcript?: DispatchMessage[];
   launchCommand?: string[];
+}
+
+/** One model a backend can run, offered in the model picker. `id` is the value the
+    CLI receives (e.g. `--model <id>`); `label` is human-facing. */
+export interface BackendModel {
+  id: string;
+  label: string;
+  /** Reasoning-effort levels this model supports (e.g. `low`/`medium`/`high`), when the
+      CLI exposes them (Codex does; Claude has no effort flag). Omitted/empty = none. */
+  reasoningLevels?: string[];
+  /** The CLI's default reasoning level for this model, when known. */
+  defaultReasoning?: string;
+}
+
+/** How a backend's model list was sourced, so the UI is honest about provenance.
+    `cli_cache` = read from the CLI's own model cache; `cli_alias` = the CLI's
+    canonical aliases; `bridge_known` = a curated fallback. */
+export type ModelSource = "cli_cache" | "cli_alias" | "bridge_known";
+
+/** A backend's detected capability: whether its CLI is installed, the models it
+    offers, and its honest capability flags. Reported by the bridge so the cockpit's
+    first-run provider picker and model picker show only what's real. */
+export interface BackendCapability {
+  backend: AgentBackend;
+  /** The program name probed on PATH (e.g. `claude`). */
+  program: string;
+  /** True when the program resolves on PATH (or is an existing path). */
+  available: boolean;
+  capabilities: CapabilityFlags;
+  models: BackendModel[];
+  defaultModel?: string;
+  modelSource: ModelSource;
+}
+
+// --- Read-only filesystem browsing (packet 09 §3) ---
+// The webview cannot read disk; the bridge browses directories (names only) for the
+// repo/file picker and reads file CONTENTS (gated to the user's allowlisted roots).
+
+export type DirEntryKind = "dir" | "file";
+
+export interface DirEntry {
+  name: string;
+  kind: DirEntryKind;
+  /** Size in bytes for files (omitted for directories). */
+  size?: number;
+}
+
+export interface DirListing {
+  /** The absolute directory listed. Empty string = the synthetic top level (drive
+      roots on Windows, `/` on Unix). */
+  path: string;
+  /** The parent directory to navigate up to, if any (none at a drive/root). */
+  parent?: string;
+  entries: DirEntry[];
+  /** True when the directory had more entries than the listing cap. */
+  truncated: boolean;
+}
+
+export interface FileContents {
+  path: string;
+  content: string;
+  /** True when the file exceeded the size cap and `content` is a prefix. */
+  truncated: boolean;
+  /** The file's full size in bytes (even when truncated). */
+  byteSize: number;
+}
+
+/** A filename-search match (the in-repo file search). */
+export interface SearchHit {
+  path: string;
+  name: string;
+}
+
+export interface SearchResults {
+  root: string;
+  query: string;
+  hits: SearchHit[];
+  /** True when a result/visited cap was hit before the walk finished. */
+  truncated: boolean;
+}
+
+/** The repo folders a `.code-workspace` file references, resolved to absolute dirs. */
+export interface WorkspaceFolders {
+  workspaceFile: string;
+  folders: string[];
+}
+
+/** Where an authored agent was written. `sourcePath` is relative to its scan root
+    (no absolute local path crosses the wire), `scope` mirrors discovery's [`AgentScope`]. */
+export interface AgentWriteOutcome {
+  name: string;
+  sourcePath: string;
+  scope: AgentScope;
+}
+
+// --- Local jobs (control-hub roadmap #7) ---
+// A read-only snapshot of the machine's processes + curated known-job health, so the
+// cockpit can show what's running and what's down. Identity is by image name only.
+
+export interface ProcessInfo {
+  pid: number;
+  name: string;
+  /** Resident memory in KiB, when the OS lister reports it. */
+  memoryKb?: number;
+  /** The full command line, when available (Windows CIM / Unix `ps args`). */
+  command?: string;
+}
+
+/** A user-defined job probe (configurable job patterns): a label and the substrings that
+    identify it, matched against each process's image name + command line. Sent with
+    `list_jobs` and merged onto the built-in probes server-side. */
+export interface JobProbe {
+  label: string;
+  patterns: string[];
+}
+
+export interface KnownJob {
+  label: string;
+  patterns: string[];
+  running: boolean;
+  instances: number;
+  pids: number[];
+  /** Summed resident memory (KiB) across matched processes. */
+  memoryKb: number;
+}
+
+/** A user Windows Scheduled Task (non-`\Microsoft\`) — a local job with a state + last
+    result. `lastResult: 0` = success; non-zero = an issue. Empty off Windows. */
+export interface ScheduledTask {
+  name: string;
+  path: string;
+  state: string;
+  lastRun?: string;
+  lastResult?: number;
+  nextRun?: string;
+}
+
+export interface JobSnapshot {
+  known: KnownJob[];
+  scheduled: ScheduledTask[];
+  processes: ProcessInfo[];
+  /** True when the process list was capped before crossing the wire. */
+  truncated: boolean;
+}
+
+// --- Roadmap (control-hub #6): parsed from an Architecture repo's initiatives ---
+
+export interface RoadmapItem {
+  rank: number;
+  lane: string;
+  item: string;
+  /** The "Type" column (e.g. `initiative`, `packet`). */
+  kind: string;
+  status: string;
+  phase: string;
+  due: string;
+  blockedBy?: string;
+  whyNow?: string;
+  exitCriteria?: string;
+}
+
+export interface RoadmapLane {
+  lane: string;
+  items: RoadmapItem[];
+  /** The first non-blocked item — "what's next" for this lane. */
+  next?: RoadmapItem;
+}
+
+export interface RoadmapSnapshot {
+  /** True when the Architecture initiatives file was found + parsed. */
+  found: boolean;
+  /** The file path read (or attempted/empty), for the UI's guidance. */
+  source: string;
+  lastReviewed?: string;
+  lanes: RoadmapLane[];
+}
+
+// --- CLI environment / updates (control-hub roadmap #8) ---
+// The installed version of each backend CLI. Installed-only (no registry "latest" lookup),
+// so the UI never claims an update is available; new-model awareness is a client-side diff
+// of the detected catalog against the last-seen set.
+
+export interface BackendVersion {
+  backend: AgentBackend;
+  program: string;
+  available: boolean;
+  version?: string;
+}
+
+export interface EnvironmentInfo {
+  backends: BackendVersion[];
+}
+
+// --- Reachable network addresses (mobile pairing: "Connect a phone") ---
+// This host's non-loopback IPv4 addresses, classified so the cockpit can show which one a
+// phone should use (a tailnet address, or one on the same LAN). Surfacing an address does
+// NOT by itself make the host reachable on it — the host must also be bound to a reachable
+// interface; the cockpit explains that honestly.
+
+export type NetAddressKind = "tailnet" | "lan" | "other";
+
+export interface NetAddress {
+  ip: string;
+  kind: NetAddressKind;
+  /** The interface this address belongs to, when the OS lister reports it. */
+  interface?: string;
+}
+
+export interface NetworkInfo {
+  /** Reachable IPv4 addresses, tailnet first, then LAN, then other. */
+  addresses: NetAddress[];
+}
+
+// --- Work connectors (opt-in, read-only): "view everything assigned to me" ---
+// Normalized work items pulled from the tools the operator already uses (GitHub now, ADO
+// next). Each source is a connector the cockpit enables explicitly; the bridge only reads.
+
+export type WorkItemKind = "issue" | "pull_request" | "work_item";
+
+export interface WorkItem {
+  /** Stable id for de-dup / keys (the item URL). */
+  id: string;
+  /** Connector id this came from (`github`, later `ado`). */
+  source: string;
+  kind: WorkItemKind;
+  /** Clean bucket for the split view (e.g. `Assigned`, `Authored`, `Review requested`). */
+  category: string;
+  title: string;
+  /** `owner/name` (GitHub) or project (ADO). */
+  repository: string;
+  url: string;
+  state: string;
+  number?: number;
+  updatedAt?: string;
+  labels?: string[];
+}
+
+export interface WorkSource {
+  source: string;
+  available: boolean;
+  /** A short, non-leaking hint when the connector couldn't be read (e.g. not signed in). */
+  error?: string;
+  items?: WorkItem[];
+}
+
+export interface WorkSnapshot {
+  sources: WorkSource[];
+}
+
+// --- Observability connector: Azure Service Bus (opt-in, read-only management plane) ---
+
+export type ServiceBusEntityKind = "queue" | "subscription";
+
+export interface ServiceBusEntity {
+  name: string;
+  kind: ServiceBusEntityKind;
+  namespace: string;
+  /** Parent topic, for a subscription. */
+  topic?: string;
+  status: string;
+  active: number;
+  deadLetter: number;
+  scheduled: number;
+}
+
+export interface ServiceBusNamespace {
+  name: string;
+  resourceGroup: string;
+  location?: string;
+  entities: ServiceBusEntity[];
+}
+
+export interface ServiceBusSnapshot {
+  available: boolean;
+  /** A short, non-leaking hint when unavailable (e.g. not signed in). */
+  error?: string;
+  namespaces: ServiceBusNamespace[];
+}
+
+// Non-destructive message peek (ADR-0094 D5), via the optional `honeyhub-sb-explorer` helper.
+export interface PeekMessage {
+  messageId?: string;
+  sequenceNumber: number;
+  enqueuedTime?: string;
+  subject?: string;
+  deliveryCount: number;
+  body: string;
+  deadLetterReason?: string;
+}
+
+export interface ServiceBusPeek {
+  available: boolean;
+  /** A short, non-leaking hint when unavailable (helper not installed / not signed in). */
+  error?: string;
+  namespace: string;
+  entity: string;
+  subscription?: string;
+  deadLetter: boolean;
+  messages: PeekMessage[];
+}
+
+// DESTRUCTIVE dead-letter resubmit (ADR-0094 D5 write op) — confirmation-gated in the UI.
+export interface ServiceBusResubmit {
+  ok: boolean;
+  error?: string;
+  /** How many dead-letter messages were moved back to the source. */
+  moved: number;
+  namespace: string;
+  entity: string;
+  subscription?: string;
+}
+
+// DESTRUCTIVE purge (ADR-0094 D5 write op) — drains all messages; confirmation-gated in the UI.
+export interface ServiceBusPurge {
+  ok: boolean;
+  error?: string;
+  /** How many messages were drained. */
+  purged: number;
+  namespace: string;
+  entity: string;
+  subscription?: string;
+  deadLetter: boolean;
+}
+
+// Publish a message (ADR-0094 D5 write op) — confirmation-gated in the UI.
+export interface ServiceBusSend {
+  ok: boolean;
+  error?: string;
+  namespace: string;
+  entity: string;
+}
+
+// DESTRUCTIVE receive (ADR-0094 D5 write op) — consumes+removes one message; confirmation-gated.
+export interface ServiceBusReceive {
+  ok: boolean;
+  error?: string;
+  /** The consumed message, or absent when the entity was empty. */
+  message?: PeekMessage;
+  empty: boolean;
+  namespace: string;
+  entity: string;
+  subscription?: string;
+  deadLetter: boolean;
+}
+
+// --- Observability connector: Grafana (opt-in, read-only summary + deep-links) ---
+
+export interface GrafanaDashboard {
+  title: string;
+  uid: string;
+  /** Absolute browser URL to open the dashboard. */
+  url: string;
+  folder?: string;
+}
+
+export interface GrafanaSummary {
+  available: boolean;
+  error?: string;
+  /** The base URL this summary is for (so the UI can build deep-links). */
+  baseUrl: string;
+  version?: string;
+  database?: string;
+  dashboards: GrafanaDashboard[];
+}
+
+// --- Observability connector: Sentry (opt-in, read-only unresolved issues) ---
+
+export interface SentryIssue {
+  id: string;
+  shortId?: string;
+  title: string;
+  culprit?: string;
+  level: string;
+  count: number;
+  userCount: number;
+  permalink: string;
+  lastSeen?: string;
+}
+
+export interface SentrySummary {
+  available: boolean;
+  error?: string;
+  issues: SentryIssue[];
+}
+
+// --- Git status + read-only diff (parity polish #9) ---
+
+export interface GitFileStatus {
+  path: string;
+  /** The two-character porcelain XY code (e.g. ` M`, `A `, `??`). */
+  status: string;
+  staged: boolean;
+  untracked: boolean;
+}
+
+export interface GitStatus {
+  root: string;
+  branch?: string;
+  upstream?: string;
+  ahead: number;
+  behind: number;
+  files: GitFileStatus[];
+  clean: boolean;
+}
+
+export interface GitDiff {
+  root: string;
+  path?: string;
+  patch: string;
+  truncated: boolean;
 }
 
 export interface RunHandle {
@@ -239,7 +672,72 @@ export type ClientCommand =
   | { kind: "reconnect"; request: ReconnectRequest }
   | { kind: "usage_summary" }
   | { kind: "coaching_hints" }
-  | { kind: "discover_agents"; workspaceRoot?: string };
+  | { kind: "discover_agents"; workspaceRoot?: string }
+  | { kind: "discover_backends" }
+  | { kind: "set_workspace_roots"; roots: string[] }
+  | { kind: "browse_dir"; path?: string }
+  | { kind: "read_file"; path: string }
+  | { kind: "search_files"; root: string; query: string }
+  | { kind: "resolve_workspace_file"; path: string }
+  | {
+      kind: "write_agent";
+      name: string;
+      description: string;
+      body: string;
+      model?: string;
+      workspaceRoot?: string;
+    }
+  | { kind: "list_jobs"; extraProbes?: JobProbe[]; extraTaskKeywords?: string[] }
+  | { kind: "detect_environment" }
+  | { kind: "list_network" }
+  | { kind: "list_work"; sources?: string[] }
+  | { kind: "list_service_bus" }
+  | {
+      kind: "peek_service_bus";
+      namespace: string;
+      entity: string;
+      subscription?: string;
+      deadLetter?: boolean;
+      count?: number;
+    }
+  | {
+      kind: "resubmit_dead_letter";
+      namespace: string;
+      entity: string;
+      subscription?: string;
+      count?: number;
+    }
+  | {
+      kind: "purge_service_bus";
+      namespace: string;
+      entity: string;
+      subscription?: string;
+      deadLetter?: boolean;
+    }
+  | {
+      kind: "send_service_bus";
+      namespace: string;
+      entity: string;
+      body: string;
+      subject?: string;
+      contentType?: string;
+    }
+  | {
+      kind: "receive_service_bus";
+      namespace: string;
+      entity: string;
+      subscription?: string;
+      deadLetter?: boolean;
+    }
+  | { kind: "grafana_summary"; baseUrl: string; token?: string }
+  | { kind: "sentry_summary"; baseUrl?: string; org: string; project: string; token?: string }
+  | { kind: "git_status"; root: string }
+  | { kind: "git_diff"; root: string; path?: string }
+  | { kind: "list_sessions" }
+  | { kind: "session_detail"; sessionId: string }
+  | { kind: "roadmap" }
+  | { kind: "scaffold_architecture"; name?: string; location?: string }
+  | { kind: "pull_architecture" };
 
 export interface ReconnectRequest {
   sessionId: string;
@@ -277,9 +775,38 @@ export type BridgeEventPayload =
   | { kind: "policy_hint"; hint: PolicyHint }
   | { kind: "status"; status: BridgeStatusEvent }
   | { kind: "artifact"; artifact: DispatchArtifact }
+  | { kind: "activity"; activity: DispatchActivity }
   | { kind: "usage_summary"; summary: UsageSummary }
   | { kind: "coaching_hints"; hints: PolicyHint[] }
-  | { kind: "agent_catalog"; agents: AgentDefinition[] };
+  | { kind: "agent_catalog"; agents: AgentDefinition[] }
+  | { kind: "backend_catalog"; backends: BackendCapability[] }
+  | { kind: "dir_listing"; listing: DirListing }
+  | { kind: "file_contents"; file: FileContents }
+  | { kind: "search_results"; results: SearchResults }
+  | { kind: "workspace_folders"; folders: WorkspaceFolders }
+  | { kind: "agent_written"; agent: AgentWriteOutcome }
+  | { kind: "job_snapshot"; snapshot: JobSnapshot }
+  | { kind: "environment_info"; environment: EnvironmentInfo }
+  | { kind: "network_info"; network: NetworkInfo }
+  | { kind: "work_snapshot"; snapshot: WorkSnapshot }
+  | { kind: "service_bus_snapshot"; snapshot: ServiceBusSnapshot }
+  | { kind: "service_bus_peek"; peek: ServiceBusPeek }
+  | { kind: "service_bus_resubmit"; result: ServiceBusResubmit }
+  | { kind: "service_bus_purge"; result: ServiceBusPurge }
+  | { kind: "service_bus_send"; result: ServiceBusSend }
+  | { kind: "service_bus_receive"; result: ServiceBusReceive }
+  | { kind: "grafana_summary"; summary: GrafanaSummary }
+  | { kind: "sentry_summary"; summary: SentrySummary }
+  | { kind: "git_status"; status: GitStatus }
+  | { kind: "git_diff"; diff: GitDiff }
+  | { kind: "session_list"; sessions: DispatchSession[] }
+  | {
+      kind: "session_detail";
+      sessionId: string;
+      runs: DispatchRun[];
+      transcript: DispatchMessage[];
+    }
+  | { kind: "roadmap"; roadmap: RoadmapSnapshot };
 
 export interface BridgeStatusEvent {
   state: DispatchRunState;

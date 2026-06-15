@@ -108,7 +108,7 @@ fn workspace() -> String {
     std::env::temp_dir().to_string_lossy().to_string()
 }
 
-fn runtime() -> BridgeRuntime<ScriptedAdapter> {
+fn runtime() -> BridgeRuntime {
     BridgeRuntime::new(
         ScriptedAdapter::new(),
         honeyhub_bridge::WorkspaceAllowlist::new(vec![workspace()]),
@@ -165,6 +165,9 @@ async fn streams_events_to_an_authenticated_client() {
                 session: session(),
                 workspace_root: workspace(),
                 task: "do the thing".to_string(),
+                model: None,
+                agent: None,
+                effort: None,
                 requested_run_id: Some("run-1".to_string()),
                 follow_up_to_run_id: None,
                 transcript: Vec::new(),

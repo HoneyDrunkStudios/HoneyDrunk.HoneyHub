@@ -3,8 +3,7 @@
   "source": "bundled-default",
   "rates": [
     { "backend": "claude.local", "modelLabel": "claude", "costTier": 3, "capabilityTier": 3 },
-    { "backend": "codex.local", "modelLabel": "codex", "costTier": 2, "capabilityTier": 2 },
-    { "backend": "copilot.local", "modelLabel": "copilot", "costTier": 1, "capabilityTier": 2 }
+    { "backend": "codex.local", "modelLabel": "codex", "costTier": 1, "capabilityTier": 2 }
   ],
   "policy": {
     "defaultBackend": "claude.local",

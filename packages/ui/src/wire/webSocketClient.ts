@@ -1,6 +1,7 @@
 import type {
   BridgeEvent,
   ClientCommand,
+  JobProbe,
   StartRunRequest,
   WireFrame
 } from "@honeydrunk/honeyhub-types";
@@ -233,5 +234,214 @@ export class WebSocketWireClient implements WireClient {
         ? { kind: "discover_agents" }
         : { kind: "discover_agents", workspaceRoot }
     );
+  }
+
+  async discoverBackends(): Promise<void> {
+    await this.dispatch({ kind: "discover_backends" });
+  }
+
+  async setWorkspaceRoots(roots: string[]): Promise<void> {
+    await this.dispatch({ kind: "set_workspace_roots", roots });
+  }
+
+  async browseDir(path?: string): Promise<void> {
+    await this.dispatch(
+      path === undefined ? { kind: "browse_dir" } : { kind: "browse_dir", path }
+    );
+  }
+
+  async readFile(path: string): Promise<void> {
+    await this.dispatch({ kind: "read_file", path });
+  }
+
+  async searchFiles(root: string, query: string): Promise<void> {
+    await this.dispatch({ kind: "search_files", root, query });
+  }
+
+  async resolveWorkspaceFile(path: string): Promise<void> {
+    await this.dispatch({ kind: "resolve_workspace_file", path });
+  }
+
+  async writeAgent(input: {
+    name: string;
+    description: string;
+    body: string;
+    model?: string;
+    workspaceRoot?: string;
+  }): Promise<void> {
+    await this.dispatch({
+      kind: "write_agent",
+      name: input.name,
+      description: input.description,
+      body: input.body,
+      ...(input.model !== undefined ? { model: input.model } : {}),
+      ...(input.workspaceRoot !== undefined ? { workspaceRoot: input.workspaceRoot } : {})
+    });
+  }
+
+  async listJobs(options?: {
+    extraProbes?: JobProbe[];
+    extraTaskKeywords?: string[];
+  }): Promise<void> {
+    await this.dispatch({
+      kind: "list_jobs",
+      ...(options?.extraProbes && options.extraProbes.length > 0
+        ? { extraProbes: options.extraProbes }
+        : {}),
+      ...(options?.extraTaskKeywords && options.extraTaskKeywords.length > 0
+        ? { extraTaskKeywords: options.extraTaskKeywords }
+        : {}),
+    });
+  }
+
+  async detectEnvironment(): Promise<void> {
+    await this.dispatch({ kind: "detect_environment" });
+  }
+
+  async listNetwork(): Promise<void> {
+    await this.dispatch({ kind: "list_network" });
+  }
+
+  async listWork(sources: string[]): Promise<void> {
+    await this.dispatch({
+      kind: "list_work",
+      ...(sources.length > 0 ? { sources } : {})
+    });
+  }
+
+  async listServiceBus(): Promise<void> {
+    await this.dispatch({ kind: "list_service_bus" });
+  }
+
+  async peekServiceBus(request: {
+    namespace: string;
+    entity: string;
+    subscription?: string;
+    deadLetter?: boolean;
+    count?: number;
+  }): Promise<void> {
+    await this.dispatch({
+      kind: "peek_service_bus",
+      namespace: request.namespace,
+      entity: request.entity,
+      ...(request.subscription !== undefined ? { subscription: request.subscription } : {}),
+      ...(request.deadLetter !== undefined ? { deadLetter: request.deadLetter } : {}),
+      ...(request.count !== undefined ? { count: request.count } : {})
+    });
+  }
+
+  async resubmitDeadLetter(request: {
+    namespace: string;
+    entity: string;
+    subscription?: string;
+    count?: number;
+  }): Promise<void> {
+    await this.dispatch({
+      kind: "resubmit_dead_letter",
+      namespace: request.namespace,
+      entity: request.entity,
+      ...(request.subscription !== undefined ? { subscription: request.subscription } : {}),
+      ...(request.count !== undefined ? { count: request.count } : {})
+    });
+  }
+
+  async purgeServiceBus(request: {
+    namespace: string;
+    entity: string;
+    subscription?: string;
+    deadLetter?: boolean;
+  }): Promise<void> {
+    await this.dispatch({
+      kind: "purge_service_bus",
+      namespace: request.namespace,
+      entity: request.entity,
+      ...(request.subscription !== undefined ? { subscription: request.subscription } : {}),
+      ...(request.deadLetter !== undefined ? { deadLetter: request.deadLetter } : {})
+    });
+  }
+
+  async sendServiceBus(request: {
+    namespace: string;
+    entity: string;
+    body: string;
+    subject?: string;
+    contentType?: string;
+  }): Promise<void> {
+    await this.dispatch({
+      kind: "send_service_bus",
+      namespace: request.namespace,
+      entity: request.entity,
+      body: request.body,
+      ...(request.subject !== undefined ? { subject: request.subject } : {}),
+      ...(request.contentType !== undefined ? { contentType: request.contentType } : {})
+    });
+  }
+
+  async receiveServiceBus(request: {
+    namespace: string;
+    entity: string;
+    subscription?: string;
+    deadLetter?: boolean;
+  }): Promise<void> {
+    await this.dispatch({
+      kind: "receive_service_bus",
+      namespace: request.namespace,
+      entity: request.entity,
+      ...(request.subscription !== undefined ? { subscription: request.subscription } : {}),
+      ...(request.deadLetter !== undefined ? { deadLetter: request.deadLetter } : {})
+    });
+  }
+
+  async grafanaSummary(baseUrl: string, token: string): Promise<void> {
+    await this.dispatch({ kind: "grafana_summary", baseUrl, token });
+  }
+
+  async sentrySummary(config: {
+    baseUrl: string;
+    org: string;
+    project: string;
+    token: string;
+  }): Promise<void> {
+    await this.dispatch({
+      kind: "sentry_summary",
+      baseUrl: config.baseUrl,
+      org: config.org,
+      project: config.project,
+      token: config.token
+    });
+  }
+
+  async gitStatus(root: string): Promise<void> {
+    await this.dispatch({ kind: "git_status", root });
+  }
+
+  async gitDiff(root: string, path?: string): Promise<void> {
+    await this.dispatch(
+      path === undefined ? { kind: "git_diff", root } : { kind: "git_diff", root, path }
+    );
+  }
+
+  async listSessions(): Promise<void> {
+    await this.dispatch({ kind: "list_sessions" });
+  }
+
+  async sessionDetail(sessionId: string): Promise<void> {
+    await this.dispatch({ kind: "session_detail", sessionId });
+  }
+
+  async roadmap(): Promise<void> {
+    await this.dispatch({ kind: "roadmap" });
+  }
+
+  async scaffoldArchitecture(input: { name?: string; location?: string }): Promise<void> {
+    await this.dispatch({
+      kind: "scaffold_architecture",
+      ...(input.name !== undefined ? { name: input.name } : {}),
+      ...(input.location !== undefined ? { location: input.location } : {})
+    });
+  }
+
+  async pullArchitecture(): Promise<void> {
+    await this.dispatch({ kind: "pull_architecture" });
   }
 }

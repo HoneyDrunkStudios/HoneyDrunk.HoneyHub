@@ -41,32 +41,33 @@ describe("recommendBackend", () => {
       { task: "Fix a typo and reformat a comment", availableBackends: ALL },
       BUNDLED_SNAPSHOT
     );
-    // Copilot is the lowest cost tier.
-    expect(rec.backend).toBe("copilot.local");
+    // Codex is the lowest cost tier in the bundled snapshot (Copilot is not offered).
+    expect(rec.backend).toBe("codex.local");
     expect(rec.rationale).toMatch(/Light/);
   });
 
   it("only considers available backends", () => {
     const rec = recommendBackend(
-      { task: "Redesign the architecture", availableBackends: ["codex.local", "copilot.local"] },
+      { task: "Redesign the architecture", availableBackends: ["codex.local"] },
       BUNDLED_SNAPSHOT
     );
+    // The most capable (claude) is unavailable here, so it is never chosen.
     expect(rec.backend).not.toBe("claude.local");
-    expect(rec.ranked.map((r) => r.backend).sort()).toEqual(["codex.local", "copilot.local"]);
+    expect(rec.ranked.map((r) => r.backend).sort()).toEqual(["codex.local"]);
   });
 
   it("applies recent usage only as a soft tiebreak, never overriding a clear winner", () => {
-    // Light task → cost wins; Copilot (cheapest) stays the pick even though it has
-    // some recent usage, because the cost gap dominates the small usage penalty.
+    // Light task → cost wins; Codex (cheapest) stays the pick even though it has some
+    // recent usage, because the cost gap dominates the small usage penalty.
     const rec = recommendBackend(
       {
         task: "rename a variable",
         availableBackends: ALL,
-        recentTurnsByBackend: { "copilot.local": 3 }
+        recentTurnsByBackend: { "codex.local": 3 }
       },
       BUNDLED_SNAPSHOT
     );
-    expect(rec.backend).toBe("copilot.local");
+    expect(rec.backend).toBe("codex.local");
 
     // But between two equal-tier backends, heavy usage tips the balance.
     const tieSnapshot = {

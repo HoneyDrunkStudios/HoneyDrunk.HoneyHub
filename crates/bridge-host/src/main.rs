@@ -24,10 +24,10 @@
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
 
-use honeyhub_bridge::adapters::{default_event_clock, ClaudeLocalAdapter};
+use honeyhub_bridge::adapters::{default_event_clock, ClaudeLocalAdapter, CodexLocalAdapter};
 use honeyhub_bridge::{
-    user_home, AgentBackend, BackendAllowlist, BridgeIdentity, BridgeRuntime, PairingRegistry,
-    WorkspaceAllowlist,
+    user_home, AgentBackend, BackendAllowlist, BridgeIdentity, BridgeRuntime, LocalStore,
+    PairingRegistry, WorkspaceAllowlist,
 };
 use honeyhub_bridge_host::{bind, serve, DEFAULT_POLL_INTERVAL};
 
@@ -47,23 +47,37 @@ async fn main() -> std::io::Result<()> {
         .collect();
     let workspace_allowlist = WorkspaceAllowlist::new(roots);
 
-    let backend_allowlist = BackendAllowlist::new(vec![AgentBackend::ClaudeLocal]);
+    let backend_allowlist =
+        BackendAllowlist::new(vec![AgentBackend::ClaudeLocal, AgentBackend::CodexLocal]);
 
     let program = std::env::var("HONEYHUB_CLAUDE_PROGRAM").unwrap_or_else(|_| "claude".to_string());
     let model = std::env::var("HONEYHUB_CLAUDE_MODEL").ok();
-    let adapter = ClaudeLocalAdapter::new(program, model, default_event_clock());
+    let claude = ClaudeLocalAdapter::new(program, model, default_event_clock());
 
-    let mut runtime = BridgeRuntime::new(adapter, workspace_allowlist, backend_allowlist);
-    // Opt in to user-global agent discovery only when explicitly enabled (off by default;
-    // it reads outside the workspace allowlist — the user's own home config).
-    let scan_global =
-        std::env::var_os("HONEYHUB_GLOBAL_AGENTS").is_some_and(|value| !value.is_empty());
-    if scan_global {
-        match user_home() {
-            Some(home) => runtime = runtime.with_global_home(Some(home)),
-            None => eprintln!(
-                "warning: HONEYHUB_GLOBAL_AGENTS is set, but HOME/USERPROFILE is unset; user-global agent discovery remains disabled"
-            ),
+    let codex_program =
+        std::env::var("HONEYHUB_CODEX_PROGRAM").unwrap_or_else(|_| "codex".to_string());
+    let codex = CodexLocalAdapter::new(codex_program, default_event_clock());
+
+    let mut runtime =
+        BridgeRuntime::new(claude, workspace_allowlist, backend_allowlist).with_adapter(codex);
+    // Discover the user's global agents (`~/.claude/agents`, `~/.copilot/agents`) by
+    // default; set HONEYHUB_GLOBAL_AGENTS=0/false/off to disable.
+    let disable_global = matches!(
+        std::env::var("HONEYHUB_GLOBAL_AGENTS").as_deref(),
+        Ok("0") | Ok("false") | Ok("off")
+    );
+    if !disable_global {
+        if let Some(home) = user_home() {
+            runtime = runtime.with_global_home(Some(home));
+        }
+    }
+
+    // Local-first durable history: persist sessions/runs/transcripts under the store dir
+    // (HONEYHUB_STORE_DIR, else ~/.honeyhub/store). Best-effort: if it can't open, the
+    // cockpit still works in-session, just without cross-restart history.
+    if let Some(store_dir) = store_dir() {
+        if let Ok(store) = LocalStore::open(store_dir) {
+            runtime = runtime.with_store(store);
         }
     }
 
@@ -103,6 +117,17 @@ async fn main() -> std::io::Result<()> {
         static_dir,
     )
     .await
+}
+
+/// Resolve the local store directory: `HONEYHUB_STORE_DIR` if set, else
+/// `<home>/.honeyhub/store`. `None` only when neither is available.
+fn store_dir() -> Option<PathBuf> {
+    if let Ok(dir) = std::env::var("HONEYHUB_STORE_DIR") {
+        if !dir.trim().is_empty() {
+            return Some(PathBuf::from(dir.trim()));
+        }
+    }
+    user_home().map(|home| home.join(".honeyhub").join("store"))
 }
 
 /// Resolve the directory of the built PWA to serve: `HONEYHUB_STATIC_DIR` when it
