@@ -44,7 +44,7 @@ export function RepoLocationsStep({
         <p className="eyebrow">Step 2 of 3</p>
         <h1 className="onboarding-title">Where do your repos live?</h1>
         <p className="onboarding-sub">
-          Browse to a folder that holds your repos, or pick a VS Code
+          Browse to a folder that holds your repos, or pick a VS Code{" "}
           <code> .code-workspace</code> file to add all the repos it references.
           HoneyHub lists what's inside and lets you read files (never edit). You can
           change this anytime in Settings.

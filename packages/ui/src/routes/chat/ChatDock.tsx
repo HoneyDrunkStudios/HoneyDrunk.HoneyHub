@@ -22,6 +22,7 @@ export interface ChatDockProps {
 }
 
 interface Turn {
+  id: string;
   role: "user" | "agent";
   body: string;
 }
@@ -66,7 +67,7 @@ export function ChatDock({
         } else {
           const body = payload.message.body;
           setStreaming("");
-          setTurns((prev) => [...prev, { role: "agent", body }]);
+          setTurns((prev) => [...prev, { id: crypto.randomUUID(), role: "agent", body }]);
           setBusy(false);
         }
       }
@@ -84,7 +85,7 @@ export function ChatDock({
     }
     const priorTurns = turns;
     const priorRunId = lastRunIdRef.current;
-    setTurns((prev) => [...prev, { role: "user", body: text }]);
+    setTurns((prev) => [...prev, { id: crypto.randomUUID(), role: "user", body: text }]);
     setInput("");
     setStreaming("");
     setBusy(true);
@@ -120,7 +121,10 @@ export function ChatDock({
 
     client.start(request).catch(() => {
       setBusy(false);
-      setTurns((prev) => [...prev, { role: "agent", body: "(couldn't reach the agent)" }]);
+      setTurns((prev) => [
+        ...prev,
+        { id: crypto.randomUUID(), role: "agent", body: "(couldn't reach the agent)" }
+      ]);
     });
   };
 
@@ -144,11 +148,11 @@ export function ChatDock({
               <p className="chat-dock-empty">
                 {backend === undefined
                   ? "Enable a provider in Settings to chat."
-                  : "Ask anything — this chat follows you across tabs."}
+                  : "Ask anything. This chat follows you across tabs."}
               </p>
             )}
-            {turns.map((turn, index) => (
-              <div key={index} className={`chat-dock-turn role-${turn.role}`}>
+            {turns.map((turn) => (
+              <div key={turn.id} className={`chat-dock-turn role-${turn.role}`}>
                 {turn.body}
               </div>
             ))}

@@ -44,7 +44,7 @@ export function ConnectPhone({ client, active }: Readonly<ConnectPhoneProps>): R
     }
   }, [active, client]);
 
-  const location = window.location;
+  const location = globalThis.location;
   const loopback = isLoopbackHost(location.hostname);
   const token = tokenFromSearch(location.search);
   const port = location.port;
@@ -72,7 +72,7 @@ export function ConnectPhone({ client, active }: Readonly<ConnectPhoneProps>): R
 
   const qr = useMemo(() => (phoneUrl === undefined ? undefined : qrMatrix(phoneUrl)), [phoneUrl]);
 
-  const bindHint = selectedIp !== undefined ? `${selectedIp}:${port || "8765"}` : undefined;
+  const bindHint = selectedIp === undefined ? undefined : `${selectedIp}:${port || "8765"}`;
 
   const copy = (text: string): void => {
     void navigator.clipboard
@@ -86,7 +86,7 @@ export function ConnectPhone({ client, active }: Readonly<ConnectPhoneProps>): R
       <legend>Connect a phone</legend>
       <p className="connect-phone-intro">
         Scan a QR with your phone to open this hub there. Your phone must be able to reach this
-        computer — same Wi-Fi, or on your Tailscale tailnet.
+        computer: same Wi-Fi, or on your Tailscale tailnet.
       </p>
 
       {phoneUrl !== undefined && qr !== undefined ? (
@@ -153,7 +153,7 @@ export function ConnectPhone({ client, active }: Readonly<ConnectPhoneProps>): R
                 </div>
               )}
               <p className="connect-phone-note">
-                Tailscale (the tailnet address) is recommended — it stays reachable off your
+                Tailscale (the tailnet address) is recommended; it stays reachable off your
                 local network and isn&rsquo;t exposed to the public internet.
               </p>
             </>

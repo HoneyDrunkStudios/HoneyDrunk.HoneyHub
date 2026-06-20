@@ -55,7 +55,7 @@ export function ConnectorsSettings({ client }: Readonly<ConnectorsSettingsProps>
     <fieldset className="connectors">
       <legend>Connectors</legend>
       <p className="connectors-intro">
-        Opt-in, read-only integrations. Turn one on and it shows up in the hub — nothing is
+        Opt-in, read-only integrations. Turn one on and it shows up in the hub; nothing is
         connected until you choose to.
       </p>
       {categories.map((category) => (
@@ -84,7 +84,7 @@ export function ConnectorsSettings({ client }: Readonly<ConnectorsSettingsProps>
                         connector={connector}
                         values={getConnectorConfig(config, connector.id)}
                         onSave={(values) => saveConfig(connector.id, values)}
-                        {...(client !== undefined ? { client } : {})}
+                        {...(client === undefined ? {} : { client })}
                       />
                     )}
                   </li>
@@ -205,12 +205,9 @@ function ConnectorConfigForm({
         </button>
       )}
       {result !== undefined && (
-        <span
-          role="status"
-          className={`connector-test-result ${result.ok ? "is-ok" : "is-error"}`}
-        >
+        <output className={`connector-test-result ${result.ok ? "is-ok" : "is-error"}`}>
           {result.ok ? "✓" : "✗"} {result.message}
-        </span>
+        </output>
       )}
     </div>
   );

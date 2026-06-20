@@ -52,7 +52,7 @@ export function rollupCost(rollup: UsageRollup): string {
     const unit = rollup.premiumRequests === 1 ? "premium request" : "premium requests";
     return `${rollup.premiumRequests} ${unit}`;
   }
-  return "—";
+  return "-";
 }
 
 /** The grounded headline: a real dollar figure (exact + derived only), formatted

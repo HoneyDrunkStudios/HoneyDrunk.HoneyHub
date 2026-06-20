@@ -61,6 +61,31 @@ export function CoachingView({ client, active }: Readonly<CoachingViewProps>) {
     placeholder = <p className="coaching-empty">No coaching yet.</p>;
   }
 
+  let coachingBody: ReactElement | null;
+  if (ordered === undefined) {
+    coachingBody = placeholder;
+  } else if (ordered.length === 0) {
+    coachingBody = (
+      <p className="coaching-empty">No advisories right now. Your sessions look healthy.</p>
+    );
+  } else {
+    coachingBody = (
+      <ul className="coaching-list">
+        {ordered.map((hint) => (
+          <li key={hint.id} className={`coaching-hint severity-${hint.severity}`}>
+            <div className="coaching-hint-head">
+              <span className={`coaching-badge severity-${hint.severity}`}>
+                {severityLabel(hint.severity)}
+              </span>
+              <span className="coaching-hint-title">{hintTitle(hint.code)}</span>
+            </div>
+            <p className="coaching-hint-message">{hint.message}</p>
+          </li>
+        ))}
+      </ul>
+    );
+  }
+
   return (
     <section className="coaching" aria-label="Coaching">
       <header className="coaching-header">
@@ -70,7 +95,7 @@ export function CoachingView({ client, active }: Readonly<CoachingViewProps>) {
         </button>
       </header>
       <p className="coaching-scope">
-        Advisory only — local suggestions computed on this device. Nothing here blocks a run.
+        Advisory only: local suggestions computed on this device. Nothing here blocks a run.
       </p>
 
       {error !== undefined && (
@@ -79,25 +104,7 @@ export function CoachingView({ client, active }: Readonly<CoachingViewProps>) {
         </p>
       )}
 
-      {ordered === undefined ? (
-        placeholder
-      ) : ordered.length === 0 ? (
-        <p className="coaching-empty">No advisories right now. Your sessions look healthy.</p>
-      ) : (
-        <ul className="coaching-list">
-          {ordered.map((hint) => (
-            <li key={hint.id} className={`coaching-hint severity-${hint.severity}`}>
-              <div className="coaching-hint-head">
-                <span className={`coaching-badge severity-${hint.severity}`}>
-                  {severityLabel(hint.severity)}
-                </span>
-                <span className="coaching-hint-title">{hintTitle(hint.code)}</span>
-              </div>
-              <p className="coaching-hint-message">{hint.message}</p>
-            </li>
-          ))}
-        </ul>
-      )}
+      {coachingBody}
     </section>
   );
 }

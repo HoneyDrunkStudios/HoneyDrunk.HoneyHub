@@ -274,8 +274,8 @@ export class WebSocketWireClient implements WireClient {
       name: input.name,
       description: input.description,
       body: input.body,
-      ...(input.model !== undefined ? { model: input.model } : {}),
-      ...(input.workspaceRoot !== undefined ? { workspaceRoot: input.workspaceRoot } : {})
+      ...(input.model === undefined ? {} : { model: input.model }),
+      ...(input.workspaceRoot === undefined ? {} : { workspaceRoot: input.workspaceRoot })
     });
   }
 
@@ -324,9 +324,9 @@ export class WebSocketWireClient implements WireClient {
       kind: "peek_service_bus",
       namespace: request.namespace,
       entity: request.entity,
-      ...(request.subscription !== undefined ? { subscription: request.subscription } : {}),
-      ...(request.deadLetter !== undefined ? { deadLetter: request.deadLetter } : {}),
-      ...(request.count !== undefined ? { count: request.count } : {})
+      ...(request.subscription === undefined ? {} : { subscription: request.subscription }),
+      ...(request.deadLetter === undefined ? {} : { deadLetter: request.deadLetter }),
+      ...(request.count === undefined ? {} : { count: request.count })
     });
   }
 
@@ -340,8 +340,8 @@ export class WebSocketWireClient implements WireClient {
       kind: "resubmit_dead_letter",
       namespace: request.namespace,
       entity: request.entity,
-      ...(request.subscription !== undefined ? { subscription: request.subscription } : {}),
-      ...(request.count !== undefined ? { count: request.count } : {})
+      ...(request.subscription === undefined ? {} : { subscription: request.subscription }),
+      ...(request.count === undefined ? {} : { count: request.count })
     });
   }
 
@@ -355,8 +355,8 @@ export class WebSocketWireClient implements WireClient {
       kind: "purge_service_bus",
       namespace: request.namespace,
       entity: request.entity,
-      ...(request.subscription !== undefined ? { subscription: request.subscription } : {}),
-      ...(request.deadLetter !== undefined ? { deadLetter: request.deadLetter } : {})
+      ...(request.subscription === undefined ? {} : { subscription: request.subscription }),
+      ...(request.deadLetter === undefined ? {} : { deadLetter: request.deadLetter })
     });
   }
 
@@ -372,8 +372,8 @@ export class WebSocketWireClient implements WireClient {
       namespace: request.namespace,
       entity: request.entity,
       body: request.body,
-      ...(request.subject !== undefined ? { subject: request.subject } : {}),
-      ...(request.contentType !== undefined ? { contentType: request.contentType } : {})
+      ...(request.subject === undefined ? {} : { subject: request.subject }),
+      ...(request.contentType === undefined ? {} : { contentType: request.contentType })
     });
   }
 
@@ -387,8 +387,8 @@ export class WebSocketWireClient implements WireClient {
       kind: "receive_service_bus",
       namespace: request.namespace,
       entity: request.entity,
-      ...(request.subscription !== undefined ? { subscription: request.subscription } : {}),
-      ...(request.deadLetter !== undefined ? { deadLetter: request.deadLetter } : {})
+      ...(request.subscription === undefined ? {} : { subscription: request.subscription }),
+      ...(request.deadLetter === undefined ? {} : { deadLetter: request.deadLetter })
     });
   }
 
@@ -436,8 +436,8 @@ export class WebSocketWireClient implements WireClient {
   async scaffoldArchitecture(input: { name?: string; location?: string }): Promise<void> {
     await this.dispatch({
       kind: "scaffold_architecture",
-      ...(input.name !== undefined ? { name: input.name } : {}),
-      ...(input.location !== undefined ? { location: input.location } : {})
+      ...(input.name === undefined ? {} : { name: input.name }),
+      ...(input.location === undefined ? {} : { location: input.location })
     });
   }
 

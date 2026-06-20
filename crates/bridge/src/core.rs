@@ -230,47 +230,59 @@ impl BridgeRuntime {
         }
 
         for event in &events {
-            match &event.payload {
-                BridgeEventPayload::Message { message } => {
-                    self.run_mut(run_id)?.transcript.push(message.clone());
-                    if let Some(store) = self.store.as_mut() {
-                        let _ = store.append_transcript(message);
-                    }
-                }
-                BridgeEventPayload::Control { event } => {
-                    self.run_mut(run_id)?
-                        .record
-                        .control_events
-                        .push(event.clone());
-                    if let Some(store) = self.store.as_mut() {
-                        let _ = store.put_control_event(&session_id, event);
-                    }
-                }
-                BridgeEventPayload::Status { status } => {
-                    self.transition_run(run_id, status.state.clone(), event.created_at.clone())?;
-                    // Persist the updated run record (state/completed_at changed).
-                    let run = self.run(run_id)?.record.run.clone();
-                    if let Some(store) = self.store.as_mut() {
-                        let _ = store.put_run(&run);
-                    }
-                }
-                BridgeEventPayload::Artifact { artifact } => {
-                    self.run_mut(run_id)?.artifacts.push(artifact.clone());
-                    if let Some(store) = self.store.as_mut() {
-                        let _ = store.put_artifact(&session_id, artifact);
-                    }
-                }
-                BridgeEventPayload::Usage { signal } => {
-                    if let Some(store) = self.store.as_mut() {
-                        let _ = store.put_usage(&session_id, signal);
-                    }
-                }
-                _ => {}
-            }
-            let managed = self.run_mut(run_id)?;
-            Self::push_bridge_event(managed, event.clone());
+            self.apply_stream_event(event, run_id, &session_id)?;
         }
         Ok(events)
+    }
+
+    /// Persist one streamed event into the run's transcript/records and store,
+    /// then enqueue it for replay.
+    fn apply_stream_event(
+        &mut self,
+        event: &BridgeEvent,
+        run_id: &str,
+        session_id: &str,
+    ) -> Result<(), BridgeError> {
+        match &event.payload {
+            BridgeEventPayload::Message { message } => {
+                self.run_mut(run_id)?.transcript.push(message.clone());
+                if let Some(store) = self.store.as_mut() {
+                    let _ = store.append_transcript(message);
+                }
+            }
+            BridgeEventPayload::Control { event } => {
+                self.run_mut(run_id)?
+                    .record
+                    .control_events
+                    .push(event.clone());
+                if let Some(store) = self.store.as_mut() {
+                    let _ = store.put_control_event(session_id, event);
+                }
+            }
+            BridgeEventPayload::Status { status } => {
+                self.transition_run(run_id, status.state.clone(), event.created_at.clone())?;
+                // Persist the updated run record (state/completed_at changed).
+                let run = self.run(run_id)?.record.run.clone();
+                if let Some(store) = self.store.as_mut() {
+                    let _ = store.put_run(&run);
+                }
+            }
+            BridgeEventPayload::Artifact { artifact } => {
+                self.run_mut(run_id)?.artifacts.push(artifact.clone());
+                if let Some(store) = self.store.as_mut() {
+                    let _ = store.put_artifact(session_id, artifact);
+                }
+            }
+            BridgeEventPayload::Usage { signal } => {
+                if let Some(store) = self.store.as_mut() {
+                    let _ = store.put_usage(session_id, signal);
+                }
+            }
+            _ => {}
+        }
+        let managed = self.run_mut(run_id)?;
+        Self::push_bridge_event(managed, event.clone());
+        Ok(())
     }
 
     pub fn reply(
@@ -964,6 +976,16 @@ fn ids_match(payload_run_id: &str, payload_session_id: &str, event: &BridgeEvent
     payload_run_id == event.run_id && payload_session_id == event.session_id
 }
 
+/// Reject a stream payload whose id/backend check `ok` fails, tagging the
+/// failure with `code`/`message`.
+fn require_stream_match(ok: bool, code: &str, message: &str) -> Result<(), BridgeError> {
+    if ok {
+        Ok(())
+    } else {
+        Err(BridgeError::new(code, message))
+    }
+}
+
 /// Validate one stream payload against its containing event and the bridge adapter's
 /// backend. The device-wide, host-synthesized payloads are never adapter-streamed and
 /// are rejected outright.
@@ -973,72 +995,54 @@ fn validate_stream_payload(
     backend: AgentBackend,
 ) -> Result<(), BridgeError> {
     match payload {
-        BridgeEventPayload::Message { message } => {
-            if !ids_match(&message.run_id, &message.session_id, event) {
-                return Err(BridgeError::new(
-                    "event_message_mismatch",
-                    "stream message ids do not match containing event",
-                ));
-            }
-        }
-        BridgeEventPayload::Control { event: control } => {
-            if !ids_match(&control.run_id, &control.session_id, event) {
-                return Err(BridgeError::new(
-                    "event_control_mismatch",
-                    "stream control event ids do not match containing event",
-                ));
-            }
-        }
+        BridgeEventPayload::Message { message } => require_stream_match(
+            ids_match(&message.run_id, &message.session_id, event),
+            "event_message_mismatch",
+            "stream message ids do not match containing event",
+        )?,
+        BridgeEventPayload::Control { event: control } => require_stream_match(
+            ids_match(&control.run_id, &control.session_id, event),
+            "event_control_mismatch",
+            "stream control event ids do not match containing event",
+        )?,
         BridgeEventPayload::Usage { signal } => {
-            if !ids_match(&signal.run_id, &signal.session_id, event) {
-                return Err(BridgeError::new(
-                    "event_usage_mismatch",
-                    "stream usage signal ids do not match containing event",
-                ));
-            }
-            if signal.backend != backend {
-                return Err(BridgeError::new(
-                    "event_backend_mismatch",
-                    "stream usage backend does not match bridge adapter",
-                ));
-            }
+            require_stream_match(
+                ids_match(&signal.run_id, &signal.session_id, event),
+                "event_usage_mismatch",
+                "stream usage signal ids do not match containing event",
+            )?;
+            require_stream_match(
+                signal.backend == backend,
+                "event_backend_mismatch",
+                "stream usage backend does not match bridge adapter",
+            )?;
         }
         BridgeEventPayload::PolicyHint { hint } => {
             let run_mismatch = hint
                 .run_id
                 .as_ref()
                 .is_some_and(|run_id| run_id != &event.run_id);
-            if hint.session_id != event.session_id || run_mismatch {
-                return Err(BridgeError::new(
-                    "event_policy_hint_mismatch",
-                    "stream policy hint ids do not match containing event",
-                ));
-            }
+            require_stream_match(
+                hint.session_id == event.session_id && !run_mismatch,
+                "event_policy_hint_mismatch",
+                "stream policy hint ids do not match containing event",
+            )?;
         }
-        BridgeEventPayload::Status { status } => {
-            if status.backend != backend {
-                return Err(BridgeError::new(
-                    "event_backend_mismatch",
-                    "stream status backend does not match bridge adapter",
-                ));
-            }
-        }
-        BridgeEventPayload::Artifact { artifact } => {
-            if !ids_match(&artifact.run_id, &artifact.session_id, event) {
-                return Err(BridgeError::new(
-                    "event_artifact_mismatch",
-                    "stream artifact ids do not match containing event",
-                ));
-            }
-        }
-        BridgeEventPayload::Activity { activity } => {
-            if !ids_match(&activity.run_id, &activity.session_id, event) {
-                return Err(BridgeError::new(
-                    "event_activity_mismatch",
-                    "stream activity ids do not match containing event",
-                ));
-            }
-        }
+        BridgeEventPayload::Status { status } => require_stream_match(
+            status.backend == backend,
+            "event_backend_mismatch",
+            "stream status backend does not match bridge adapter",
+        )?,
+        BridgeEventPayload::Artifact { artifact } => require_stream_match(
+            ids_match(&artifact.run_id, &artifact.session_id, event),
+            "event_artifact_mismatch",
+            "stream artifact ids do not match containing event",
+        )?,
+        BridgeEventPayload::Activity { activity } => require_stream_match(
+            ids_match(&activity.run_id, &activity.session_id, event),
+            "event_activity_mismatch",
+            "stream activity ids do not match containing event",
+        )?,
         BridgeEventPayload::UsageSummary { .. } => {
             // A usage summary is a device-wide, host-synthesized response to a client
             // query — never an event an adapter streams from a run. Seeing one here

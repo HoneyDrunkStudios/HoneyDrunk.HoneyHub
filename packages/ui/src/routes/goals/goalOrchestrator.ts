@@ -94,9 +94,9 @@ export class GoalOrchestrator {
       id,
       objective: input.objective,
       backend: input.backend,
-      ...(input.model !== undefined ? { model: input.model } : {}),
+      ...(input.model === undefined ? {} : { model: input.model }),
       maxIterations: input.maxIterations,
-      ...(input.spendCapUsd !== undefined ? { spendCapUsd: input.spendCapUsd } : {}),
+      ...(input.spendCapUsd === undefined ? {} : { spendCapUsd: input.spendCapUsd }),
       createdAt: this.deps.now()
     });
     this.goals = { ...this.goals, [id]: goal };
@@ -123,8 +123,7 @@ export class GoalOrchestrator {
 
   /** Pause a goal: let the in-flight run finish but launch no further iterations. */
   pause(goalId: string): void {
-    const goal = this.goals[goalId];
-    if (goal === undefined || goal.state !== "running") {
+    if (this.goals[goalId]?.state !== "running") {
       return;
     }
     this.update(goalId, { state: "paused", note: "Paused." });
@@ -132,8 +131,7 @@ export class GoalOrchestrator {
 
   /** Resume a paused goal: if no run is in flight, launch the next iteration now. */
   resume(goalId: string): void {
-    const goal = this.goals[goalId];
-    if (goal === undefined || goal.state !== "paused") {
+    if (this.goals[goalId]?.state !== "paused") {
       return;
     }
     this.update(goalId, { state: "running", note: undefined });
@@ -168,7 +166,7 @@ export class GoalOrchestrator {
       sessionId: runtime.sessionId,
       backend: goal.backend,
       task: taskText,
-      ...(goal.model !== undefined ? { model: goal.model } : {}),
+      ...(goal.model === undefined ? {} : { model: goal.model }),
       createdAt
     });
 
@@ -237,7 +235,7 @@ export class GoalOrchestrator {
       // A goal can't answer a prompt; surface it as held so the user can intervene.
       this.update(goalId, {
         state: "needs_input",
-        note: "A run needs input — open it in Runs to continue."
+        note: "A run needs input. Open it in Runs to continue."
       });
       return;
     }

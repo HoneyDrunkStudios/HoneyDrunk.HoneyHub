@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import type { ReactNode } from "react";
 import type { DirListing, FileContents, SearchResults } from "@honeydrunk/honeyhub-types";
 import type { WireClient } from "../../wire/client";
 import { basename } from "../../paths";
@@ -21,6 +22,81 @@ function childPath(parent: string, name: string): string {
   return parent.endsWith(sep) ? `${parent}${name}` : `${parent}${sep}${name}`;
 }
 
+
+/** The list body while a filename search is in flight or has results. */
+function renderSearchEntries(
+  searching: boolean,
+  results: SearchResults | undefined,
+  openFile: (path: string) => void
+): ReactNode {
+  if (searching) {
+    return <li className="browse-hint">Searching…</li>;
+  }
+  if (results === undefined || results.hits.length === 0) {
+    return <li className="browse-hint">No files match.</li>;
+  }
+  return (
+    <>
+      {results.hits.map((hit) => (
+        <li key={hit.path}>
+          <button type="button" className="entry file" onClick={() => openFile(hit.path)}>
+            <span className="entry-name">{hit.name}</span>
+            <span className="entry-sub" title={hit.path}>
+              {hit.path}
+            </span>
+          </button>
+        </li>
+      ))}
+      {results.truncated && <li className="browse-hint">More results not shown.</li>}
+    </>
+  );
+}
+
+/** The top-level list of picked repo locations. */
+function renderLocationEntries(
+  workspaceRoots: string[],
+  openDir: (path: string) => void
+): ReactNode {
+  if (workspaceRoots.length === 0) {
+    return <li className="browse-hint">No repo locations yet. Add one in Settings.</li>;
+  }
+  return workspaceRoots.map((root) => (
+    <li key={root}>
+      <button type="button" className="entry dir" onClick={() => openDir(root)}>
+        <span className="entry-icon" aria-hidden="true">
+          ▸
+        </span>
+        <span className="entry-name">{root}</span>
+      </button>
+    </li>
+  ));
+}
+
+/** The entries of the current (non-empty) directory listing. */
+function renderDirEntries(
+  dir: DirListing,
+  openDir: (path: string) => void,
+  openFile: (path: string) => void
+): ReactNode {
+  return dir.entries.map((entry) => (
+    <li key={entry.name}>
+      <button
+        type="button"
+        className={`entry ${entry.kind}`}
+        onClick={() =>
+          entry.kind === "dir"
+            ? openDir(childPath(dir.path, entry.name))
+            : openFile(childPath(dir.path, entry.name))
+        }
+      >
+        <span className="entry-icon" aria-hidden="true">
+          {entry.kind === "dir" ? "▸" : "·"}
+        </span>
+        <span className="entry-name">{entry.name}</span>
+      </button>
+    </li>
+  ));
+}
 
 /** Read-only repo/file browser (packet 09 §3): navigate the picked locations, search
     files by name, and view source (markdown rendered, code highlighted). All disk
@@ -160,6 +236,17 @@ export function BrowseView({ client, workspaceRoots, active }: Readonly<BrowseVi
 
   const showingResults = query.trim().length > 0 && dir !== undefined;
 
+  let entries: ReactNode;
+  if (showingResults) {
+    entries = renderSearchEntries(searching, results, openFile);
+  } else if (dir === undefined) {
+    entries = renderLocationEntries(workspaceRoots, openDir);
+  } else if (dir.entries.length === 0) {
+    entries = <li className="browse-hint">Empty folder.</li>;
+  } else {
+    entries = renderDirEntries(dir, openDir, openFile);
+  }
+
   return (
     <section className="browse" aria-label="Browse">
       <div className="browse-pane browse-nav">
@@ -215,69 +302,7 @@ export function BrowseView({ client, workspaceRoots, active }: Readonly<BrowseVi
         )}
 
         <ul className="browse-list" aria-label="Entries">
-          {showingResults ? (
-            searching ? (
-              <li className="browse-hint">Searching…</li>
-            ) : results !== undefined && results.hits.length > 0 ? (
-              <>
-                {results.hits.map((hit) => (
-                  <li key={hit.path}>
-                    <button
-                      type="button"
-                      className="entry file"
-                      onClick={() => openFile(hit.path)}
-                    >
-                      <span className="entry-name">{hit.name}</span>
-                      <span className="entry-sub" title={hit.path}>
-                        {hit.path}
-                      </span>
-                    </button>
-                  </li>
-                ))}
-                {results.truncated && <li className="browse-hint">More results not shown.</li>}
-              </>
-            ) : (
-              <li className="browse-hint">No files match.</li>
-            )
-          ) : dir === undefined ? (
-            workspaceRoots.length === 0 ? (
-              <li className="browse-hint">
-                No repo locations yet — add one in Settings.
-              </li>
-            ) : (
-              workspaceRoots.map((root) => (
-                <li key={root}>
-                  <button type="button" className="entry dir" onClick={() => openDir(root)}>
-                    <span className="entry-icon" aria-hidden="true">
-                      ▸
-                    </span>
-                    <span className="entry-name">{root}</span>
-                  </button>
-                </li>
-              ))
-            )
-          ) : dir.entries.length === 0 ? (
-            <li className="browse-hint">Empty folder.</li>
-          ) : (
-            dir.entries.map((entry) => (
-              <li key={entry.name}>
-                <button
-                  type="button"
-                  className={`entry ${entry.kind}`}
-                  onClick={() =>
-                    entry.kind === "dir"
-                      ? openDir(childPath(dir.path, entry.name))
-                      : openFile(childPath(dir.path, entry.name))
-                  }
-                >
-                  <span className="entry-icon" aria-hidden="true">
-                    {entry.kind === "dir" ? "▸" : "·"}
-                  </span>
-                  <span className="entry-name">{entry.name}</span>
-                </button>
-              </li>
-            ))
-          )}
+          {entries}
           {dir?.truncated === true && <li className="browse-hint">Folder truncated.</li>}
         </ul>
       </div>

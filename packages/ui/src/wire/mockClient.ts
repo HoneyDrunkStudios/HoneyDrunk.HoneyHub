@@ -25,6 +25,10 @@ import type { StartedRun, WireClient, WireEventHandler } from "./client";
 // and stop -> stopping -> cancelled. It backs the offline demo and the RTL test;
 // the real WebSocket client implements the same `WireClient` seam later.
 
+// mock-only sample addresses (scripted offline "Connect a phone" surface; not real hosts)
+const MOCK_TAILNET_ADDRESS = "100.110.120.130";
+const MOCK_LAN_ADDRESS = "192.168.1.42";
+
 interface MockState {
   sessionId: string;
   backend: AgentBackend;
@@ -138,7 +142,7 @@ export class MockWireClient implements WireClient {
       }
     });
     this.message(sessionId, runId, "Applying the change", true);
-    this.message(sessionId, runId, "Done — opened a pull request.", false);
+    this.message(sessionId, runId, "Done. Opened a pull request.", false);
     this.emit(sessionId, runId, {
       kind: "usage",
       signal: {
@@ -316,9 +320,9 @@ export class MockWireClient implements WireClient {
         available: true,
         capabilities: defaultClaudeCapabilities,
         models: [
-          { id: "opus", label: "Claude Opus" },
-          { id: "sonnet", label: "Claude Sonnet" },
-          { id: "haiku", label: "Claude Haiku" }
+          { id: "opus", label: "Claude Opus 4.8" },
+          { id: "sonnet", label: "Claude Sonnet 4.6" },
+          { id: "haiku", label: "Claude Haiku 4.5" }
         ],
         modelSource: "cli_alias"
       },
@@ -352,9 +356,8 @@ export class MockWireClient implements WireClient {
     // The mock has no real allowlist to update; accept silently (the host enforces it).
   }
 
-  async browseDir(path?: string): Promise<void> {
+  async browseDir(path = ""): Promise<void> {
     // A tiny scripted tree so the offline picker/browser is exercisable without disk.
-    const key = path ?? "";
     const tree: Record<string, DirListing> = {
       "": {
         path: "",
@@ -386,7 +389,7 @@ export class MockWireClient implements WireClient {
         truncated: false
       }
     };
-    const listing = tree[key] ?? { path: key, parent: "", entries: [], truncated: false };
+    const listing = tree[path] ?? { path, parent: "", entries: [], truncated: false };
     this.emitDevice({ kind: "dir_listing", listing });
   }
 
@@ -478,7 +481,7 @@ export class MockWireClient implements WireClient {
       " // unchanged line\n";
     this.emitDevice({
       kind: "git_diff",
-      diff: { root, ...(path !== undefined ? { path } : {}), patch, truncated: false }
+      diff: { root, ...(path === undefined ? {} : { path }), patch, truncated: false }
     });
   }
 
@@ -528,7 +531,7 @@ export class MockWireClient implements WireClient {
           sessionId,
           runId: "run-past-1",
           role: "agent",
-          body: "Done — staged the workflow and opened a PR.",
+          body: "Done. Staged the workflow and opened a PR.",
           createdAt: this.createdAt
         }
       ]
@@ -692,8 +695,8 @@ export class MockWireClient implements WireClient {
       kind: "network_info",
       network: {
         addresses: [
-          { ip: "100.110.120.130", kind: "tailnet", interface: "Tailscale" },
-          { ip: "192.168.1.42", kind: "lan", interface: "Wi-Fi" }
+          { ip: MOCK_TAILNET_ADDRESS, kind: "tailnet", interface: "Tailscale" },
+          { ip: MOCK_LAN_ADDRESS, kind: "lan", interface: "Wi-Fi" }
         ]
       }
     });
@@ -819,14 +822,13 @@ export class MockWireClient implements WireClient {
         kind: "grafana_summary",
         summary: {
           available: false,
-          error: "not configured — add your Grafana base URL in Settings",
+          error: "not configured: add your Grafana base URL in Settings",
           baseUrl: "",
           dashboards: []
         }
       });
       return;
     }
-    void token;
     const base = baseUrl.trim().replace(/\/$/, "");
     this.emitDevice({
       kind: "grafana_summary",
@@ -856,7 +858,7 @@ export class MockWireClient implements WireClient {
         kind: "sentry_summary",
         summary: {
           available: false,
-          error: "not configured — add your Sentry org, project, and token in Settings",
+          error: "not configured: add your Sentry org, project, and token in Settings",
           issues: []
         }
       });
@@ -907,7 +909,7 @@ export class MockWireClient implements WireClient {
         available: true,
         namespace: request.namespace,
         entity: request.entity,
-        ...(request.subscription !== undefined ? { subscription: request.subscription } : {}),
+        ...(request.subscription === undefined ? {} : { subscription: request.subscription }),
         deadLetter: request.deadLetter ?? false,
         messages: request.deadLetter
           ? [
@@ -956,7 +958,7 @@ export class MockWireClient implements WireClient {
         moved: request.count ?? 1,
         namespace: request.namespace,
         entity: request.entity,
-        ...(request.subscription !== undefined ? { subscription: request.subscription } : {})
+        ...(request.subscription === undefined ? {} : { subscription: request.subscription })
       }
     });
   }
@@ -975,7 +977,7 @@ export class MockWireClient implements WireClient {
         purged: 5,
         namespace: request.namespace,
         entity: request.entity,
-        ...(request.subscription !== undefined ? { subscription: request.subscription } : {}),
+        ...(request.subscription === undefined ? {} : { subscription: request.subscription }),
         deadLetter: request.deadLetter ?? false
       }
     });
@@ -1009,7 +1011,7 @@ export class MockWireClient implements WireClient {
         empty: false,
         namespace: request.namespace,
         entity: request.entity,
-        ...(request.subscription !== undefined ? { subscription: request.subscription } : {}),
+        ...(request.subscription === undefined ? {} : { subscription: request.subscription }),
         deadLetter: request.deadLetter ?? false,
         message: {
           messageId: "rcv-1",

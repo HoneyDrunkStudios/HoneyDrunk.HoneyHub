@@ -81,59 +81,30 @@ export function WorkView({ client, active }: Readonly<WorkViewProps>): ReactElem
     [snapshot]
   );
 
-  return (
-    <section className="work" aria-label="Work">
-      <header className="work-header">
-        <h2>Work</h2>
-        <div className="work-actions">
-          {updatedAt !== undefined && (
-            <span className="updated-stamp">updated {formatRelative(now, updatedAt)}</span>
-          )}
-          <input
-            className="work-search"
-            type="search"
-            aria-label="Filter work items"
-            value={query}
-            onChange={(event) => setQuery(event.target.value)}
-            placeholder="Filter by title, repo, label…"
-          />
-          <button type="button" onClick={() => refresh(sources)} disabled={loading || sources.length === 0}>
-            {loading ? "Reading…" : "Refresh"}
-          </button>
-        </div>
-      </header>
-      <p className="work-scope">
-        Everything assigned to you across your connected tools — read-only. Each item opens in
-        its source.
+  let workContent: ReactElement;
+  if (sources.length === 0) {
+    workContent = (
+      <p className="work-empty">
+        No work connectors enabled. Turn one on in <strong>Settings → Connectors</strong> to
+        see your assigned issues and PRs here.
       </p>
-
-      {error !== undefined && (
-        <p role="alert" className="work-error">
-          {error}
-        </p>
-      )}
-
-      {unavailable.map((source) => (
-        <p key={source.source} className="work-unavailable">
-          {SOURCE_LABEL[source.source] ?? source.source}: {source.error ?? "not available"}
-        </p>
-      ))}
-
-      {sources.length === 0 ? (
-        <p className="work-empty">
-          No work connectors enabled. Turn one on in <strong>Settings → Connectors</strong> to
-          see your assigned issues and PRs here.
-        </p>
-      ) : snapshot === undefined ? (
-        <p className="work-empty">{loading ? "Reading your work…" : "No snapshot yet."}</p>
-      ) : groups.length === 0 ? (
-        <p className="work-empty">
-          {query.trim() === ""
-            ? "Nothing assigned to you right now."
-            : `No work items match “${query}”.`}
-        </p>
-      ) : (
-        groups.map((group) => (
+    );
+  } else if (snapshot === undefined) {
+    workContent = (
+      <p className="work-empty">{loading ? "Reading your work…" : "No snapshot yet."}</p>
+    );
+  } else if (groups.length === 0) {
+    workContent = (
+      <p className="work-empty">
+        {query.trim() === ""
+          ? "Nothing assigned to you right now."
+          : `No work items match “${query}”.`}
+      </p>
+    );
+  } else {
+    workContent = (
+      <>
+        {groups.map((group) => (
           <div key={group.category} className="work-group">
             <div className="work-group-head">
               <h3>{group.category}</h3>
@@ -163,8 +134,50 @@ export function WorkView({ client, active }: Readonly<WorkViewProps>): ReactElem
               ))}
             </ul>
           </div>
-        ))
+        ))}
+      </>
+    );
+  }
+
+  return (
+    <section className="work" aria-label="Work">
+      <header className="work-header">
+        <h2>Work</h2>
+        <div className="work-actions">
+          {updatedAt !== undefined && (
+            <span className="updated-stamp">updated {formatRelative(now, updatedAt)}</span>
+          )}
+          <input
+            className="work-search"
+            type="search"
+            aria-label="Filter work items"
+            value={query}
+            onChange={(event) => setQuery(event.target.value)}
+            placeholder="Filter by title, repo, label…"
+          />
+          <button type="button" onClick={() => refresh(sources)} disabled={loading || sources.length === 0}>
+            {loading ? "Reading…" : "Refresh"}
+          </button>
+        </div>
+      </header>
+      <p className="work-scope">
+        Everything assigned to you across your connected tools, read-only. Each item opens in
+        its source.
+      </p>
+
+      {error !== undefined && (
+        <p role="alert" className="work-error">
+          {error}
+        </p>
       )}
+
+      {unavailable.map((source) => (
+        <p key={source.source} className="work-unavailable">
+          {SOURCE_LABEL[source.source] ?? source.source}: {source.error ?? "not available"}
+        </p>
+      ))}
+
+      {workContent}
     </section>
   );
 }

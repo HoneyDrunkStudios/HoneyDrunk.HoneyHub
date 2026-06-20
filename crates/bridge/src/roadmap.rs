@@ -279,12 +279,7 @@ pub fn parse_current_focus(text: &str) -> (Option<String>, Vec<RoadmapLane>) {
     for line in text.lines() {
         let trimmed = line.trim();
         if last_reviewed.is_none() {
-            if let Some(rest) = trimmed.strip_prefix("**Last reviewed:**") {
-                let value = rest.trim();
-                if !value.is_empty() {
-                    last_reviewed = Some(value.to_string());
-                }
-            }
+            last_reviewed = parse_last_reviewed(trimmed);
         }
         if let Some(item) = parse_table_row(trimmed) {
             items.push(item);
@@ -308,6 +303,17 @@ pub fn parse_current_focus(text: &str) -> (Option<String>, Vec<RoadmapLane>) {
         lane.next = lane.items.iter().find(|i| i.actionable()).cloned();
     }
     (last_reviewed, lanes)
+}
+
+/// Pull the non-empty value from a `**Last reviewed:** …` line, or `None` if the
+/// line is not that marker (or carries no value).
+fn parse_last_reviewed(trimmed: &str) -> Option<String> {
+    let value = trimmed.strip_prefix("**Last reviewed:**")?.trim();
+    if value.is_empty() {
+        None
+    } else {
+        Some(value.to_string())
+    }
 }
 
 /// Parse one ranked-table data row (`| 1 | Lane | Item | … |`). Returns `None` for the

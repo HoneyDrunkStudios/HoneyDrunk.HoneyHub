@@ -245,13 +245,12 @@ async fn handle_command(
     let result: Result<Option<Vec<BridgeEvent>>, BridgeError> = {
         let mut runtime = host.runtime.lock().await;
         match command {
-            ClientCommand::Start { request } => match runtime.start(*request, now_rfc3339()) {
-                Ok(handle) => {
+            ClientCommand::Start { request } => {
+                runtime.start(*request, now_rfc3339()).map(|handle| {
                     to_register = Some(handle.run_id);
-                    Ok(None)
-                }
-                Err(error) => Err(error),
-            },
+                    None
+                })
+            }
             ClientCommand::Reply { run_id, text } => {
                 runtime.reply(&run_id, &text, now_rfc3339()).map(|_| None)
             }
@@ -274,16 +273,9 @@ async fn handle_command(
                     hints,
                 )]))
             }
-            ClientCommand::DiscoverAgents { workspace_root } => {
-                match runtime.discover_agents(workspace_root.as_deref()) {
-                    Ok(agents) => Ok(Some(vec![BridgeEvent::agent_catalog(
-                        new_id(),
-                        now_rfc3339(),
-                        agents,
-                    )])),
-                    Err(error) => Err(error),
-                }
-            }
+            ClientCommand::DiscoverAgents { workspace_root } => runtime
+                .discover_agents(workspace_root.as_deref())
+                .map(|agents| one(BridgeEvent::agent_catalog(new_id(), now_rfc3339(), agents))),
             ClientCommand::DiscoverBackends => Ok(Some(vec![BridgeEvent::backend_catalog(
                 new_id(),
                 now_rfc3339(),
@@ -293,65 +285,38 @@ async fn handle_command(
                 runtime.set_workspace_roots(roots);
                 Ok(None)
             }
-            ClientCommand::BrowseDir { path } => {
-                match honeyhub_bridge::browse_dir(path.as_deref()) {
-                    Ok(listing) => Ok(Some(vec![BridgeEvent::dir_listing(
-                        new_id(),
-                        now_rfc3339(),
-                        listing,
-                    )])),
-                    Err(error) => Err(error),
-                }
-            }
+            ClientCommand::BrowseDir { path } => honeyhub_bridge::browse_dir(path.as_deref())
+                .map(|listing| one(BridgeEvent::dir_listing(new_id(), now_rfc3339(), listing))),
             ClientCommand::ReadFile { path } => {
                 // Gate file *contents* to the user's allowlisted roots (browse lists
                 // names unscoped, but reading content requires an added root).
-                if !runtime.workspace_allows(&path) {
-                    Err(BridgeError::new(
-                        "workspace_not_allowed",
-                        "file is outside an allowlisted workspace root",
-                    ))
-                } else {
-                    match honeyhub_bridge::read_file(&path) {
-                        Ok(file) => Ok(Some(vec![BridgeEvent::file_contents(
-                            new_id(),
-                            now_rfc3339(),
-                            file,
-                        )])),
-                        Err(error) => Err(error),
-                    }
-                }
+                require(runtime.workspace_allows(&path), "file")
+                    .and_then(|()| honeyhub_bridge::read_file(&path))
+                    .map(|file| one(BridgeEvent::file_contents(new_id(), now_rfc3339(), file)))
             }
             ClientCommand::ResolveWorkspaceFile { path } => {
                 // Unscoped like browse: the user selects a .code-workspace to *add* its
                 // repos as roots, so it must be readable before those roots exist. It
                 // only reads the small workspace JSON (folder paths), not repo contents.
-                match honeyhub_bridge::resolve_workspace_file(&path) {
-                    Ok(folders) => Ok(Some(vec![BridgeEvent::workspace_folders(
+                honeyhub_bridge::resolve_workspace_file(&path).map(|folders| {
+                    one(BridgeEvent::workspace_folders(
                         new_id(),
                         now_rfc3339(),
                         folders,
-                    )])),
-                    Err(error) => Err(error),
-                }
+                    ))
+                })
             }
             ClientCommand::SearchFiles { root, query } => {
                 // Search is gated to an allowlisted root (it reads the tree there).
-                if !runtime.workspace_allows(&root) {
-                    Err(BridgeError::new(
-                        "workspace_not_allowed",
-                        "search root is outside an allowlisted workspace root",
-                    ))
-                } else {
-                    match honeyhub_bridge::search_files(&root, &query) {
-                        Ok(results) => Ok(Some(vec![BridgeEvent::search_results(
+                require(runtime.workspace_allows(&root), "search root")
+                    .and_then(|()| honeyhub_bridge::search_files(&root, &query))
+                    .map(|results| {
+                        one(BridgeEvent::search_results(
                             new_id(),
                             now_rfc3339(),
                             results,
-                        )])),
-                        Err(error) => Err(error),
-                    }
-                }
+                        ))
+                    })
             }
             ClientCommand::WriteAgent {
                 name,
@@ -359,31 +324,20 @@ async fn handle_command(
                 body,
                 model,
                 workspace_root,
-            } => match runtime.write_agent(
-                workspace_root.as_deref(),
-                &name,
-                &description,
-                &body,
-                model.as_deref(),
-            ) {
-                Ok(agent) => Ok(Some(vec![BridgeEvent::agent_written(
-                    new_id(),
-                    now_rfc3339(),
-                    agent,
-                )])),
-                Err(error) => Err(error),
-            },
+            } => runtime
+                .write_agent(
+                    workspace_root.as_deref(),
+                    &name,
+                    &description,
+                    &body,
+                    model.as_deref(),
+                )
+                .map(|agent| one(BridgeEvent::agent_written(new_id(), now_rfc3339(), agent))),
             ClientCommand::ListJobs {
                 extra_probes,
                 extra_task_keywords,
-            } => match honeyhub_bridge::job_snapshot(&extra_probes, &extra_task_keywords) {
-                Ok(snapshot) => Ok(Some(vec![BridgeEvent::job_snapshot(
-                    new_id(),
-                    now_rfc3339(),
-                    snapshot,
-                )])),
-                Err(error) => Err(error),
-            },
+            } => honeyhub_bridge::job_snapshot(&extra_probes, &extra_task_keywords)
+                .map(|snapshot| one(BridgeEvent::job_snapshot(new_id(), now_rfc3339(), snapshot))),
             ClientCommand::DetectEnvironment => Ok(Some(vec![BridgeEvent::environment_info(
                 new_id(),
                 now_rfc3339(),
@@ -502,38 +456,14 @@ async fn handle_command(
             )])),
             ClientCommand::GitStatus { root } => {
                 // Git status reads the repo, so gate the root to the allowlist.
-                if !runtime.workspace_allows(&root) {
-                    Err(BridgeError::new(
-                        "workspace_not_allowed",
-                        "git root is outside an allowlisted workspace root",
-                    ))
-                } else {
-                    match honeyhub_bridge::git_status(&root) {
-                        Ok(status) => Ok(Some(vec![BridgeEvent::git_status(
-                            new_id(),
-                            now_rfc3339(),
-                            status,
-                        )])),
-                        Err(error) => Err(error),
-                    }
-                }
+                require(runtime.workspace_allows(&root), "git root")
+                    .and_then(|()| honeyhub_bridge::git_status(&root))
+                    .map(|status| one(BridgeEvent::git_status(new_id(), now_rfc3339(), status)))
             }
             ClientCommand::GitDiff { root, path } => {
-                if !runtime.workspace_allows(&root) {
-                    Err(BridgeError::new(
-                        "workspace_not_allowed",
-                        "git root is outside an allowlisted workspace root",
-                    ))
-                } else {
-                    match honeyhub_bridge::git_diff(&root, path.as_deref()) {
-                        Ok(diff) => Ok(Some(vec![BridgeEvent::git_diff(
-                            new_id(),
-                            now_rfc3339(),
-                            diff,
-                        )])),
-                        Err(error) => Err(error),
-                    }
-                }
+                require(runtime.workspace_allows(&root), "git root")
+                    .and_then(|()| honeyhub_bridge::git_diff(&root, path.as_deref()))
+                    .map(|diff| one(BridgeEvent::git_diff(new_id(), now_rfc3339(), diff)))
             }
             ClientCommand::ListSessions => Ok(Some(vec![BridgeEvent::session_list(
                 new_id(),
@@ -563,29 +493,13 @@ async fn handle_command(
             }
             ClientCommand::ScaffoldArchitecture { name, location } => {
                 let roots = runtime.workspace_roots();
-                match honeyhub_bridge::scaffold_architecture(
-                    name.as_deref(),
-                    location.as_deref(),
-                    &roots,
-                ) {
-                    Ok(snapshot) => Ok(Some(vec![BridgeEvent::roadmap(
-                        new_id(),
-                        now_rfc3339(),
-                        snapshot,
-                    )])),
-                    Err(error) => Err(error),
-                }
+                honeyhub_bridge::scaffold_architecture(name.as_deref(), location.as_deref(), &roots)
+                    .map(|snapshot| one(BridgeEvent::roadmap(new_id(), now_rfc3339(), snapshot)))
             }
             ClientCommand::PullArchitecture => {
                 let roots = runtime.workspace_roots();
-                match honeyhub_bridge::pull_architecture(&roots) {
-                    Ok(snapshot) => Ok(Some(vec![BridgeEvent::roadmap(
-                        new_id(),
-                        now_rfc3339(),
-                        snapshot,
-                    )])),
-                    Err(error) => Err(error),
-                }
+                honeyhub_bridge::pull_architecture(&roots)
+                    .map(|snapshot| one(BridgeEvent::roadmap(new_id(), now_rfc3339(), snapshot)))
             }
             ClientCommand::Resume { .. } => Err(BridgeError::new(
                 "unsupported_command",
@@ -633,4 +547,22 @@ async fn send_frame(
 
 fn new_id() -> String {
     uuid::Uuid::new_v4().to_string()
+}
+
+/// Gate a command on an allowlisted workspace root, yielding a uniform error
+/// keyed by the human-readable `scope` (e.g. "file", "search root", "git root").
+fn require(allowed: bool, scope: &str) -> Result<(), BridgeError> {
+    if allowed {
+        Ok(())
+    } else {
+        Err(BridgeError::new(
+            "workspace_not_allowed",
+            format!("{scope} is outside an allowlisted workspace root"),
+        ))
+    }
+}
+
+/// Wrap a single event as the one-event success payload returned by command arms.
+fn one(event: BridgeEvent) -> Option<Vec<BridgeEvent>> {
+    Some(vec![event])
 }

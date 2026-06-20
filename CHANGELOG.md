@@ -1,5 +1,33 @@
 # Changelog
 
+## [0.17.0] - 2026-06-20
+
+Cockpit polish plus subscription-aware cost routing, driven by operator dogfooding.
+
+- **Subscription-aware cost routing**: a new **Plans** surface (Settings, plus a skippable
+  onboarding step) lets you declare each provider's plan (flat-rate vs metered, with a
+  monthly price). In "Optimize cost" mode a flat-rate plan is treated as effectively free,
+  so the router prefers a subscription you already pay for over a cheaper-per-token metered
+  model, and the rationale says so when a plan flips the choice. Everything is optional. v1
+  assumes headroom (real cap/usage ramping is a future refinement).
+- **Unified model picker**: the manual "Pick model" control is now one custom dropdown that
+  lists every model across backends and routes to the right provider on selection (the
+  separate provider picker is gone). The active option carries a cyan outline; the native
+  grey popup is replaced. Claude models now show full versioned names (Claude Opus 4.8,
+  Claude Sonnet 4.6, Claude Haiku 4.5).
+- **Composer**: a rotating set of cyberpunk and Matrix prompts (picked at random per visit)
+  replaces the static heading; warmer composer styling, a bolder send arrow, and the stray
+  blue focus ring removed.
+- **Theming**: the unclassed grey buttons across Observe/Work/Jobs/Plan/Goals/Agents/
+  Updates/Settings now match the neon theme (cyan/honey, destructive ones lean pink).
+- **Copy**: em dashes removed from all user-facing strings.
+- **Quality**: SonarCloud cleanup. Cognitive-complexity refactors in the bridge
+  (`handle_command`, `validate_stream_payload`, `stream_events`, `strip_jsonc`,
+  `search_files`, `parse_current_focus`) and ~130 TypeScript code-smell fixes across the UI,
+  with no behavior change.
+- **Security**: bumped `undici` 7.27.2 to 7.28.0 (transitive dev dependency) to clear a
+  batch of advisories.
+
 ## [0.16.0] - 2026-06-15
 
 HoneyHub grows from the v1 run cockpit into the local-first **control hub**: a Tauri

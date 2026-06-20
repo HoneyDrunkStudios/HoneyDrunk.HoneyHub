@@ -54,7 +54,7 @@ export function WorkspacePicker({
             aria-label="Close workspace picker"
             onClick={() => setOpen(false)}
           />
-          <div className="ws-popover" role="dialog" aria-label="Select workspace">
+          <div className="ws-popover" aria-label="Select workspace">
             <button
               type="button"
               className="ws-option"

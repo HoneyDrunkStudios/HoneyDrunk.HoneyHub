@@ -77,7 +77,7 @@ export function UpdatesView({ client, active, catalog }: Readonly<UpdatesViewPro
   const versionFor = (backend: AgentBackend): string => {
     const entry = environment?.backends.find((item) => item.backend === backend);
     if (entry === undefined) {
-      return "—";
+      return "-";
     }
     if (!entry.available) {
       return "not installed";
@@ -100,14 +100,14 @@ export function UpdatesView({ client, active, catalog }: Readonly<UpdatesViewPro
       </p>
 
       {newCount > 0 && (
-        <div className="updates-banner" role="status">
+        <output className="updates-banner">
           <span>
             {newCount} new model{newCount === 1 ? "" : "s"} available.
           </span>
           <button type="button" onClick={acknowledge}>
             Mark all as seen
           </button>
-        </div>
+        </output>
       )}
 
       <ul className="updates-list">

@@ -62,7 +62,7 @@ export function SpendView({ client, active }: Readonly<SpendViewProps>) {
         </button>
       </header>
       <p className="spend-scope">
-        Local only — every figure below is computed on this device and never leaves it.
+        Local only: every figure below is computed on this device and never leaves it.
       </p>
 
       {error !== undefined && (

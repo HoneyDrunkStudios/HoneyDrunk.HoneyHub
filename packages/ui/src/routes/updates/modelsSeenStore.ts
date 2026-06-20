@@ -16,7 +16,7 @@ export function loadSeenModels(): SeenModels {
     if (typeof parsed !== "object" || parsed === null) {
       return {};
     }
-    return parsed as SeenModels;
+    return parsed;
   } catch {
     return {};
   }

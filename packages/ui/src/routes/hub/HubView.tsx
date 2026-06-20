@@ -73,26 +73,26 @@ export function HubView({ client, active, onNavigate }: Readonly<HubViewProps>):
         const count = payload.snapshot.sources.reduce((sum, s) => sum + (s.items?.length ?? 0), 0);
         setWork({ value: count, tone: "ok", updatedAt: stamp });
       } else if (payload.kind === "service_bus_snapshot") {
-        if (!payload.snapshot.available) {
-          setServiceBus({ value: 0, tone: "muted", updatedAt: stamp, error: payload.snapshot.error ?? "unavailable" });
-        } else {
+        if (payload.snapshot.available) {
           const dlq = payload.snapshot.namespaces
             .flatMap((ns) => ns.entities)
             .reduce((sum, e) => sum + e.deadLetter, 0);
           setServiceBus({ value: dlq, tone: attentionTone(dlq), updatedAt: stamp });
+        } else {
+          setServiceBus({ value: 0, tone: "muted", updatedAt: stamp, error: payload.snapshot.error ?? "unavailable" });
         }
       } else if (payload.kind === "grafana_summary") {
-        if (!payload.summary.available) {
-          setGrafana({ value: 0, tone: "muted", updatedAt: stamp, error: payload.summary.error ?? "unavailable" });
-        } else {
+        if (payload.summary.available) {
           setGrafana({ value: payload.summary.dashboards.length, tone: "ok", updatedAt: stamp });
+        } else {
+          setGrafana({ value: 0, tone: "muted", updatedAt: stamp, error: payload.summary.error ?? "unavailable" });
         }
       } else if (payload.kind === "sentry_summary") {
-        if (!payload.summary.available) {
-          setSentry({ value: 0, tone: "muted", updatedAt: stamp, error: payload.summary.error ?? "unavailable" });
-        } else {
+        if (payload.summary.available) {
           const count = payload.summary.issues.length;
           setSentry({ value: count, tone: attentionTone(count), updatedAt: stamp });
+        } else {
+          setSentry({ value: 0, tone: "muted", updatedAt: stamp, error: payload.summary.error ?? "unavailable" });
         }
       }
     });
@@ -160,10 +160,10 @@ export function HubView({ client, active, onNavigate }: Readonly<HubViewProps>):
             >
               <span className="hub-card-label">{card.label}</span>
               <span className="hub-card-value">
-                {card.state.error !== undefined ? "—" : card.state.value}
+                {card.state.error === undefined ? card.state.value : "-"}
               </span>
               <span className="hub-card-hint">
-                {card.state.error !== undefined ? card.state.error : card.hint}
+                {card.state.error ?? card.hint}
               </span>
               <span className="hub-card-updated">
                 {card.state.updatedAt === undefined

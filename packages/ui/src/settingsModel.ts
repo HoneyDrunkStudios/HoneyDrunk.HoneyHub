@@ -49,7 +49,7 @@ export interface PairingFactory {
 
 export const defaultPairingFactory: PairingFactory = {
   deviceId: () => crypto.randomUUID(),
-  token: () => `${crypto.randomUUID()}${crypto.randomUUID()}`.replaceAll(/-/g, ""),
+  token: () => `${crypto.randomUUID()}${crypto.randomUUID()}`.replaceAll("-", ""),
   now: () => new Date().toISOString()
 };
 

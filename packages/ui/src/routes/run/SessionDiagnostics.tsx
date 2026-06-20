@@ -14,11 +14,11 @@ export interface SessionDiagnosticsProps {
 }
 
 function formatUsdOrDash(usd: number | undefined, fidelity: UsageFidelity | undefined): string {
-  return usd === undefined ? "—" : formatUsd(usd, fidelity);
+  return usd === undefined ? "-" : formatUsd(usd, fidelity);
 }
 
 function formatTokens(tokens: number | undefined): string {
-  return tokens === undefined ? "—" : tokens.toLocaleString();
+  return tokens === undefined ? "-" : tokens.toLocaleString();
 }
 
 export function SessionDiagnostics({

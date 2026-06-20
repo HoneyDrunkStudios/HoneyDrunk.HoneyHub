@@ -325,9 +325,11 @@ h2 {
   min-width: 84px;
   padding: 6px 12px;
   border: 1px solid var(--border-strong);
+  /* The active-run status pill picks up the cyan accent. */
+  border-color: var(--neon-blue-line);
   border-radius: var(--radius-pill);
   background: var(--panel-2);
-  color: var(--honey-bright);
+  color: var(--neon-blue);
   text-align: center;
   font-size: 0.78rem;
   text-transform: capitalize;
@@ -429,8 +431,8 @@ h2 {
 }
 
 .run-backend {
-  color: var(--honey-soft);
-  font-size: 0.85rem;
+  color: var(--text-muted);
+  font-size: 0.82rem;
 }
 
 /* transcript = chat */
@@ -1080,7 +1082,7 @@ h2 {
 }
 
 .plan-item-title {
-  font-size: 0.86rem;
+  font-size: 0.85rem;
 }
 
 .plan-item-project {
@@ -2910,9 +2912,10 @@ h2 {
   display: grid;
   gap: 6px;
   padding: 14px 16px 12px;
-  border: 1px solid var(--border-strong);
+  border: 1px solid rgba(255, 255, 255, 0.13);
   border-radius: 18px;
-  background: linear-gradient(180deg, var(--glass-top), var(--glass-bottom)), var(--panel);
+  background: linear-gradient(180deg, rgba(255, 244, 224, 0.035), rgba(255, 244, 224, 0.01)),
+    var(--panel);
   box-shadow: var(--shadow-card);
 }
 
@@ -2936,6 +2939,13 @@ h2 {
 
 .composer-input::placeholder {
   color: var(--text-dim);
+}
+
+/* The composer textarea sits inside .run-start, which gives focused fields a blue
+   ring; suppress it here so the only focus affordance is the composer's honey glow. */
+.run-start .composer-input:focus {
+  border-color: transparent;
+  box-shadow: none;
 }
 
 .composer-bar {
@@ -3079,6 +3089,80 @@ h2 {
   font: inherit;
   font-size: 0.82rem;
   max-width: 240px;
+}
+
+.chip-select {
+  cursor: pointer;
+}
+
+/* Theme the native option list (kills the default light/grey popup). The hover
+   highlight itself is OS-rendered for a native <select>; the fully custom cyan
+   outline lives on the in-app dropdown component. */
+.chip-select option {
+  background-color: var(--panel-2);
+  color: var(--text);
+}
+
+.chip-select option:checked {
+  color: var(--neon-blue);
+}
+
+/* Custom unified model dropdown — replaces the native provider + model selects so the
+   active option gets a cyan outline (a native <select> popup can't be styled). */
+.model-menu {
+  position: relative;
+}
+
+.model-popover {
+  position: absolute;
+  z-index: 50;
+  top: calc(100% + 8px);
+  left: 0;
+  min-width: 240px;
+  max-height: 320px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 6px;
+  border: 1px solid var(--neon-blue-line);
+  border-radius: 14px;
+  background: var(--panel-2);
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.45);
+}
+
+.model-option {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 1px;
+  width: 100%;
+  padding: 7px 10px;
+  border: 1px solid transparent;
+  border-radius: 10px;
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+}
+
+.model-option:hover {
+  background: var(--panel-3);
+}
+
+.model-option.is-active {
+  border-color: var(--neon-blue);
+  box-shadow: 0 0 0 1px var(--neon-blue), 0 0 12px var(--neon-blue-glow);
+}
+
+.model-option-label {
+  font-size: 0.86rem;
+}
+
+.model-option-sub {
+  color: var(--text-dim);
+  font-size: 0.7rem;
+  font-family: var(--font-mono);
 }
 
 .chip-select:focus,
@@ -3306,11 +3390,6 @@ h2 {
   white-space: nowrap;
 }
 
-.run-backend {
-  color: var(--text-muted);
-  font-size: 0.82rem;
-}
-
 .run-state-pill {
   padding: 3px 10px;
   border-radius: var(--radius-pill);
@@ -3440,12 +3519,6 @@ button:focus-visible,
   color: #fff;
 }
 
-/* The active-run status pill picks up the cyan accent. */
-.status-pill {
-  border-color: var(--neon-blue-line);
-  color: var(--neon-blue);
-}
-
 /* --- Plan / Roadmap (read view of Architecture initiatives) ---------------- */
 .plan-head-meta {
   display: flex;
@@ -3523,9 +3596,6 @@ button:focus-visible,
 .plan-item-main {
   display: grid;
   gap: 2px;
-}
-.plan-item-title {
-  font-size: 0.85rem;
 }
 .plan-item-meta {
   font-size: 0.72rem;
@@ -4464,6 +4534,7 @@ button:focus-visible,
   border-color: var(--neon-pink);
 }
 .sb-resubmit-result {
+  display: block;
   margin-top: 10px;
   font-size: 0.82rem;
 }
@@ -4643,4 +4714,219 @@ button:focus-visible,
   outline: none;
   border-color: var(--neon-blue-line);
   box-shadow: 0 0 0 3px var(--neon-blue-glow);
+}
+
+/* ===========================================================================
+   Themed action buttons — bring the flat browser-default grey buttons on the
+   panel pages (Observe / Work / Jobs / Plan / Goals / Agents / Updates / Hub /
+   Spend / Coaching / Git / Settings) into the honey-cyberpunk language.
+
+   These panels render bare <button> elements (no class), which otherwise fall
+   back to the OS grey button. We give them a dark-panel base, cyan-accented
+   hover, an honey gradient for primary/submit/confirm actions, and restrained
+   pink for destructive ones — without touching the already-themed buttons
+   (.composer-send, .cost-mode .seg, .chip-button, .nav-item, .entry, .crumb,
+   .link-button, .run-start/.run-controls buttons, onboarding, etc.).
+   --------------------------------------------------------------------------- */
+
+/* Base: secondary/ghost panel action button (dark panel, cyan-leaning border). */
+.agents-actions button,
+.spend-header button,
+.coaching-header button,
+.jobs-actions button,
+.jobs-probe-form button,
+.git-actions button,
+.plan-header button,
+.work-actions button,
+.hub-header button,
+.sb-actions button,
+.sb-head button,
+.updates-header button,
+.connect-phone-url button,
+.connect-phone-bind button,
+.connector-test,
+.sb-resubmit-btn,
+.sb-resubmit-go,
+.sb-send-btn,
+.sb-peek-actions button {
+  padding: 7px 14px;
+  border: 1px solid var(--neon-blue-line);
+  border-radius: var(--radius-sm);
+  background: linear-gradient(180deg, var(--panel), var(--panel-2));
+  color: var(--text);
+  font: inherit;
+  font-size: 0.84rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: border-color 0.12s ease, box-shadow 0.12s ease, color 0.12s ease,
+    filter 0.12s ease;
+}
+
+.agents-actions button:hover,
+.spend-header button:hover,
+.coaching-header button:hover,
+.jobs-actions button:hover,
+.jobs-probe-form button:hover,
+.git-actions button:hover,
+.plan-header button:hover,
+.work-actions button:hover,
+.hub-header button:hover,
+.sb-actions button:hover,
+.sb-head button:hover,
+.updates-header button:hover,
+.connect-phone-url button:hover,
+.connect-phone-bind button:hover,
+.connector-test:hover,
+.sb-resubmit-btn:hover,
+.sb-resubmit-go:hover,
+.sb-send-btn:hover,
+.sb-peek-actions button:hover {
+  border-color: var(--neon-blue);
+  box-shadow: 0 0 0 1px var(--neon-blue-glow), 0 0 12px var(--neon-blue-glow);
+  color: var(--neon-blue);
+}
+
+.agents-actions button:disabled,
+.spend-header button:disabled,
+.coaching-header button:disabled,
+.jobs-actions button:disabled,
+.jobs-probe-form button:disabled,
+.git-actions button:disabled,
+.plan-header button:disabled,
+.work-actions button:disabled,
+.hub-header button:disabled,
+.sb-actions button:disabled,
+.sb-head button:disabled,
+.updates-header button:disabled,
+.connector-test:disabled,
+.sb-resubmit-btn:disabled,
+.sb-resubmit-go:disabled,
+.sb-send-btn:disabled,
+.sb-peek-actions button:disabled {
+  opacity: 0.5;
+  cursor: default;
+  box-shadow: none;
+  color: var(--text-muted);
+  border-color: var(--border);
+}
+
+/* Primary / submit / confirm actions = honey gradient (matches .composer-send). */
+.agent-form button[type="submit"],
+.goal-form button[type="submit"],
+.plan-create button[type="submit"],
+.plan-add button[type="submit"],
+.updates-banner button {
+  padding: 8px 16px;
+  border: 1px solid var(--honey);
+  border-radius: var(--radius-sm);
+  background: linear-gradient(180deg, var(--honey-bright), var(--honey));
+  color: #2a1a04;
+  font: inherit;
+  font-weight: 700;
+  cursor: pointer;
+  transition: filter 0.12s ease, transform 0.05s ease;
+}
+
+.agent-form button[type="submit"]:hover,
+.goal-form button[type="submit"]:hover,
+.plan-create button[type="submit"]:hover,
+.plan-add button[type="submit"]:hover,
+.updates-banner button:hover {
+  filter: brightness(1.06);
+}
+
+.agent-form button[type="submit"]:active,
+.goal-form button[type="submit"]:active,
+.plan-create button[type="submit"]:active,
+.plan-add button[type="submit"]:active,
+.updates-banner button:active {
+  transform: translateY(1px);
+}
+
+.agent-form button[type="submit"]:disabled,
+.goal-form button[type="submit"]:disabled,
+.plan-create button[type="submit"]:disabled,
+.plan-add button[type="submit"]:disabled {
+  opacity: 0.5;
+  cursor: default;
+  filter: none;
+}
+
+/* Jobs probe "Add probe" submit also reads as a primary action. */
+.jobs-probe-form button[type="submit"] {
+  border-color: var(--honey);
+  background: linear-gradient(180deg, var(--honey-bright), var(--honey));
+  color: #2a1a04;
+  font-weight: 700;
+}
+
+.jobs-probe-form button[type="submit"]:hover {
+  border-color: var(--honey);
+  box-shadow: none;
+  color: #2a1a04;
+  filter: brightness(1.06);
+}
+
+/* Destructive (purge / resubmit-to-DLQ / send-to-DLQ) keep their pink accent on
+   top of the new base — pink border + pink hover glow instead of cyan. */
+.sb-resubmit-btn,
+.sb-resubmit-go,
+.sb-peek-dlq,
+.sb-purge-btn {
+  border-color: var(--neon-pink);
+  color: var(--neon-pink);
+}
+
+.sb-resubmit-btn:hover,
+.sb-resubmit-go:hover,
+.sb-peek-dlq:hover,
+.sb-purge-btn:hover {
+  border-color: var(--neon-pink);
+  color: var(--neon-pink);
+  box-shadow: 0 0 0 1px rgba(255, 42, 109, 0.25), 0 0 12px rgba(255, 42, 109, 0.3);
+}
+
+/* "Send a message" (write) leans cyan — already correct, just keep on base. */
+.sb-send-btn {
+  border-color: var(--neon-blue-line);
+  color: var(--neon-blue);
+}
+
+/* Ghost remove buttons (plan item remove, picked-root remove): transparent,
+   bordered, pink-leaning on hover to signal removal. */
+.plan-item-remove,
+.root-remove {
+  background: transparent;
+  transition: border-color 0.12s ease, color 0.12s ease;
+}
+
+.plan-item-remove:hover,
+.root-remove:hover {
+  border-color: var(--neon-pink);
+  color: var(--neon-pink);
+}
+
+/* Info affordance: a small round "?" next to a heading whose tooltip explains why
+   we ask. Muted by default, cyan on hover/focus. */
+.info-tip {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.15rem;
+  height: 1.15rem;
+  margin-left: 0.4rem;
+  padding: 0;
+  border: 1px solid var(--text-muted);
+  border-radius: 50%;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 0.72rem;
+  line-height: 1;
+  cursor: help;
+  transition: color 0.15s ease, border-color 0.15s ease;
+}
+.info-tip:hover,
+.info-tip:focus-visible {
+  border-color: var(--neon-blue);
+  color: var(--neon-blue);
 }

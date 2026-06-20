@@ -100,9 +100,9 @@ fn models_for(backend: AgentBackend) -> (Vec<BackendModel>, ModelSource) {
         // Claude's selectable set is its canonical aliases (latest of each family).
         AgentBackend::ClaudeLocal => (
             vec![
-                BackendModel::new("opus", "Claude Opus"),
-                BackendModel::new("sonnet", "Claude Sonnet"),
-                BackendModel::new("haiku", "Claude Haiku"),
+                BackendModel::new("opus", "Claude Opus 4.8"),
+                BackendModel::new("sonnet", "Claude Sonnet 4.6"),
+                BackendModel::new("haiku", "Claude Haiku 4.5"),
             ],
             ModelSource::CliAlias,
         ),

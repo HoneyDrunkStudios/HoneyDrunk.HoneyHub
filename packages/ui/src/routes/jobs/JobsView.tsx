@@ -80,7 +80,7 @@ export function JobsView({ client, active }: Readonly<JobsViewProps>): ReactElem
         </div>
       </header>
       <p className="jobs-scope">
-        Your agent jobs — the dev tools and runner HoneyHub watches — not every process on the
+        Your agent jobs: the dev tools and runner HoneyHub watches, not every process on the
         machine. Read-only; matched by program name + command line, so the Grid runner is
         recognized by its script even when it runs under PowerShell.
       </p>
@@ -141,6 +141,9 @@ export function JobsView({ client, active }: Readonly<JobsViewProps>): ReactElem
               <ul className="jobs-scheduled">
                 {snapshot.scheduled.map((task) => {
                   const failed = task.lastResult !== undefined && task.lastResult !== 0;
+                  const resultLabel = failed
+                    ? `last: error ${task.lastResult}`
+                    : "last: ok";
                   return (
                     <li
                       key={`${task.path}${task.name}`}
@@ -149,11 +152,7 @@ export function JobsView({ client, active }: Readonly<JobsViewProps>): ReactElem
                       <span className="scheduled-name">{task.name}</span>
                       <span className="scheduled-state">{task.state}</span>
                       <span className="scheduled-result">
-                        {task.lastResult === undefined
-                          ? "—"
-                          : failed
-                            ? `last: error ${task.lastResult}`
-                            : "last: ok"}
+                        {task.lastResult === undefined ? "-" : resultLabel}
                       </span>
                       {task.nextRun !== undefined && (
                         <span className="scheduled-next" title={task.nextRun}>
@@ -194,7 +193,7 @@ export function JobsView({ client, active }: Readonly<JobsViewProps>): ReactElem
                   <td className="jobs-pid">{process.pid}</td>
                   <td className="jobs-mem">{formatMemoryKb(process.memoryKb)}</td>
                   <td className="jobs-cmd" title={process.command ?? ""}>
-                    {process.command ?? "—"}
+                    {process.command ?? "-"}
                   </td>
                 </tr>
               ))}
@@ -226,7 +225,7 @@ function JobsHelp({ userProbes, onAdd, onRemove }: Readonly<JobsHelpProps>): Rea
   const [label, setLabel] = useState("");
   const [patterns, setPatterns] = useState("");
 
-  const submit = (event: FormEvent): void => {
+  const submit = (event: FormEvent<HTMLFormElement>): void => {
     event.preventDefault();
     if (label.trim() === "" || patterns.trim() === "") {
       return;
@@ -241,7 +240,7 @@ function JobsHelp({ userProbes, onAdd, onRemove }: Readonly<JobsHelpProps>): Rea
       <p className="jobs-help-title">What this shows</p>
       <p>
         HoneyHub watches the agent &amp; dev tools running on this machine and your
-        agent-related scheduled tasks — it doesn&rsquo;t list every process. A job is
+        agent-related scheduled tasks; it doesn&rsquo;t list every process. A job is
         &ldquo;up&rdquo; when a matching process is running.
       </p>
       <p className="jobs-help-title">Auto-recognized</p>
@@ -302,17 +301,17 @@ function JobsHelp({ userProbes, onAdd, onRemove }: Readonly<JobsHelpProps>): Rea
       <p className="jobs-help-title">Add a scheduled background job</p>
       <p>
         Create a Windows Scheduled Task whose <strong>name or script path</strong> contains
-        one of <code>grid-agent-runner</code>, <code>honeydrunk</code>, <code>honeyhub</code>,
-        <code>claude</code>, or <code>codex</code> — it will then appear here with its state
+        one of <code>grid-agent-runner</code>, <code>honeydrunk</code>, <code>honeyhub</code>,{" "}
+        <code>claude</code>, or <code>codex</code>, and it will then appear here with its state
         and last result. For example, a daily agent run:
       </p>
       <pre className="jobs-help-code">
-{`schtasks /create /tn "honeydrunk-nightly" \\
-  /tr "powershell -NoProfile -File C:\\path\\to\\run.ps1" \\
+{String.raw`schtasks /create /tn "honeydrunk-nightly" \
+  /tr "powershell -NoProfile -File C:\path\to\run.ps1" \
   /sc daily /st 02:00`}
       </pre>
       <p className="jobs-help-note">
-        Read-only: HoneyHub never starts, stops, or edits these — it only shows their status.
+        Read-only: HoneyHub never starts, stops, or edits these; it only shows their status.
       </p>
     </div>
   );

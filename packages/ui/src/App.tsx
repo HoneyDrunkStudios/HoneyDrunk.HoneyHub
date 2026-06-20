@@ -29,6 +29,7 @@ import { UpdatesView } from "./routes/updates/UpdatesView";
 import { Onboarding } from "./routes/onboarding/Onboarding";
 import { emptyBridgeSettings, type BridgeSettingsState } from "./settingsModel";
 import { loadProviderPrefs, saveProviderPrefs } from "./providerPrefs";
+import { loadPlans, savePlans, type Plans } from "./plans";
 import { MockWireClient } from "./wire/mockClient";
 import { bridgeWsUrl, WebSocketWireClient } from "./wire/webSocketClient";
 import type { WireClient } from "./wire/client";
@@ -108,6 +109,10 @@ export function App({ client }: AppProps = {}) {
   // backends are enabled. Seeds the bridge settings' backend allowlist.
   const [persisted] = useState(loadProviderPrefs);
   const [onboarded, setOnboarded] = useState(persisted.onboarded);
+  // Subscription plans (cost-optimizer input). Loaded once, held here, and passed to the
+  // run screen so the router can treat flat-rate subs as effectively free. Persisted on
+  // change, like provider prefs.
+  const [plans, setPlans] = useState<Plans>(loadPlans);
   // Bridge settings are owned here so the run screen can read the workspace
   // allowlist the operator edits in Bridge settings. The backend allowlist is
   // seeded from the persisted provider selection.
@@ -186,14 +191,21 @@ export function App({ client }: AppProps = {}) {
     });
   }, [onboarded, settings.backends, settings.enabledModels, settings.workspaceRoots]);
 
+  // Persist subscription plans whenever they change, so the cost optimizer keeps
+  // reflecting what the user actually pays across relaunches.
+  useEffect(() => {
+    savePlans(plans);
+  }, [plans]);
+
   // Sync the picked repo locations to the bridge so file reads (and launches) are
   // scoped to them. Re-sent whenever the transport changes (connect) or the roots do.
   useEffect(() => {
     void wireClient.setWorkspaceRoots(settings.workspaceRoots).catch(() => undefined);
   }, [wireClient, settings.workspaceRoots]);
 
-  const completeOnboarding = (enabled: AgentBackend[], roots: string[]) => {
+  const completeOnboarding = (enabled: AgentBackend[], roots: string[], chosenPlans: Plans) => {
     setSettings((prev) => ({ ...prev, backends: enabled, workspaceRoots: roots }));
+    setPlans(chosenPlans);
     setOnboarded(true);
   };
 
@@ -256,6 +268,7 @@ export function App({ client }: AppProps = {}) {
         detecting={detecting}
         initialEnabled={settings.backends}
         initialRoots={settings.workspaceRoots}
+        initialPlans={plans}
         onComplete={completeOnboarding}
       />
     );
@@ -328,6 +341,7 @@ export function App({ client }: AppProps = {}) {
               availableBackends={settings.backends}
               catalog={catalog}
               enabledModels={settings.enabledModels}
+              plans={plans}
               onAddWorkspaceRoots={(paths) =>
                 setSettings((prev) => {
                   const next = [...prev.workspaceRoots];
@@ -413,6 +427,8 @@ export function App({ client }: AppProps = {}) {
               catalog={catalog}
               client={wireClient}
               active={view === "settings"}
+              plans={plans}
+              onPlansChange={setPlans}
             />
           </div>
 

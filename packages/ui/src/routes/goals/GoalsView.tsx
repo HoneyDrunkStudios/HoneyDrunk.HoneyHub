@@ -48,7 +48,7 @@ export function GoalsView({
       <p className="goals-scope">
         Give an objective and caps; HoneyHub runs a bounded loop toward it, one iteration per
         run, and stops at the limit. Each run appears on the Runs board. There is no
-        automatic “done” detector — the caps and your stop control are the bound.
+        automatic “done” detector: the caps and your stop control are the bound.
       </p>
 
       <NewGoalForm backends={backends} onCreate={onCreate} />
@@ -129,7 +129,7 @@ function NewGoalForm({ backends, onCreate }: Readonly<NewGoalFormProps>): ReactE
           objective: objective.trim(),
           backend,
           maxIterations: iterations,
-          ...(cap !== undefined ? { spendCapUsd: cap } : {})
+          ...(cap === undefined ? {} : { spendCapUsd: cap })
         });
         setObjective("");
         setSpendCap("");
@@ -137,7 +137,7 @@ function NewGoalForm({ backends, onCreate }: Readonly<NewGoalFormProps>): ReactE
       }}
     >
       <label>
-        Objective
+        Objective{" "}
         <textarea
           value={objective}
           onChange={(event) => setObjective(event.target.value)}
@@ -147,7 +147,7 @@ function NewGoalForm({ backends, onCreate }: Readonly<NewGoalFormProps>): ReactE
       </label>
       <div className="goal-form-row">
         <label>
-          Provider
+          Provider{" "}
           <select value={backend} onChange={(event) => setBackend(event.target.value as AgentBackend)}>
             {backends.map((option) => (
               <option key={option} value={option}>
@@ -157,7 +157,7 @@ function NewGoalForm({ backends, onCreate }: Readonly<NewGoalFormProps>): ReactE
           </select>
         </label>
         <label>
-          Max iterations
+          Max iterations{" "}
           <input
             type="number"
             min={1}
@@ -166,7 +166,7 @@ function NewGoalForm({ backends, onCreate }: Readonly<NewGoalFormProps>): ReactE
           />
         </label>
         <label>
-          Spend cap (USD, optional)
+          Spend cap (USD, optional){" "}
           <input
             type="number"
             min={0}

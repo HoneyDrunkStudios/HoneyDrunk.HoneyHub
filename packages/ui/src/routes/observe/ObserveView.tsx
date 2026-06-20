@@ -3,6 +3,7 @@ import type { ReactElement } from "react";
 import type {
   GrafanaSummary,
   SentrySummary,
+  ServiceBusEntity,
   ServiceBusPeek,
   ServiceBusPurge,
   ServiceBusReceive,
@@ -13,6 +14,7 @@ import type {
 import type { WireClient } from "../../wire/client";
 import { enabledIds, getConnectorConfig, loadConnectorConfig, loadConnectorPrefs } from "../../connectors";
 import { formatRelative, useRelativeNow } from "../../relativeTime";
+import type { ServiceBusTotals } from "./serviceBusModel";
 import { byAttention, filterEntities, serviceBusTotals } from "./serviceBusModel";
 
 export interface ObserveViewProps {
@@ -127,83 +129,73 @@ function ServiceBusPanel({
     });
   }, [client]);
 
+  // After a successful destructive op the list + open peek are stale: clear the peek, show
+  // loading, then re-peek the same view and refresh the snapshot.
+  const reflectMutation = useCallback(
+    (target: {
+      namespace: string;
+      entity: string;
+      subscription?: string;
+      deadLetter: boolean;
+    }): void => {
+      setPeek(undefined);
+      setPeeking(true);
+      client
+        .peekServiceBus({
+          namespace: target.namespace,
+          entity: target.entity,
+          ...(target.subscription === undefined ? {} : { subscription: target.subscription }),
+          deadLetter: target.deadLetter,
+          count: 20
+        })
+        .catch(() => undefined);
+      client.listServiceBus().catch(() => undefined);
+    },
+    [client]
+  );
+
   useEffect(() => {
     const unsubscribe = client.subscribe((event) => {
-      if (event.payload.kind === "service_bus_snapshot") {
-        setSnapshot(event.payload.snapshot);
+      const { payload } = event;
+      if (payload.kind === "service_bus_snapshot") {
+        setSnapshot(payload.snapshot);
         setUpdatedAt(Date.now());
         setLoading(false);
         setError(undefined);
-      } else if (event.payload.kind === "service_bus_peek") {
-        setPeek(event.payload.peek);
+      } else if (payload.kind === "service_bus_peek") {
+        setPeek(payload.peek);
         setPeeking(false);
-      } else if (event.payload.kind === "service_bus_resubmit") {
-        const result = event.payload.result;
+      } else if (payload.kind === "service_bus_resubmit") {
+        const result = payload.result;
         setResubmitResult(result);
         setResubmitting(false);
         if (result.ok) {
-          // Reflect the move: clear the now-stale list, show loading, then re-peek + refresh.
-          setPeek(undefined);
-          setPeeking(true);
-          client
-            .peekServiceBus({
-              namespace: result.namespace,
-              entity: result.entity,
-              ...(result.subscription !== undefined ? { subscription: result.subscription } : {}),
-              deadLetter: true,
-              count: 20
-            })
-            .catch(() => undefined);
-          client.listServiceBus().catch(() => undefined);
+          reflectMutation({ ...result, deadLetter: true });
         }
-      } else if (event.payload.kind === "service_bus_purge") {
-        const result = event.payload.result;
+      } else if (payload.kind === "service_bus_purge") {
+        const result = payload.result;
         setPurgeResult(result);
         setPurging(false);
         if (result.ok) {
-          // Reflect the drain: clear the now-stale list, show loading, then re-peek + refresh.
-          setPeek(undefined);
-          setPeeking(true);
-          client
-            .peekServiceBus({
-              namespace: result.namespace,
-              entity: result.entity,
-              ...(result.subscription !== undefined ? { subscription: result.subscription } : {}),
-              deadLetter: result.deadLetter,
-              count: 20
-            })
-            .catch(() => undefined);
-          client.listServiceBus().catch(() => undefined);
+          reflectMutation(result);
         }
-      } else if (event.payload.kind === "service_bus_send") {
-        setSendResult(event.payload.result);
+      } else if (payload.kind === "service_bus_send") {
+        setSendResult(payload.result);
         setSending(false);
-        if (event.payload.result.ok) {
+        if (payload.result.ok) {
           client.listServiceBus().catch(() => undefined);
         }
-      } else if (event.payload.kind === "service_bus_receive") {
-        const result = event.payload.result;
+      } else if (payload.kind === "service_bus_receive") {
+        const result = payload.result;
         setReceiveResult(result);
         setReceiving(false);
         if (result.ok) {
-          // A message was consumed → clear stale list, show loading, re-peek + refresh.
-          setPeek(undefined);
-          setPeeking(true);
-          client
-            .peekServiceBus({
-              namespace: result.namespace,
-              entity: result.entity,
-              ...(result.subscription !== undefined ? { subscription: result.subscription } : {}),
-              deadLetter: result.deadLetter,
-              count: 20
-            })
-            .catch(() => undefined);
-          client.listServiceBus().catch(() => undefined);
+          reflectMutation(result);
         }
       }
     });
     return unsubscribe;
-  }, [client]);
+  }, [client, reflectMutation]);
 
   // Browse messages for one entity (read-only). `entity` is the queue, or the topic when a
   // subscription is given; `deadLetter` peeks the dead-letter sub-queue.
@@ -225,7 +217,7 @@ function ServiceBusPanel({
       .peekServiceBus({
         namespace,
         entity,
-        ...(subscription !== undefined ? { subscription } : {}),
+        ...(subscription === undefined ? {} : { subscription }),
         deadLetter,
         count: 20
       })
@@ -255,7 +247,7 @@ function ServiceBusPanel({
       .resubmitDeadLetter({
         namespace,
         entity,
-        ...(subscription !== undefined ? { subscription } : {}),
+        ...(subscription === undefined ? {} : { subscription }),
         count: messages.length
       })
       .catch(() => {
@@ -276,7 +268,7 @@ function ServiceBusPanel({
       .purgeServiceBus({
         namespace,
         entity,
-        ...(subscription !== undefined ? { subscription } : {}),
+        ...(subscription === undefined ? {} : { subscription }),
         deadLetter
       })
       .catch(() => {
@@ -326,7 +318,7 @@ function ServiceBusPanel({
       .receiveServiceBus({
         namespace,
         entity,
-        ...(subscription !== undefined ? { subscription } : {}),
+        ...(subscription === undefined ? {} : { subscription }),
         deadLetter
       })
       .catch(() => {
@@ -364,6 +356,9 @@ function ServiceBusPanel({
     () => (snapshot === undefined ? undefined : serviceBusTotals(snapshot)),
     [snapshot]
   );
+  const snapshotUnavailable = snapshot !== undefined && !snapshot.available;
+  const emptyMessage =
+    query.trim() === "" ? "No queues or subscriptions found." : `No entities match “${query}”.`;
 
   return (
     <div className="sb-panel">
@@ -393,96 +388,21 @@ function ServiceBusPanel({
         </p>
       )}
 
-      {snapshot !== undefined && !snapshot.available ? (
-        <p className="sb-unavailable">
-          Service Bus: {snapshot.error ?? "not available"}
-        </p>
-      ) : snapshot === undefined ? (
+      {snapshotUnavailable && (
+        <p className="sb-unavailable">Service Bus: {snapshot?.error ?? "not available"}</p>
+      )}
+
+      {snapshot === undefined && (
         <p className="sb-empty">{loading ? "Reading Service Bus…" : "No snapshot yet."}</p>
-      ) : (
+      )}
+
+      {snapshot !== undefined && snapshot.available && (
         <>
-          {totals !== undefined && (
-            <div className="sb-totals">
-              <span>
-                <strong>{totals.namespaces}</strong> namespaces
-              </span>
-              <span>
-                <strong>{totals.entities}</strong> entities
-              </span>
-              <span>
-                <strong>{totals.active}</strong> active
-              </span>
-              <span className={totals.deadLetter > 0 ? "sb-dlq-warn" : ""}>
-                <strong>{totals.deadLetter}</strong> dead-letter
-              </span>
-            </div>
-          )}
+          {totals !== undefined && <SbTotals totals={totals} />}
           {entities.length === 0 ? (
-            <p className="sb-empty">
-              {query.trim() === ""
-                ? "No queues or subscriptions found."
-                : `No entities match “${query}”.`}
-            </p>
+            <p className="sb-empty">{emptyMessage}</p>
           ) : (
-            <table className="sb-table">
-              <thead>
-                <tr>
-                  <th scope="col">Entity</th>
-                  <th scope="col">Namespace</th>
-                  <th scope="col">Active</th>
-                  <th scope="col">Dead-letter</th>
-                  <th scope="col">Scheduled</th>
-                  <th scope="col">Peek</th>
-                </tr>
-              </thead>
-              <tbody>
-                {entities.map((entity) => {
-                  const rowKey = `${entity.namespace}/${entity.topic ?? ""}/${entity.name}`;
-                  // For a subscription the peek targets (topic, subscription); for a queue, the queue.
-                  const peekEntity = entity.topic ?? entity.name;
-                  const peekSub = entity.kind === "subscription" ? entity.name : undefined;
-                  return (
-                    <tr key={rowKey} className={entity.deadLetter > 0 ? "is-dlq" : ""}>
-                      <td>
-                        <span className={`sb-kind sb-kind-${entity.kind}`}>
-                          {entity.kind === "queue" ? "Q" : "S"}
-                        </span>
-                        {entity.topic !== undefined
-                          ? `${entity.topic}/${entity.name}`
-                          : entity.name}
-                      </td>
-                      <td className="sb-ns">{entity.namespace}</td>
-                      <td className="sb-num">{entity.active}</td>
-                      <td className={`sb-num ${entity.deadLetter > 0 ? "sb-dlq-warn" : ""}`}>
-                        {entity.deadLetter}
-                      </td>
-                      <td className="sb-num">{entity.scheduled}</td>
-                      <td className="sb-peek-actions">
-                        <button
-                          type="button"
-                          onClick={() =>
-                            doPeek(rowKey, entity.namespace, peekEntity, peekSub, false)
-                          }
-                        >
-                          Peek
-                        </button>
-                        {entity.deadLetter > 0 && (
-                          <button
-                            type="button"
-                            className="sb-peek-dlq"
-                            onClick={() =>
-                              doPeek(rowKey, entity.namespace, peekEntity, peekSub, true)
-                            }
-                          >
-                            DLQ
-                          </button>
-                        )}
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
+            <SbEntityTable entities={entities} onPeek={doPeek} />
           )}
 
           {peekKey !== undefined && (
@@ -515,6 +435,176 @@ function ServiceBusPanel({
       )}
     </div>
   );
+}
+
+/** The totals strip: namespace / entity / active / dead-letter counts (DLQ highlighted). */
+function SbTotals({ totals }: Readonly<{ totals: ServiceBusTotals }>): ReactElement {
+  return (
+    <div className="sb-totals">
+      <span>
+        <strong>{totals.namespaces}</strong> namespaces
+      </span>
+      <span>
+        <strong>{totals.entities}</strong> entities
+      </span>
+      <span>
+        <strong>{totals.active}</strong> active
+      </span>
+      <span className={totals.deadLetter > 0 ? "sb-dlq-warn" : ""}>
+        <strong>{totals.deadLetter}</strong> dead-letter
+      </span>
+    </div>
+  );
+}
+
+/** The entity table: one row per queue / subscription with counts and Peek / DLQ actions. */
+function SbEntityTable({
+  entities,
+  onPeek
+}: Readonly<{
+  entities: ServiceBusEntity[];
+  onPeek: (
+    rowKey: string,
+    namespace: string,
+    entity: string,
+    subscription: string | undefined,
+    deadLetter: boolean
+  ) => void;
+}>): ReactElement {
+  return (
+    <table className="sb-table">
+      <thead>
+        <tr>
+          <th scope="col">Entity</th>
+          <th scope="col">Namespace</th>
+          <th scope="col">Active</th>
+          <th scope="col">Dead-letter</th>
+          <th scope="col">Scheduled</th>
+          <th scope="col">Peek</th>
+        </tr>
+      </thead>
+      <tbody>
+        {entities.map((entity) => {
+          const rowKey = `${entity.namespace}/${entity.topic ?? ""}/${entity.name}`;
+          // For a subscription the peek targets (topic, subscription); for a queue, the queue.
+          const peekEntity = entity.topic ?? entity.name;
+          const peekSub = entity.kind === "subscription" ? entity.name : undefined;
+          const label =
+            entity.topic === undefined ? entity.name : `${entity.topic}/${entity.name}`;
+          return (
+            <tr key={rowKey} className={entity.deadLetter > 0 ? "is-dlq" : ""}>
+              <td>
+                <span className={`sb-kind sb-kind-${entity.kind}`}>
+                  {entity.kind === "queue" ? "Q" : "S"}
+                </span>
+                {label}
+              </td>
+              <td className="sb-ns">{entity.namespace}</td>
+              <td className="sb-num">{entity.active}</td>
+              <td className={`sb-num ${entity.deadLetter > 0 ? "sb-dlq-warn" : ""}`}>
+                {entity.deadLetter}
+              </td>
+              <td className="sb-num">{entity.scheduled}</td>
+              <td className="sb-peek-actions">
+                <button
+                  type="button"
+                  onClick={() => onPeek(rowKey, entity.namespace, peekEntity, peekSub, false)}
+                >
+                  Peek
+                </button>
+                {entity.deadLetter > 0 && (
+                  <button
+                    type="button"
+                    className="sb-peek-dlq"
+                    onClick={() => onPeek(rowKey, entity.namespace, peekEntity, peekSub, true)}
+                  >
+                    DLQ
+                  </button>
+                )}
+              </td>
+            </tr>
+          );
+        })}
+      </tbody>
+    </table>
+  );
+}
+
+/** The header line for the peek detail: "Peeking…" until a result lands, then a breadcrumb of
+    entity / subscription / dead-letter. */
+function peekTitle(peek: ServiceBusPeek | undefined): string {
+  if (peek === undefined) {
+    return "Peeking…";
+  }
+  const sub = peek.subscription !== undefined ? `/${peek.subscription}` : "";
+  const dlq = peek.deadLetter ? " · dead-letter" : "";
+  return `Peek · ${peek.entity}${sub}${dlq}`;
+}
+
+/** The body of the peek detail: the loading / empty / unavailable states, or the message list. */
+function PeekMessages({
+  peeking,
+  peek
+}: Readonly<{ peeking: boolean; peek: ServiceBusPeek | undefined }>): ReactElement {
+  if (peeking) {
+    return <p className="sb-empty">Reading messages…</p>;
+  }
+  if (peek === undefined) {
+    return <p className="sb-empty">No messages yet.</p>;
+  }
+  if (peek.available) {
+    if (peek.messages.length === 0) {
+      return <p className="sb-empty">No messages to browse. Empty.</p>;
+    }
+    return (
+      <ul className="sb-peek-list">
+        {peek.messages.map((message) => (
+          <li key={`${message.sequenceNumber}-${message.messageId ?? ""}`} className="sb-peek-msg">
+            <div className="sb-peek-msg-head">
+              <span className="sb-peek-seq">#{message.sequenceNumber}</span>
+              {message.subject !== undefined && (
+                <span className="sb-peek-subject">{message.subject}</span>
+              )}
+              {message.enqueuedTime !== undefined && (
+                <span className="sb-peek-time">
+                  {message.enqueuedTime.slice(0, 19).replace("T", " ")}
+                </span>
+              )}
+              {message.deliveryCount > 1 && (
+                <span className="sb-peek-delivery">×{message.deliveryCount}</span>
+              )}
+              {message.deadLetterReason !== undefined && (
+                <span className="sb-peek-dlr">{message.deadLetterReason}</span>
+              )}
+            </div>
+            <pre className="sb-peek-body">{message.body}</pre>
+          </li>
+        ))}
+      </ul>
+    );
+  }
+  return <p className="sb-unavailable">{peek.error ?? "could not peek"}</p>;
+}
+
+/** A live status line for a destructive action's result (ok / error styling). Rendered as an
+    <output> (implicit ARIA role="status") so screen readers announce the outcome. */
+function ResultLine({ ok, children }: Readonly<{ ok: boolean; children: string }>): ReactElement {
+  return (
+    <output className={`sb-resubmit-result ${ok ? "is-ok" : "is-error"}`}>
+      {children}
+    </output>
+  );
+}
+
+/** The one-line summary of a receive result: error, "nothing to receive", or the consumed message. */
+function receiveResultText(result: ServiceBusReceive): string {
+  if (!result.ok) {
+    return `✗ ${result.error ?? "could not receive"}`;
+  }
+  if (result.empty) {
+    return "✓ Nothing to receive (empty)";
+  }
+  return `✓ Received & removed #${result.message?.sequenceNumber ?? ""}: ${result.message?.body ?? ""}`;
 }
 
 /** The expanded read-only message browse for one entity: a list of peeked messages (id, seq,
@@ -553,274 +643,289 @@ function PeekDetail({
   onReceive: () => void;
   onClose: () => void;
 }>): ReactElement {
-  const [confirming, setConfirming] = useState(false);
-  const [confirmingPurge, setConfirmingPurge] = useState(false);
-  const [confirmingReceive, setConfirmingReceive] = useState(false);
-  const [composing, setComposing] = useState(false);
-  const [sendBody, setSendBody] = useState("");
-  const [sendSubject, setSendSubject] = useState("");
   const canResubmit =
     peek !== undefined && peek.available && peek.deadLetter && peek.messages.length > 0;
-  const canPurge = peek !== undefined && peek.available;
+  const canPurge = peek?.available === true;
   // Send targets the queue (or the topic, for a subscription peek) — never the DLQ view.
   const canSend = peek !== undefined && peek.available && !peek.deadLetter;
-  const canReceive = peek !== undefined && peek.available;
+  const canReceive = peek?.available === true;
+  const note = peek?.deadLetter
+    ? "Peek is read-only; Resubmit moves messages back to the source (needs Data Sender + Receiver)."
+    : "Read-only browse: messages are not removed or modified.";
 
   return (
     <div className="sb-peek">
       <div className="sb-peek-head">
-        <h4>
-          {peek === undefined
-            ? "Peeking…"
-            : `Peek · ${peek.entity}${peek.subscription !== undefined ? `/${peek.subscription}` : ""}${peek.deadLetter ? " · dead-letter" : ""}`}
-        </h4>
+        <h4>{peekTitle(peek)}</h4>
         <button type="button" className="link-button" onClick={onClose}>
           Close
         </button>
       </div>
-      {peeking ? (
-        <p className="sb-empty">Reading messages…</p>
-      ) : peek === undefined ? (
-        <p className="sb-empty">No messages yet.</p>
-      ) : !peek.available ? (
-        <p className="sb-unavailable">{peek.error ?? "could not peek"}</p>
-      ) : peek.messages.length === 0 ? (
-        <p className="sb-empty">No messages to browse — empty.</p>
-      ) : (
-        <ul className="sb-peek-list">
-          {peek.messages.map((message) => (
-            <li key={`${message.sequenceNumber}-${message.messageId ?? ""}`} className="sb-peek-msg">
-              <div className="sb-peek-msg-head">
-                <span className="sb-peek-seq">#{message.sequenceNumber}</span>
-                {message.subject !== undefined && (
-                  <span className="sb-peek-subject">{message.subject}</span>
-                )}
-                {message.enqueuedTime !== undefined && (
-                  <span className="sb-peek-time">
-                    {message.enqueuedTime.slice(0, 19).replace("T", " ")}
-                  </span>
-                )}
-                {message.deliveryCount > 1 && (
-                  <span className="sb-peek-delivery">×{message.deliveryCount}</span>
-                )}
-                {message.deadLetterReason !== undefined && (
-                  <span className="sb-peek-dlr">{message.deadLetterReason}</span>
-                )}
-              </div>
-              <pre className="sb-peek-body">{message.body}</pre>
-            </li>
-          ))}
-        </ul>
-      )}
+      <PeekMessages peeking={peeking} peek={peek} />
 
       {resubmitResult !== undefined && (
-        <p
-          role="status"
-          className={`sb-resubmit-result ${resubmitResult.ok ? "is-ok" : "is-error"}`}
-        >
+        <ResultLine ok={resubmitResult.ok}>
           {resubmitResult.ok
             ? `✓ Resubmitted ${resubmitResult.moved} message${resubmitResult.moved === 1 ? "" : "s"} to ${resubmitResult.entity}`
             : `✗ ${resubmitResult.error ?? "could not resubmit"}`}
-        </p>
+        </ResultLine>
       )}
 
-      {canResubmit &&
-        (confirming ? (
-          <div className="sb-resubmit-confirm">
-            <span>
-              Move {peek?.messages.length} dead-letter message
-              {peek?.messages.length === 1 ? "" : "s"} back to <strong>{peek?.entity}</strong>?
-              This removes them from the dead-letter queue.
-              {peek?.subscription !== undefined && (
-                <em className="sb-fanout-note">
-                  {" "}
-                  Re-publishes to the topic — fans out to all of its subscriptions, not just{" "}
-                  {peek.subscription}.
-                </em>
-              )}
-            </span>
-            <button
-              type="button"
-              className="sb-resubmit-go"
-              disabled={resubmitting}
-              onClick={() => {
-                setConfirming(false);
-                onResubmit();
-              }}
-            >
-              {resubmitting ? "Resubmitting…" : "Confirm resubmit"}
-            </button>
-            <button type="button" className="link-button" onClick={() => setConfirming(false)}>
-              Cancel
-            </button>
-          </div>
-        ) : (
-          <button
-            type="button"
-            className="sb-resubmit-btn"
-            disabled={resubmitting}
-            onClick={() => setConfirming(true)}
-          >
-            Resubmit {peek?.messages.length} to source
-          </button>
-        ))}
+      {canResubmit && (
+        <ResubmitAction peek={peek} resubmitting={resubmitting} onResubmit={onResubmit} />
+      )}
 
       {purgeResult !== undefined && (
-        <p role="status" className={`sb-resubmit-result ${purgeResult.ok ? "is-ok" : "is-error"}`}>
+        <ResultLine ok={purgeResult.ok}>
           {purgeResult.ok
             ? `✓ Purged ${purgeResult.purged} message${purgeResult.purged === 1 ? "" : "s"} from ${purgeResult.entity}`
             : `✗ ${purgeResult.error ?? "could not purge"}`}
-        </p>
+        </ResultLine>
       )}
 
-      {canPurge &&
-        (confirmingPurge ? (
-          <div className="sb-resubmit-confirm sb-purge-confirm">
-            <span>
-              Permanently delete <strong>ALL</strong> messages in{" "}
-              <strong>
-                {peek?.entity}
-                {peek?.deadLetter ? " (dead-letter)" : ""}
-              </strong>
-              ? This cannot be undone.
-            </span>
-            <button
-              type="button"
-              className="sb-resubmit-go"
-              disabled={purging}
-              onClick={() => {
-                setConfirmingPurge(false);
-                onPurge();
-              }}
-            >
-              {purging ? "Purging…" : "Confirm purge"}
-            </button>
-            <button type="button" className="link-button" onClick={() => setConfirmingPurge(false)}>
-              Cancel
-            </button>
-          </div>
-        ) : (
-          <button
-            type="button"
-            className="sb-resubmit-btn sb-purge-btn"
-            disabled={purging}
-            onClick={() => setConfirmingPurge(true)}
-          >
-            Purge {peek?.deadLetter ? "dead-letter" : "all"}
-          </button>
-        ))}
+      {canPurge && <PurgeAction peek={peek} purging={purging} onPurge={onPurge} />}
 
       {sendResult !== undefined && (
-        <p role="status" className={`sb-resubmit-result ${sendResult.ok ? "is-ok" : "is-error"}`}>
+        <ResultLine ok={sendResult.ok}>
           {sendResult.ok ? `✓ Sent to ${sendResult.entity}` : `✗ ${sendResult.error ?? "could not send"}`}
-        </p>
+        </ResultLine>
       )}
 
-      {canSend &&
-        (composing ? (
-          <div className="sb-send-compose">
-            {peek?.subscription !== undefined && (
-              <p className="sb-fanout-note">
-                Sends to topic <strong>{peek.entity}</strong> — fans out to all of its
-                subscriptions, not just {peek.subscription}.
-              </p>
-            )}
-            <label className="sb-send-field">
-              <span>Subject (optional)</span>
-              <input
-                type="text"
-                value={sendSubject}
-                onChange={(event) => setSendSubject(event.target.value)}
-                placeholder="order.created"
-              />
-            </label>
-            <label className="sb-send-field">
-              <span>Body</span>
-              <textarea
-                aria-label="Message body"
-                value={sendBody}
-                onChange={(event) => setSendBody(event.target.value)}
-                placeholder={'{"orderId": 42}'}
-                rows={3}
-              />
-            </label>
-            <div className="sb-send-actions">
-              <button
-                type="button"
-                className="sb-resubmit-go"
-                disabled={sending || sendBody.trim().length === 0}
-                onClick={() => {
-                  onSend(sendBody, sendSubject);
-                  setComposing(false);
-                  setSendBody("");
-                  setSendSubject("");
-                }}
-              >
-                {sending ? "Sending…" : `Confirm send to ${peek?.entity}`}
-              </button>
-              <button type="button" className="link-button" onClick={() => setComposing(false)}>
-                Cancel
-              </button>
-            </div>
-          </div>
-        ) : (
-          <button type="button" className="sb-send-btn" disabled={sending} onClick={() => setComposing(true)}>
-            Send a message
-          </button>
-        ))}
+      {canSend && <SendAction peek={peek} sending={sending} onSend={onSend} />}
 
       {receiveResult !== undefined && (
-        <p role="status" className={`sb-resubmit-result ${receiveResult.ok ? "is-ok" : "is-error"}`}>
-          {!receiveResult.ok
-            ? `✗ ${receiveResult.error ?? "could not receive"}`
-            : receiveResult.empty
-              ? "✓ Nothing to receive — empty"
-              : `✓ Received & removed #${receiveResult.message?.sequenceNumber ?? ""}: ${receiveResult.message?.body ?? ""}`}
-        </p>
+        <ResultLine ok={receiveResult.ok}>{receiveResultText(receiveResult)}</ResultLine>
       )}
 
-      {canReceive &&
-        (confirmingReceive ? (
-          <div className="sb-resubmit-confirm">
-            <span>
-              Consume and <strong>remove</strong> the next message from{" "}
-              <strong>
-                {peek?.entity}
-                {peek?.deadLetter ? " (dead-letter)" : ""}
-              </strong>
-              ? This deletes it.
-            </span>
-            <button
-              type="button"
-              className="sb-resubmit-go"
-              disabled={receiving}
-              onClick={() => {
-                setConfirmingReceive(false);
-                onReceive();
-              }}
-            >
-              {receiving ? "Receiving…" : "Confirm receive"}
-            </button>
-            <button type="button" className="link-button" onClick={() => setConfirmingReceive(false)}>
-              Cancel
-            </button>
-          </div>
-        ) : (
-          <button
-            type="button"
-            className="sb-resubmit-btn sb-purge-btn"
-            disabled={receiving}
-            onClick={() => setConfirmingReceive(true)}
-          >
-            Receive one (remove)
-          </button>
-        ))}
+      {canReceive && <ReceiveAction peek={peek} receiving={receiving} onReceive={onReceive} />}
 
-      <p className="sb-peek-note">
-        {peek?.deadLetter
-          ? "Peek is read-only; Resubmit moves messages back to the source (needs Data Sender + Receiver)."
-          : "Read-only browse — messages are not removed or modified."}
-      </p>
+      <p className="sb-peek-note">{note}</p>
+    </div>
+  );
+}
+
+/** Confirmation-gated **Resubmit**: moves the peeked dead-letter messages back to the source. */
+function ResubmitAction({
+  peek,
+  resubmitting,
+  onResubmit
+}: Readonly<{
+  peek: ServiceBusPeek | undefined;
+  resubmitting: boolean;
+  onResubmit: () => void;
+}>): ReactElement {
+  const [confirming, setConfirming] = useState(false);
+  if (!confirming) {
+    return (
+      <button
+        type="button"
+        className="sb-resubmit-btn"
+        disabled={resubmitting}
+        onClick={() => setConfirming(true)}
+      >
+        Resubmit {peek?.messages.length} to source
+      </button>
+    );
+  }
+  return (
+    <div className="sb-resubmit-confirm">
+      <span>
+        Move {peek?.messages.length} dead-letter message
+        {peek?.messages.length === 1 ? "" : "s"} back to <strong>{peek?.entity}</strong>?
+        This removes them from the dead-letter queue.
+        {peek?.subscription !== undefined && (
+          <em className="sb-fanout-note">
+            {" "}
+            Re-publishes to the topic, fanning out to all of its subscriptions, not just{" "}
+            {peek.subscription}.
+          </em>
+        )}
+      </span>
+      <button
+        type="button"
+        className="sb-resubmit-go"
+        disabled={resubmitting}
+        onClick={() => {
+          setConfirming(false);
+          onResubmit();
+        }}
+      >
+        {resubmitting ? "Resubmitting…" : "Confirm resubmit"}
+      </button>
+      <button type="button" className="link-button" onClick={() => setConfirming(false)}>
+        Cancel
+      </button>
+    </div>
+  );
+}
+
+/** Confirmation-gated **Purge**: drains all messages from the peeked view (active or DLQ). */
+function PurgeAction({
+  peek,
+  purging,
+  onPurge
+}: Readonly<{
+  peek: ServiceBusPeek | undefined;
+  purging: boolean;
+  onPurge: () => void;
+}>): ReactElement {
+  const [confirmingPurge, setConfirmingPurge] = useState(false);
+  if (!confirmingPurge) {
+    return (
+      <button
+        type="button"
+        className="sb-resubmit-btn sb-purge-btn"
+        disabled={purging}
+        onClick={() => setConfirmingPurge(true)}
+      >
+        Purge {peek?.deadLetter ? "dead-letter" : "all"}
+      </button>
+    );
+  }
+  return (
+    <div className="sb-resubmit-confirm sb-purge-confirm">
+      <span>
+        Permanently delete <strong>ALL</strong> messages in{" "}
+        <strong>
+          {peek?.entity}
+          {peek?.deadLetter ? " (dead-letter)" : ""}
+        </strong>
+        {"? This cannot be undone."}
+      </span>
+      <button
+        type="button"
+        className="sb-resubmit-go"
+        disabled={purging}
+        onClick={() => {
+          setConfirmingPurge(false);
+          onPurge();
+        }}
+      >
+        {purging ? "Purging…" : "Confirm purge"}
+      </button>
+      <button type="button" className="link-button" onClick={() => setConfirmingPurge(false)}>
+        Cancel
+      </button>
+    </div>
+  );
+}
+
+/** The compose-and-send form (write): publishes a message to the peeked entity. */
+function SendAction({
+  peek,
+  sending,
+  onSend
+}: Readonly<{
+  peek: ServiceBusPeek | undefined;
+  sending: boolean;
+  onSend: (body: string, subject: string) => void;
+}>): ReactElement {
+  const [composing, setComposing] = useState(false);
+  const [sendBody, setSendBody] = useState("");
+  const [sendSubject, setSendSubject] = useState("");
+  if (!composing) {
+    return (
+      <button type="button" className="sb-send-btn" disabled={sending} onClick={() => setComposing(true)}>
+        Send a message
+      </button>
+    );
+  }
+  return (
+    <div className="sb-send-compose">
+      {peek?.subscription !== undefined && (
+        <p className="sb-fanout-note">
+          Sends to topic <strong>{peek.entity}</strong>, fanning out to all of its
+          subscriptions, not just {peek.subscription}.
+        </p>
+      )}
+      <label className="sb-send-field">
+        <span>Subject (optional)</span>
+        <input
+          type="text"
+          value={sendSubject}
+          onChange={(event) => setSendSubject(event.target.value)}
+          placeholder="order.created"
+        />
+      </label>
+      <label className="sb-send-field">
+        <span>Body</span>
+        <textarea
+          aria-label="Message body"
+          value={sendBody}
+          onChange={(event) => setSendBody(event.target.value)}
+          placeholder={'{"orderId": 42}'}
+          rows={3}
+        />
+      </label>
+      <div className="sb-send-actions">
+        <button
+          type="button"
+          className="sb-resubmit-go"
+          disabled={sending || sendBody.trim().length === 0}
+          onClick={() => {
+            onSend(sendBody, sendSubject);
+            setComposing(false);
+            setSendBody("");
+            setSendSubject("");
+          }}
+        >
+          {sending ? "Sending…" : `Confirm send to ${peek?.entity}`}
+        </button>
+        <button type="button" className="link-button" onClick={() => setComposing(false)}>
+          Cancel
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/** Confirmation-gated **Receive**: consumes + removes the next message from the peeked view. */
+function ReceiveAction({
+  peek,
+  receiving,
+  onReceive
+}: Readonly<{
+  peek: ServiceBusPeek | undefined;
+  receiving: boolean;
+  onReceive: () => void;
+}>): ReactElement {
+  const [confirmingReceive, setConfirmingReceive] = useState(false);
+  if (!confirmingReceive) {
+    return (
+      <button
+        type="button"
+        className="sb-resubmit-btn sb-purge-btn"
+        disabled={receiving}
+        onClick={() => setConfirmingReceive(true)}
+      >
+        Receive one (remove)
+      </button>
+    );
+  }
+  return (
+    <div className="sb-resubmit-confirm">
+      <span>
+        Consume and <strong>remove</strong> the next message from{" "}
+        <strong>
+          {peek?.entity}
+          {peek?.deadLetter ? " (dead-letter)" : ""}
+        </strong>
+        {"? This deletes it."}
+      </span>
+      <button
+        type="button"
+        className="sb-resubmit-go"
+        disabled={receiving}
+        onClick={() => {
+          setConfirmingReceive(false);
+          onReceive();
+        }}
+      >
+        {receiving ? "Receiving…" : "Confirm receive"}
+      </button>
+      <button type="button" className="link-button" onClick={() => setConfirmingReceive(false)}>
+        Cancel
+      </button>
     </div>
   );
 }
@@ -899,47 +1004,66 @@ function GrafanaPanel({
         </p>
       )}
 
-      {notConfigured ? (
-        <p className="sb-unavailable">
-          Not configured. Add your Grafana base URL (and an API token) in{" "}
-          <strong>Settings → Connectors</strong> to see health and dashboards here.
-        </p>
-      ) : summary === undefined ? (
-        <p className="sb-empty">{loading ? "Reading Grafana…" : "No summary yet."}</p>
-      ) : !summary.available ? (
-        <p className="sb-unavailable">Grafana: {summary.error ?? "not available"}</p>
-      ) : (
-        <>
-          <div className="sb-totals">
-            <span>
-              version <strong>{summary.version ?? "—"}</strong>
-            </span>
-            <span>
-              database <strong>{summary.database ?? "—"}</strong>
-            </span>
-            <span>
-              <strong>{summary.dashboards.length}</strong> dashboards
-            </span>
-          </div>
-          {summary.dashboards.length === 0 ? (
-            <p className="sb-empty">No dashboards found.</p>
-          ) : (
-            <ul className="grafana-dashboards">
-              {summary.dashboards.map((dashboard) => (
-                <li key={dashboard.uid || dashboard.url}>
-                  <a href={dashboard.url} target="_blank" rel="noreferrer">
-                    {dashboard.title}
-                  </a>
-                  {dashboard.folder !== undefined && (
-                    <span className="grafana-folder">{dashboard.folder}</span>
-                  )}
-                </li>
-              ))}
-            </ul>
-          )}
-        </>
-      )}
+      <GrafanaBody notConfigured={notConfigured} summary={summary} loading={loading} />
     </div>
+  );
+}
+
+/** The Grafana panel body: not-configured / loading / unavailable states, or the health +
+    dashboards view. */
+function GrafanaBody({
+  notConfigured,
+  summary,
+  loading
+}: Readonly<{
+  notConfigured: boolean;
+  summary: GrafanaSummary | undefined;
+  loading: boolean;
+}>): ReactElement {
+  if (notConfigured) {
+    return (
+      <p className="sb-unavailable">
+        Not configured. Add your Grafana base URL (and an API token) in{" "}
+        <strong>Settings → Connectors</strong> to see health and dashboards here.
+      </p>
+    );
+  }
+  if (summary === undefined) {
+    return <p className="sb-empty">{loading ? "Reading Grafana…" : "No summary yet."}</p>;
+  }
+  if (!summary.available) {
+    return <p className="sb-unavailable">Grafana: {summary.error ?? "not available"}</p>;
+  }
+  return (
+    <>
+      <div className="sb-totals">
+        <span>
+          version <strong>{summary.version ?? "-"}</strong>
+        </span>
+        <span>
+          database <strong>{summary.database ?? "-"}</strong>
+        </span>
+        <span>
+          <strong>{summary.dashboards.length}</strong> dashboards
+        </span>
+      </div>
+      {summary.dashboards.length === 0 ? (
+        <p className="sb-empty">No dashboards found.</p>
+      ) : (
+        <ul className="grafana-dashboards">
+          {summary.dashboards.map((dashboard) => (
+            <li key={dashboard.uid || dashboard.url}>
+              <a href={dashboard.url} target="_blank" rel="noreferrer">
+                {dashboard.title}
+              </a>
+              {dashboard.folder !== undefined && (
+                <span className="grafana-folder">{dashboard.folder}</span>
+              )}
+            </li>
+          ))}
+        </ul>
+      )}
+    </>
   );
 }
 
@@ -1016,36 +1140,56 @@ function SentryPanel({
         </p>
       )}
 
-      {notConfigured ? (
-        <p className="sb-unavailable">
-          Not configured. Add your Sentry org, project, and API token in{" "}
-          <strong>Settings → Connectors</strong> to see unresolved issues here.
-        </p>
-      ) : summary === undefined ? (
-        <p className="sb-empty">{loading ? "Reading Sentry…" : "No summary yet."}</p>
-      ) : !summary.available ? (
-        <p className="sb-unavailable">Sentry: {summary.error ?? "not available"}</p>
-      ) : summary.issues.length === 0 ? (
-        <p className="sb-empty">No unresolved issues. 🎉</p>
-      ) : (
-        <ul className="sentry-issues">
-          {summary.issues.map((issue) => (
-            <li key={issue.id} className={`sentry-issue level-${issue.level}`}>
-              <a className="sentry-title" href={issue.permalink} target="_blank" rel="noreferrer">
-                {issue.title}
-              </a>
-              <div className="sentry-meta">
-                <span className={`sentry-level level-${issue.level}`}>{issue.level}</span>
-                {issue.culprit !== undefined && (
-                  <span className="sentry-culprit">{issue.culprit}</span>
-                )}
-                <span className="sentry-count">{issue.count} events</span>
-                <span className="sentry-users">{issue.userCount} users</span>
-              </div>
-            </li>
-          ))}
-        </ul>
-      )}
+      <SentryBody notConfigured={notConfigured} summary={summary} loading={loading} />
     </div>
+  );
+}
+
+/** The Sentry panel body: not-configured / loading / unavailable / empty states, or the list of
+    unresolved issues. */
+function SentryBody({
+  notConfigured,
+  summary,
+  loading
+}: Readonly<{
+  notConfigured: boolean;
+  summary: SentrySummary | undefined;
+  loading: boolean;
+}>): ReactElement {
+  if (notConfigured) {
+    return (
+      <p className="sb-unavailable">
+        Not configured. Add your Sentry org, project, and API token in{" "}
+        <strong>Settings → Connectors</strong> to see unresolved issues here.
+      </p>
+    );
+  }
+  if (summary === undefined) {
+    return <p className="sb-empty">{loading ? "Reading Sentry…" : "No summary yet."}</p>;
+  }
+  if (!summary.available) {
+    return <p className="sb-unavailable">Sentry: {summary.error ?? "not available"}</p>;
+  }
+  if (summary.issues.length === 0) {
+    return <p className="sb-empty">No unresolved issues. 🎉</p>;
+  }
+  return (
+    <ul className="sentry-issues">
+      {summary.issues.map((issue) => (
+        <li key={issue.id} className={`sentry-issue level-${issue.level}`}>
+          <a className="sentry-title" href={issue.permalink} target="_blank" rel="noreferrer">
+            {issue.title}
+          </a>
+          <div className="sentry-meta">
+            <span className={`sentry-level level-${issue.level}`}>{issue.level}</span>
+            {issue.culprit !== undefined && (
+              <span className="sentry-culprit">{issue.culprit}</span>
+            )}
+            <span className="sentry-count">{issue.count} events</span>
+            <span className="sentry-users">{issue.userCount} users</span>
+          </div>
+        </li>
+      ))}
+    </ul>
   );
 }

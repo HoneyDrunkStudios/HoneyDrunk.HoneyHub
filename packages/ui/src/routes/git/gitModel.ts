@@ -39,7 +39,7 @@ export function classifyDiffLine(line: string): DiffLineKind {
 /** Split a patch into classified lines (a trailing empty line is dropped). */
 export function toDiffLines(patch: string): DiffLine[] {
   const lines = patch.split("\n");
-  if (lines.length > 0 && lines[lines.length - 1] === "") {
+  if (lines.length > 0 && lines.at(-1) === "") {
     lines.pop();
   }
   return lines.map((text) => ({ kind: classifyDiffLine(text), text }));

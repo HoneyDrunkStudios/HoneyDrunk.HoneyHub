@@ -1,6 +1,7 @@
 import { fireEvent, render, screen } from "@testing-library/react";
 import { beforeEach, describe, expect, it } from "vitest";
 import { App } from "./App";
+import { COMPOSER_PROMPTS } from "./routes/run/RunScreen";
 
 // Each test starts from a clean first-run state (not yet onboarded), so the
 // provider-selection screen shows first; the cockpit helper dismisses it. Reset via
@@ -16,15 +17,19 @@ beforeEach(() => {
   }
 });
 
-/** Render the app and complete the first-run flow (providers → repo locations → connect a
-    phone), landing on the cockpit. The mock bridge reports Claude as detected. */
+/** Render the app and complete the first-run flow (providers → repo locations →
+    subscription plans → connect a phone), landing on the cockpit. The plans step is
+    skippable — we enter nothing and just Continue. The mock bridge reports Claude as
+    detected. */
 function renderCockpit() {
   render(<App />);
   // Step 1: providers → continue.
   fireEvent.click(screen.getByRole("button", { name: /continue|skip for now/i }));
   // Step 2: repo locations → finish (no roots added in tests → "Skip for now").
   fireEvent.click(screen.getByRole("button", { name: /finish|skip for now/i }));
-  // Step 3: connect a phone (optional) → enter the cockpit.
+  // Step 3: subscription plans (optional) → continue without entering anything.
+  fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+  // Step 4: connect a phone (optional) → enter the cockpit.
   fireEvent.click(screen.getByRole("button", { name: "Enter the cockpit" }));
 }
 
@@ -41,7 +46,11 @@ describe("App", () => {
     renderCockpit();
 
     expect(screen.getByRole("heading", { name: "HoneyHub" })).toBeTruthy();
-    expect(screen.getByRole("heading", { name: "What should we work on?" })).toBeTruthy();
+    // The composer heading is one of the rotating prompts (chosen per mount).
+    const headings = screen.getAllByRole("heading");
+    expect(headings.some((heading) => COMPOSER_PROMPTS.includes(heading.textContent ?? ""))).toBe(
+      true
+    );
   });
 
   it("switches to the settings view", () => {

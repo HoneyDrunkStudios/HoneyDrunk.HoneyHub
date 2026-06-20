@@ -1,5 +1,6 @@
 import type { AgentBackend } from "@honeydrunk/honeyhub-types";
 import { backendLabel } from "../../backends";
+import { getPlan, type Plans } from "../../plans";
 import type { ModelRate, RoutingSnapshot } from "./routingSnapshot";
 
 // The app-tier router (ADR-0092 D3 / packet 09 §3d): a pure function that picks a
@@ -61,6 +62,10 @@ export interface RoutingInput {
   availableBackends: AgentBackend[];
   /** Optional per-backend recent turn counts, for the subscription soft tiebreak. */
   recentTurnsByBackend?: Partial<Record<AgentBackend, number>>;
+  /** Optional per-backend subscription plans (cost-optimizer input). A `flat`-rate
+      backend is treated as effectively free in COST mode (see `recommendBackend`), so a
+      sub the user already pays for can beat a cheaper-per-token metered backend. */
+  plans?: Plans;
 }
 
 export interface RankedBackend {
@@ -100,9 +105,9 @@ function recommendFallback(
   if (fallback === undefined) {
     rationale = "No backends available to route to.";
   } else if (defaultAvailable) {
-    rationale = "No routing data for the available backends — using the default.";
+    rationale = "No routing data for the available backends, using the default.";
   } else {
-    rationale = "No routing data and the default is unavailable — using the first available backend.";
+    rationale = "No routing data and the default is unavailable, using the first available backend.";
   }
   return {
     backend: fallback ?? snapshot.policy.defaultBackend,
@@ -135,10 +140,33 @@ export function recommendBackend(
     return recommendFallback(input, snapshot, complexity);
   }
 
-  const baseScore = (rate: ModelRate): number =>
-    preferCapability
-      ? rate.capabilityTier * 100 - rate.costTier * 10
-      : -rate.costTier * 100 + rate.capabilityTier * 10;
+  // The cost tier a backend is scored with. In COST mode a `flat`-rate subscription the
+  // user already pays for is treated as effectively free (costTier 0), so it can beat a
+  // cheaper-per-token *metered* backend — the optimizer should prefer what's already
+  // paid for. Metered/unset plans keep their snapshot costTier; capability mode is never
+  // touched (its cost weight is only a tiebreak, and plans don't change capability).
+  //
+  // v1 honesty: we do NOT yet track real usage or the plan's cap, so "flat = free"
+  // assumes the user still has headroom on the subscription. Cap-aware ramping (back off
+  // as the plan approaches its limit) is a future refinement.
+  const effectiveCostTier = (rate: ModelRate): number => {
+    if (preferCapability) {
+      return rate.costTier;
+    }
+    return getPlan(input.plans ?? {}, rate.backend).type === "flat" ? 0 : rate.costTier;
+  };
+
+  const scoreWith =
+    (costTierOf: (rate: ModelRate) => number) =>
+    (rate: ModelRate): number =>
+      preferCapability
+        ? rate.capabilityTier * 100 - costTierOf(rate) * 10
+        : -costTierOf(rate) * 100 + rate.capabilityTier * 10;
+
+  // The live score (plan-aware) and a plan-blind score (snapshot costTier only), so we
+  // can tell whether a flat plan actually changed the winner for the rationale.
+  const baseScore = scoreWith(effectiveCostTier);
+  const baseScoreNoPlans = scoreWith((rate) => rate.costTier);
 
   const usagePenalty = (backend: AgentBackend): number => {
     // Clamp to [0, 10]: a negative count must never become a score *boost*, and the
@@ -176,12 +204,27 @@ export function recommendBackend(
   // never claims an influence that did not happen.
   const winnerWithoutUsage = [...candidates].sort(order(baseScore))[0]!.backend;
   const nudged = winner !== winnerWithoutUsage;
+  // Likewise, only credit a flat plan when treating it as free actually **flipped** the
+  // winner — i.e. with snapshot cost tiers a different backend would have won. The
+  // winner must itself be on a flat plan, so we never claim a flat plan "won" a backend
+  // that has none.
+  const winnerWithoutPlans = [...candidates].sort(order(baseScoreNoPlans))[0]!.backend;
+  const planFlipped =
+    !preferCapability &&
+    winner !== winnerWithoutPlans &&
+    getPlan(input.plans ?? {}, winner).type === "flat";
 
   const driver = preferCapability ? "most capable" : "lowest-cost";
+  let suffix = ".";
+  if (planFlipped) {
+    suffix = `; favoring your flat-rate ${backendLabel(winner)} plan.`;
+  } else if (nudged) {
+    suffix = "; leaning toward a less-used subscription.";
+  }
   const rationale =
     `${preferCapability ? "Complex" : "Light"} task (complexity ${complexity.toFixed(2)})` +
     ` → ${driver} backend: ${backendLabel(winner)}` +
-    (nudged ? "; leaning toward a less-used subscription." : ".");
+    suffix;
 
   return { backend: winner, rationale, ranked, complexity, snapshotSource: snapshot.source };
 }

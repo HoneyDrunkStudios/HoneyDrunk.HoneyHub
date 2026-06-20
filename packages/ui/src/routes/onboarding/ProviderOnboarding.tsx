@@ -70,7 +70,7 @@ export function ProviderOnboarding({
         <h1 className="onboarding-title">Which agents do you have?</h1>
         <p className="onboarding-sub">
           HoneyHub drives the official CLIs you already use, under your own local
-          session. Pick the ones you have installed — you can change this anytime in
+          session. Pick the ones you have installed; you can change this anytime in
           Settings.
         </p>
 
@@ -80,7 +80,7 @@ export function ProviderOnboarding({
           <p className="onboarding-detecting">
             {detectedCount > 0
               ? `Detected ${detectedCount} installed on this machine.`
-              : "None detected on this machine — enable any you plan to install."}
+              : "None detected on this machine. Enable any you plan to install."}
           </p>
         )}
 

@@ -69,6 +69,17 @@ export function GitView({ client, active, workspaceRoots }: Readonly<GitViewProp
 
   const stat = useMemo(() => (diff === undefined ? undefined : diffStat(diff.patch)), [diff]);
   const diffLines = useMemo(() => (diff === undefined ? [] : toDiffLines(diff.patch)), [diff]);
+  // Stable per-line keys derived from the line's content (kind + text). Identical lines can
+  // recur in a diff, so a running occurrence count disambiguates duplicates — no array index.
+  const diffKeys = useMemo(() => {
+    const seen = new Map<string, number>();
+    return diffLines.map((line) => {
+      const base = `${line.kind}:${line.text}`;
+      const occurrence = seen.get(base) ?? 0;
+      seen.set(base, occurrence + 1);
+      return { key: `${base}#${occurrence}`, line };
+    });
+  }, [diffLines]);
 
   if (workspaceRoots.length === 0) {
     return (
@@ -126,16 +137,17 @@ export function GitView({ client, active, workspaceRoots }: Readonly<GitViewProp
 
       {status !== undefined && !status.clean && (
         <ul className="git-files">
-          {status.files.map((file) => (
-            <li key={file.path}>
-              <button type="button" className="git-file" onClick={() => openDiff(file.path)}>
-                <span className={`git-code code-${file.untracked ? "untracked" : file.staged ? "staged" : "dirty"}`}>
-                  {file.status}
-                </span>
-                <span className="git-path">{file.path}</span>
-              </button>
-            </li>
-          ))}
+          {status.files.map((file) => {
+            const codeKind = file.untracked ? "untracked" : file.staged ? "staged" : "dirty";
+            return (
+              <li key={file.path}>
+                <button type="button" className="git-file" onClick={() => openDiff(file.path)}>
+                  <span className={`git-code code-${codeKind}`}>{file.status}</span>
+                  <span className="git-path">{file.path}</span>
+                </button>
+              </li>
+            );
+          })}
         </ul>
       )}
 
@@ -154,8 +166,8 @@ export function GitView({ client, active, workspaceRoots }: Readonly<GitViewProp
             <p className="git-empty">No diff (the change may be untracked or staged only).</p>
           ) : (
             <pre className="diff-view" aria-label="Diff">
-              {diffLines.map((line, index) => (
-                <span key={index} className={`diff-line diff-${line.kind}`}>
+              {diffKeys.map(({ key, line }) => (
+                <span key={key} className={`diff-line diff-${line.kind}`}>
                   {line.text}
                   {"\n"}
                 </span>
