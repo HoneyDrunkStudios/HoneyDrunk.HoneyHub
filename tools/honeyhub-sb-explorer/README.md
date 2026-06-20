@@ -4,12 +4,23 @@ A tiny, optional .NET CLI tool (not a NuGet library) that HoneyHub's bridge shel
 out to for Azure Service Bus **data-plane** operations that `az` cannot perform
 (message browse/peek, resubmit, purge, send, receive). It authenticates with
 `DefaultAzureCredential`, reusing the operator's `az login` (no connection string),
-so it needs the **Azure Service Bus Data Receiver** role for read verbs and
-**Data Sender** / **Data Owner** for the write verbs (ADR-0094 D5).
+so each verb needs an Azure Service Bus data-plane role (ADR-0094 D5):
 
-Each invocation emits a single JSON document on stdout and exits 0 on success; on
-failure it writes a short message to stderr and exits non-zero. The bridge maps the
-exit/stderr to a sanitized hint and never surfaces raw stderr to the UI.
+| Verb | Roles required |
+| --- | --- |
+| `peek` | Data Receiver |
+| `purge` | Data Receiver |
+| `receive` | Data Receiver |
+| `send` | Data Sender |
+| `resubmit` | Data Receiver **and** Data Sender |
+
+On success a verb emits a single JSON document on stdout and exits 0. On failure the
+exit code is non-zero, but the output is not uniform: a runtime failure writes a short
+message to stderr (exit 1), `resubmit` may write a partial-progress JSON document to
+stdout while still exiting 1, and argument/usage errors (missing verb, unknown verb,
+missing required option) write to stderr with no JSON (exit 2 for the verb-level cases).
+The bridge keys off the exit code, maps stderr to a sanitized hint, and never surfaces
+raw stderr to the UI.
 
 ## Build and install
 
