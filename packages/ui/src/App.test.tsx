@@ -62,6 +62,61 @@ describe("App", () => {
     expect(screen.getByLabelText("Device name")).toBeTruthy();
   });
 
+  it("renders the subscription plans panel in Settings and persists a change", () => {
+    renderCockpit();
+
+    fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+
+    // The plans editor (wired via `plans` + `onPlansChange`) renders in Settings.
+    const claudePlan = screen.getByLabelText("Claude Code plan") as HTMLSelectElement;
+    expect(claudePlan).toBeTruthy();
+
+    // Picking "Flat-rate subscription" flows through onPlansChange and reveals the
+    // monthly-cost input, exercising App's plans-wiring lines.
+    fireEvent.change(claudePlan, { target: { value: "flat" } });
+    expect(screen.getByLabelText("Claude Code monthly cost (USD)")).toBeTruthy();
+  });
+
+  it("walks Back through the onboarding steps and sets a plan value", () => {
+    render(<App />);
+
+    // Step 1 providers → repos.
+    fireEvent.click(screen.getByRole("button", { name: /continue|skip for now/i }));
+    // Step 2 repos → plans.
+    fireEvent.click(screen.getByRole("button", { name: /finish|skip for now/i }));
+
+    // Step 3 plans: enter a flat-rate plan + a monthly value (exercises PlansSettings
+    // through the onboarding step's onChange path).
+    expect(
+      screen.getByRole("heading", { name: "How do you pay for your providers?" })
+    ).toBeTruthy();
+    fireEvent.change(screen.getByLabelText("Claude Code plan"), { target: { value: "flat" } });
+    fireEvent.change(screen.getByLabelText("Claude Code monthly cost (USD)"), {
+      target: { value: "20" }
+    });
+    // Continue to step 4, then Back to step 3 (phone Back handler).
+    fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+    expect(
+      screen.getByRole("heading", { name: "Connect a phone (optional)" })
+    ).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Back" }));
+    expect(
+      screen.getByRole("heading", { name: "How do you pay for your providers?" })
+    ).toBeTruthy();
+    // The entered monthly value survived the round trip.
+    expect((screen.getByLabelText("Claude Code monthly cost (USD)") as HTMLInputElement).value).toBe(
+      "20"
+    );
+
+    // Back to step 2 (plans Back handler), then Back to step 1 (repos Back handler).
+    fireEvent.click(screen.getByRole("button", { name: "Back" }));
+    expect(screen.getByRole("heading", { name: "Where do your repos live?" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Back" }));
+    expect(
+      screen.getByRole("heading", { name: "Which agents do you have?" })
+    ).toBeTruthy();
+  });
+
   it("switches to the browse view", () => {
     renderCockpit();
 
