@@ -3,6 +3,9 @@
 ## [0.17.0] - 2026-06-20
 
 Cockpit polish plus subscription-aware cost routing, driven by operator dogfooding.
+(Version tracks: this changelog and the npm packages share the 0.17.0 user-facing
+version; the Rust crate workspace is at 0.23.0 and the Tauri app build at 0.22.0, each
+on its own internal track as in prior releases.)
 
 - **Subscription-aware cost routing**: a new **Plans** surface (Settings, plus a skippable
   onboarding step) lets you declare each provider's plan (flat-rate vs metered, with a

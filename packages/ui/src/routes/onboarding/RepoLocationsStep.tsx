@@ -41,7 +41,7 @@ export function RepoLocationsStep({
         <span className="brand-mark onboarding-mark" aria-hidden="true">
           <img className="brand-logo" src={`${import.meta.env.BASE_URL}icons/icon-512.svg`} alt="" />
         </span>
-        <p className="eyebrow">Step 2 of 3</p>
+        <p className="eyebrow">Step 2 of 4</p>
         <h1 className="onboarding-title">Where do your repos live?</h1>
         <p className="onboarding-sub">
           Browse to a folder that holds your repos, or pick a VS Code{" "}
