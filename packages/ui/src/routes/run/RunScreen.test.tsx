@@ -246,6 +246,25 @@ describe("RunScreen", () => {
     expect(started[0]?.model).toBe("gpt-5.5-codex");
   });
 
+  it("aims a custom model at a chosen backend via the custom-mode toggle", async () => {
+    const { client, started } = recordingClient();
+    render(<RunScreen client={client} availableBackends={ALL_BACKENDS} catalog={CATALOG} />);
+    fireEvent.change(screen.getByLabelText("Task"), { target: { value: "Fix a typo" } });
+    pickModelMode();
+    pickModelOption(/GPT-5\.5/);
+    pickModelOption(/Custom model/);
+    // The custom-mode backend toggle re-aims the custom id at Claude.
+    fireEvent.click(screen.getByRole("button", { name: "Claude Code" }));
+    fireEvent.change(screen.getByLabelText("Custom model id"), {
+      target: { value: "claude-opus-4-8" }
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Start session" }));
+
+    await waitFor(() => expect(started).toHaveLength(1));
+    expect(started[0]?.session.backend).toBe("claude.local");
+    expect(started[0]?.model).toBe("claude-opus-4-8");
+  });
+
   it("offers a Codex reasoning-effort selector and launches with the chosen effort", async () => {
     const { client, started } = recordingClient();
     // A catalog where the Codex model exposes reasoning levels (Claude has none).

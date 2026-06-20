@@ -123,8 +123,8 @@ export function RunScreen({
     [availableBackends]
   );
   const [task, setTask] = useState("");
-  // A random prompt per mount; intentionally not reactive to clicks.
-  const [promptIndex] = useState(() => Math.floor(Math.random() * COMPOSER_PROMPTS.length));
+  // A varied prompt per mount (time-seeded), intentionally not reactive to clicks.
+  const [promptIndex] = useState(() => Date.now() % COMPOSER_PROMPTS.length);
   const [workspaceRoot, setWorkspaceRoot] = useState(workspaceRoots[0] ?? "");
   const [runId, setRunId] = useState<string | undefined>(undefined);
   const [runState, setRunState] = useState<DispatchRunState | undefined>(undefined);
