@@ -66,6 +66,28 @@ function pickModelMode() {
   fireEvent.click(screen.getByRole("button", { name: "Pick model" }));
 }
 
+/** Open the unified model dropdown and click the option whose label matches. */
+function pickModelOption(label: RegExp) {
+  fireEvent.click(screen.getByRole("button", { name: "Model" }));
+  const listbox = screen.getByRole("listbox", { name: "Select model" });
+  fireEvent.click(within(listbox).getByRole("option", { name: label }));
+}
+
+/** The label currently shown on the model dropdown trigger. */
+function modelButtonText(): string {
+  return screen.getByRole("button", { name: "Model" }).textContent ?? "";
+}
+
+/** The model option labels currently offered (excludes the trailing "Custom model…"). */
+function listModelOptions(): string[] {
+  fireEvent.click(screen.getByRole("button", { name: "Model" }));
+  const listbox = screen.getByRole("listbox", { name: "Select model" });
+  return within(listbox)
+    .getAllByRole("option")
+    .map((option) => option.querySelector(".model-option-label")?.textContent ?? "")
+    .filter((label) => label !== "Custom model…");
+}
+
 describe("RunScreen", () => {
   it("drives start -> stream -> needs_input -> reply -> completed", async () => {
     startRun();
@@ -83,7 +105,7 @@ describe("RunScreen", () => {
     fireEvent.click(screen.getByRole("button", { name: "Send" }));
 
     await waitFor(() =>
-      expect(screen.getByText("Done — opened a pull request.")).toBeTruthy()
+      expect(screen.getByText("Done. Opened a pull request.")).toBeTruthy()
     );
     expect(screen.getByLabelText("Run state").textContent).toBe("completed");
 
@@ -140,25 +162,23 @@ describe("RunScreen", () => {
 
     // Clicking fetches its detail and reopens the transcript read-only.
     await waitFor(() =>
-      expect(screen.getByText("Done — staged the workflow and opened a PR.")).toBeTruthy()
+      expect(screen.getByText("Done. Staged the workflow and opened a PR.")).toBeTruthy()
     );
   });
 
-  it("manual mode lets the user pin a provider that the task no longer moves", () => {
+  it("manual mode lets the user pin a model that the task no longer moves", () => {
     render(
       <RunScreen client={new MockWireClient()} availableBackends={ALL_BACKENDS} catalog={CATALOG} />
     );
     pickModelMode();
-    const provider = screen.getByLabelText("Provider") as HTMLSelectElement;
+    pickModelOption(/GPT-5\.5/);
+    expect(modelButtonText()).toContain("GPT-5.5");
 
-    fireEvent.change(provider, { target: { value: "codex.local" } });
-    expect(provider.value).toBe("codex.local");
-
-    // A new task no longer moves the pinned provider.
+    // A new task no longer moves the pinned (Codex) model.
     fireEvent.change(screen.getByLabelText("Task"), {
       target: { value: "Redesign the whole architecture" }
     });
-    expect((screen.getByLabelText("Provider") as HTMLSelectElement).value).toBe("codex.local");
+    expect(modelButtonText()).toContain("GPT-5.5");
   });
 
   it("launches the run on the suggested backend by default (optimize, no model pin)", async () => {
@@ -182,8 +202,7 @@ describe("RunScreen", () => {
       target: { value: "Refactor the concurrency model" }
     });
     pickModelMode();
-    fireEvent.change(screen.getByLabelText("Provider"), { target: { value: "claude.local" } });
-    fireEvent.change(screen.getByLabelText("Model"), { target: { value: "haiku" } });
+    pickModelOption(/Claude Haiku 4\.5/);
     fireEvent.click(screen.getByRole("button", { name: "Start session" }));
 
     await waitFor(() => expect(started).toHaveLength(1));
@@ -191,7 +210,7 @@ describe("RunScreen", () => {
     expect(started[0]?.model).toBe("haiku");
   });
 
-  it("the manual provider picker offers only the configured backends", () => {
+  it("the unified model picker offers only the configured backends' models", () => {
     render(
       <RunScreen
         client={new MockWireClient()}
@@ -200,10 +219,12 @@ describe("RunScreen", () => {
       />
     );
     pickModelMode();
-    const select = screen.getByLabelText("Provider") as HTMLSelectElement;
-    expect(Array.from(select.options).map((option) => option.value)).toEqual([
-      "claude.local",
-      "codex.local"
+    expect(listModelOptions()).toEqual([
+      "Claude Opus 4.8",
+      "Claude Sonnet 4.6",
+      "Claude Haiku 4.5",
+      "GPT-5.5",
+      "GPT-5.4-Mini"
     ]);
   });
 
@@ -212,8 +233,9 @@ describe("RunScreen", () => {
     render(<RunScreen client={client} availableBackends={ALL_BACKENDS} catalog={CATALOG} />);
     fireEvent.change(screen.getByLabelText("Task"), { target: { value: "Fix a typo" } });
     pickModelMode();
-    fireEvent.change(screen.getByLabelText("Provider"), { target: { value: "codex.local" } });
-    fireEvent.change(screen.getByLabelText("Model"), { target: { value: "__custom__" } });
+    // Pick a Codex model (routes to codex), then switch to the custom entry.
+    pickModelOption(/GPT-5\.5/);
+    pickModelOption(/Custom model/);
     fireEvent.change(screen.getByLabelText("Custom model id"), {
       target: { value: "gpt-5.5-codex" }
     });
@@ -222,6 +244,25 @@ describe("RunScreen", () => {
     await waitFor(() => expect(started).toHaveLength(1));
     expect(started[0]?.session.backend).toBe("codex.local");
     expect(started[0]?.model).toBe("gpt-5.5-codex");
+  });
+
+  it("aims a custom model at a chosen backend via the custom-mode toggle", async () => {
+    const { client, started } = recordingClient();
+    render(<RunScreen client={client} availableBackends={ALL_BACKENDS} catalog={CATALOG} />);
+    fireEvent.change(screen.getByLabelText("Task"), { target: { value: "Fix a typo" } });
+    pickModelMode();
+    pickModelOption(/GPT-5\.5/);
+    pickModelOption(/Custom model/);
+    // The custom-mode backend toggle re-aims the custom id at Claude.
+    fireEvent.click(screen.getByRole("button", { name: "Claude Code" }));
+    fireEvent.change(screen.getByLabelText("Custom model id"), {
+      target: { value: "claude-opus-4-8" }
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Start session" }));
+
+    await waitFor(() => expect(started).toHaveLength(1));
+    expect(started[0]?.session.backend).toBe("claude.local");
+    expect(started[0]?.model).toBe("claude-opus-4-8");
   });
 
   it("offers a Codex reasoning-effort selector and launches with the chosen effort", async () => {
@@ -239,7 +280,7 @@ describe("RunScreen", () => {
     render(<RunScreen client={client} availableBackends={ALL_BACKENDS} catalog={catalog} />);
     fireEvent.change(screen.getByLabelText("Task"), { target: { value: "Refactor" } });
     pickModelMode();
-    fireEvent.change(screen.getByLabelText("Provider"), { target: { value: "codex.local" } });
+    pickModelOption(/GPT-5\.5/);
     // The effort selector appears (Codex + a model with levels) and Claude would not show it.
     const effort = screen.getByLabelText("Reasoning effort") as HTMLSelectElement;
     fireEvent.change(effort, { target: { value: "high" } });
@@ -256,8 +297,8 @@ describe("RunScreen", () => {
     // The slash popover appears, filtered to the model command.
     expect(screen.getByLabelText("Slash commands")).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: /\/model/ }));
-    // /model put the composer into manual mode, so the Provider picker is now shown.
-    expect(screen.getByLabelText("Provider")).toBeTruthy();
+    // /model put the composer into manual mode, so the model picker is now shown.
+    expect(screen.getByRole("button", { name: "Model" })).toBeTruthy();
   });
 
   it("offers only the proven-initial backend when none are configured", () => {
@@ -266,8 +307,12 @@ describe("RunScreen", () => {
     // until the user adds others in Bridge settings.
     render(<RunScreen client={new MockWireClient()} catalog={CATALOG} />);
     pickModelMode();
-    const select = screen.getByLabelText("Provider") as HTMLSelectElement;
-    expect(Array.from(select.options).map((option) => option.value)).toEqual(["claude.local"]);
+    // Only the proven-initial backend's models are offered.
+    expect(listModelOptions()).toEqual([
+      "Claude Opus 4.8",
+      "Claude Sonnet 4.6",
+      "Claude Haiku 4.5"
+    ]);
   });
 
   it("restricts the model picker (and the auto choice) to enabled models", async () => {
@@ -282,12 +327,8 @@ describe("RunScreen", () => {
       />
     );
     pickModelMode();
-    const model = screen.getByLabelText("Model") as HTMLSelectElement;
-    // Listed models exclude the always-present "Custom model…" sentinel option.
-    const listed = Array.from(model.options)
-      .map((option) => option.value)
-      .filter((value) => value !== "__custom__");
-    expect(listed).toEqual(["sonnet"]);
+    // The picker (and the auto choice) are restricted to the enabled model.
+    expect(listModelOptions()).toEqual(["Claude Sonnet 4.6"]);
 
     // Even back in optimize mode, the auto choice pins the only enabled model.
     fireEvent.click(screen.getByRole("button", { name: "Optimize cost" }));
@@ -308,12 +349,11 @@ describe("RunScreen", () => {
       />
     );
     pickModelMode();
-    const select = screen.getByLabelText("Provider") as HTMLSelectElement;
-    fireEvent.change(select, { target: { value: "claude.local" } });
-    expect(select.value).toBe("claude.local");
+    pickModelOption(/Claude Sonnet/);
+    expect(modelButtonText()).toContain("Claude Sonnet");
 
-    // Reconfigure the allowlist to exclude Claude — the stale pin is dropped and the
-    // select falls back to an offered backend (never the unavailable Claude).
+    // Reconfigure the allowlist to exclude Claude. The stale pin is dropped and the
+    // picker falls back to an offered backend (never the unavailable Claude).
     rerender(
       <RunScreen
         client={client}
@@ -321,9 +361,7 @@ describe("RunScreen", () => {
         catalog={CATALOG}
       />
     );
-    const after = screen.getByLabelText("Provider") as HTMLSelectElement;
-    expect(after.value).not.toBe("claude.local");
-    expect(["codex.local", "copilot.local"]).toContain(after.value);
+    expect(modelButtonText()).not.toContain("Claude");
   });
 
   it("freezes the active run's backend in diagnostics across a mid-run config change", async () => {

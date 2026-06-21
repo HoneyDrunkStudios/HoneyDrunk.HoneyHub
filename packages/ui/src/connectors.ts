@@ -41,7 +41,7 @@ export const KNOWN_CONNECTORS: ConnectorDef[] = [
     category: "work",
     status: "available",
     description: "Issues assigned to you, PRs you authored, and PRs that request your review.",
-    authNote: "Uses your existing GitHub CLI sign-in (gh) — no token stored."
+    authNote: "Uses your existing GitHub CLI sign-in (gh). No token stored."
   },
   {
     id: "ado",
@@ -49,7 +49,7 @@ export const KNOWN_CONNECTORS: ConnectorDef[] = [
     category: "work",
     status: "available",
     description: "Work items assigned to you across your projects.",
-    authNote: "Uses your Azure CLI sign-in (az) — no token stored."
+    authNote: "Uses your Azure CLI sign-in (az). No token stored."
   },
   {
     id: "servicebus",
@@ -57,14 +57,14 @@ export const KNOWN_CONNECTORS: ConnectorDef[] = [
     category: "observability",
     status: "available",
     description: "Queues, topics, subscriptions, and dead-letter counts.",
-    authNote: "Uses your Azure CLI sign-in (az) — no connection string stored."
+    authNote: "Uses your Azure CLI sign-in (az). No connection string stored."
   },
   {
     id: "grafana",
     label: "Grafana (traces / metrics / logs)",
     category: "observability",
     status: "available",
-    description: "Pulse telemetry — Tempo traces, Mimir metrics, Loki logs.",
+    description: "Pulse telemetry: Tempo traces, Mimir metrics, Loki logs.",
     authNote: "Point it at your Grafana base URL + an API token (stored locally only).",
     configFields: [
       { key: "baseUrl", label: "Base URL", placeholder: "https://grafana.example.com" },
@@ -100,7 +100,7 @@ export function isConnectorEnabled(prefs: ConnectorPrefs, id: string): boolean {
     in the UI), so persisted prefs can't claim a feature that isn't built. */
 export function setConnectorEnabled(prefs: ConnectorPrefs, id: string, on: boolean): ConnectorPrefs {
   const def = KNOWN_CONNECTORS.find((connector) => connector.id === id);
-  if (def === undefined || def.status !== "available") {
+  if (def?.status !== "available") {
     return prefs;
   }
   return { ...prefs, [id]: on };

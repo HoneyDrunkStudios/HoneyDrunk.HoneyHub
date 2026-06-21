@@ -29,7 +29,7 @@ export function RunsView({ runs }: Readonly<RunsViewProps>) {
 
       {runs.length === 0 ? (
         <p className="runs-empty">
-          No runs yet. Start one from the Chat tab — they'll show here so you can watch
+          No runs yet. Start one from the Chat tab and they'll show here so you can watch
           everything at once.
         </p>
       ) : (
@@ -41,8 +41,8 @@ export function RunsView({ runs }: Readonly<RunsViewProps>) {
                 {run.task}
               </span>
               <span className="run-backend">
-                {run.backend !== undefined ? backendLabel(run.backend) : "—"}
-                {run.model !== undefined ? ` · ${run.model}` : ""}
+                {run.backend === undefined ? "-" : backendLabel(run.backend)}
+                {run.model === undefined ? "" : ` · ${run.model}`}
               </span>
               <span className="run-state-pill" aria-label="Run state">
                 {run.needsInput ? "needs input" : run.state}

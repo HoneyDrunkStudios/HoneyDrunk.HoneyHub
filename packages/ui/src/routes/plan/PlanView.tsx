@@ -56,8 +56,8 @@ export function PlanView({ client, active }: Readonly<PlanViewProps>): ReactElem
       setCreating(true);
       client
         .scaffoldArchitecture({
-          ...(name.trim() !== "" ? { name: name.trim() } : {}),
-          ...(location.trim() !== "" ? { location: location.trim() } : {})
+          ...(name.trim() === "" ? {} : { name: name.trim() }),
+          ...(location.trim() === "" ? {} : { location: location.trim() })
         })
         .catch((cause: unknown) => {
           setCreating(false);
@@ -81,6 +81,45 @@ export function PlanView({ client, active }: Readonly<PlanViewProps>): ReactElem
       clearInterval(interval);
     };
   }, [active, refresh]);
+
+  let planBody: ReactElement;
+  if (snapshot === undefined) {
+    planBody = <p className="plan-empty">Reading the roadmap…</p>;
+  } else if (snapshot.found) {
+    planBody =
+      snapshot.lanes.length === 0 ? (
+        <p className="plan-empty">
+          Found <code>current-focus.md</code> but no ranked lanes yet.
+        </p>
+      ) : (
+        <div className="plan-board">
+          {snapshot.lanes.map((lane) => (
+            <div key={lane.lane} className="plan-lane">
+              <h3 className="plan-lane-title">{lane.lane}</h3>
+              {lane.next !== undefined && (
+                <div className="plan-next">
+                  <span className="plan-next-label">Next</span>
+                  <span className="plan-next-item">{lane.next.item}</span>
+                  <span className="plan-next-meta">
+                    {lane.next.status}
+                    {lane.next.due === "" ? "" : ` · ${lane.next.due}`}
+                  </span>
+                </div>
+              )}
+              <ul className="plan-items">
+                {lane.items.map((item) => (
+                  <PlanItemRow key={`${item.rank}-${item.item}`} item={item} />
+                ))}
+              </ul>
+            </div>
+          ))}
+        </div>
+      );
+  } else {
+    planBody = (
+      <RoadmapEmptyState onCreate={createArchitecture} creating={creating} error={createError} />
+    );
+  }
 
   return (
     <section className="plan" aria-label="Plan">
@@ -109,42 +148,7 @@ export function PlanView({ client, active }: Readonly<PlanViewProps>): ReactElem
         </p>
       )}
 
-      {snapshot === undefined ? (
-        <p className="plan-empty">Reading the roadmap…</p>
-      ) : !snapshot.found ? (
-        <RoadmapEmptyState
-          onCreate={createArchitecture}
-          creating={creating}
-          error={createError}
-        />
-      ) : snapshot.lanes.length === 0 ? (
-        <p className="plan-empty">
-          Found <code>current-focus.md</code> but no ranked lanes yet.
-        </p>
-      ) : (
-        <div className="plan-board">
-          {snapshot.lanes.map((lane) => (
-            <div key={lane.lane} className="plan-lane">
-              <h3 className="plan-lane-title">{lane.lane}</h3>
-              {lane.next !== undefined && (
-                <div className="plan-next">
-                  <span className="plan-next-label">Next</span>
-                  <span className="plan-next-item">{lane.next.item}</span>
-                  <span className="plan-next-meta">
-                    {lane.next.status}
-                    {lane.next.due !== "" ? ` · ${lane.next.due}` : ""}
-                  </span>
-                </div>
-              )}
-              <ul className="plan-items">
-                {lane.items.map((item) => (
-                  <PlanItemRow key={`${item.rank}-${item.item}`} item={item} />
-                ))}
-              </ul>
-            </div>
-          ))}
-        </div>
-      )}
+      {planBody}
     </section>
   );
 }
@@ -188,13 +192,13 @@ function RoadmapEmptyState({
       <p>It looks for these files (relative to the Architecture repo):</p>
       <ul className="plan-source-list">
         <li>
-          <code>initiatives/current-focus.md</code> — the ranked lanes &amp; what&rsquo;s next
+          <code>initiatives/current-focus.md</code>: the ranked lanes &amp; what&rsquo;s next
         </li>
         <li>
-          <code>initiatives/programs/*.md</code> — per-lane detail
+          <code>initiatives/programs/*.md</code>: per-lane detail
         </li>
         <li>
-          <code>initiatives/roadmap.md</code> — the longer horizon
+          <code>initiatives/roadmap.md</code>: the longer horizon
         </li>
       </ul>
 
@@ -210,7 +214,7 @@ function RoadmapEmptyState({
       >
         <p className="plan-create-title">Create a starter Architecture repo</p>
         <label>
-          Name
+          Name{" "}
           <input
             type="text"
             value={name}
@@ -219,7 +223,7 @@ function RoadmapEmptyState({
           />
         </label>
         <label>
-          Location (optional)
+          Location (optional){" "}
           <input
             type="text"
             value={location}

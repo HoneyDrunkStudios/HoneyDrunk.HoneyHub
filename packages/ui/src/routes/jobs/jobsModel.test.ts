@@ -4,8 +4,8 @@ import { filterProcesses, formatMemoryKb, runningCount } from "./jobsModel";
 
 describe("jobsModel", () => {
   it("formats memory across KB / MB / GB and handles missing", () => {
-    expect(formatMemoryKb(undefined)).toBe("—");
-    expect(formatMemoryKb(0)).toBe("—");
+    expect(formatMemoryKb(undefined)).toBe("-");
+    expect(formatMemoryKb(0)).toBe("-");
     expect(formatMemoryKb(512)).toBe("512 KB");
     expect(formatMemoryKb(2048)).toBe("2.0 MB");
     expect(formatMemoryKb(50 * 1024)).toBe("50 MB");

@@ -5,15 +5,15 @@ use crate::artifact::DispatchArtifact;
 use crate::backend_catalog::BackendCapability;
 use crate::environment::EnvironmentInfo;
 use crate::fsbrowse::{DirListing, FileContents, SearchResults, WorkspaceFolders};
-use crate::git::{GitDiff, GitStatus};
+use crate::git::{GitBranches, GitDiff, GitOpResult, GitOverview, GitStatus};
 use crate::grafana::GrafanaSummary;
 use crate::jobs::{JobProbe, JobSnapshot};
 use crate::network::NetworkInfo;
 use crate::roadmap::RoadmapSnapshot;
 use crate::sentry::SentrySummary;
 use crate::servicebus::{
-    ServiceBusPeek, ServiceBusPurge, ServiceBusReceive, ServiceBusResubmit, ServiceBusSend,
-    ServiceBusSnapshot,
+    SbEntityProps, ServiceBusEntities, ServiceBusManage, ServiceBusPeek, ServiceBusPurge,
+    ServiceBusReceive, ServiceBusResubmit, ServiceBusSend, ServiceBusSnapshot,
 };
 use crate::session::{
     DispatchControlEvent, DispatchMessage, DispatchRun, DispatchRunState, DispatchSession,
@@ -244,6 +244,8 @@ pub enum ClientCommand {
     /// with a single [`BridgeEventPayload::ServiceBusPeek`].
     PeekServiceBus {
         namespace: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        connection_string: Option<String>,
         entity: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         subscription: Option<String>,
@@ -257,6 +259,8 @@ pub enum ClientCommand {
     /// confirmation. The host answers with a single [`BridgeEventPayload::ServiceBusResubmit`].
     ResubmitDeadLetter {
         namespace: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        connection_string: Option<String>,
         entity: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         subscription: Option<String>,
@@ -268,6 +272,8 @@ pub enum ClientCommand {
     /// explicit confirmation. The host answers with [`BridgeEventPayload::ServiceBusPurge`].
     PurgeServiceBus {
         namespace: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        connection_string: Option<String>,
         entity: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         subscription: Option<String>,
@@ -279,6 +285,8 @@ pub enum ClientCommand {
     /// [`BridgeEventPayload::ServiceBusSend`].
     SendServiceBus {
         namespace: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        connection_string: Option<String>,
         entity: String,
         body: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -291,11 +299,36 @@ pub enum ClientCommand {
     /// answers with [`BridgeEventPayload::ServiceBusReceive`].
     ReceiveServiceBus {
         namespace: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        connection_string: Option<String>,
         entity: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         subscription: Option<String>,
         #[serde(default)]
         dead_letter: bool,
+    },
+    /// List a connection's namespace entities (queues + topics + subscriptions, with counts +
+    /// editable properties) via the admin client. The host answers with
+    /// [`BridgeEventPayload::ServiceBusEntities`].
+    ListServiceBusEntities {
+        namespace: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        connection_string: Option<String>,
+    },
+    /// **Write op** (ADR-0094 D5): create/delete/update a queue/topic/subscription. `op` ∈
+    /// {create,delete,update}, `kind` ∈ {queue,topic,subscription}. Confirmation-gated. The host
+    /// answers with [`BridgeEventPayload::ServiceBusManage`].
+    ManageServiceBus {
+        namespace: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        connection_string: Option<String>,
+        op: String,
+        entity_kind: String,
+        entity: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        subscription: Option<String>,
+        #[serde(default)]
+        props: SbEntityProps,
     },
     /// Summarize a Grafana instance (opt-in observability connector): health + dashboards.
     /// The config (`base_url` + optional `token`) is held in the cockpit and passed per
@@ -329,6 +362,68 @@ pub enum ClientCommand {
         root: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         path: Option<String>,
+    },
+    /// Discover the git repos under a selected folder (or the folder itself when it is a
+    /// repo) and read each one's status. The host gates `root` against the allowlist and
+    /// answers with [`BridgeEventPayload::GitOverview`]. The multi-repo dashboard.
+    GitOverview {
+        root: String,
+    },
+    /// List a repo's local branches + the current one (for the branch switcher). Answers
+    /// with [`BridgeEventPayload::GitBranches`].
+    GitBranches {
+        root: String,
+    },
+    /// **Write** (confirmation-gated): stage paths (`git add`). `["."]` stages everything.
+    /// The host answers with a [`BridgeEventPayload::GitOp`] result and a fresh
+    /// [`BridgeEventPayload::GitStatus`].
+    GitStage {
+        root: String,
+        paths: Vec<String>,
+    },
+    /// **Write**: unstage paths (`git restore --staged`). `["."]` unstages everything.
+    GitUnstage {
+        root: String,
+        paths: Vec<String>,
+    },
+    /// **Write**: commit the staged changes with a message.
+    GitCommit {
+        root: String,
+        message: String,
+    },
+    /// **Write**: push the current branch.
+    GitPush {
+        root: String,
+    },
+    /// **Write**: fast-forward pull (`git pull --ff-only`).
+    GitPull {
+        root: String,
+    },
+    /// **Write**: switch to a branch, optionally creating it.
+    GitCheckout {
+        root: String,
+        name: String,
+        #[serde(default)]
+        create: bool,
+    },
+    /// **Write**: discard local changes to paths. `untracked` removes untracked files;
+    /// otherwise tracked files are restored to HEAD.
+    GitDiscard {
+        root: String,
+        paths: Vec<String>,
+        #[serde(default)]
+        untracked: bool,
+    },
+    /// **Write**: discard ALL local changes (restore tracked + remove untracked).
+    GitDiscardAll {
+        root: String,
+    },
+    /// **Write**: delete a local branch (`force` uses `-D`).
+    GitDeleteBranch {
+        root: String,
+        name: String,
+        #[serde(default)]
+        force: bool,
     },
     /// List the locally-persisted sessions (durable chat history). A read-only query;
     /// the host answers with a single [`BridgeEventPayload::SessionList`].
@@ -834,6 +929,38 @@ impl BridgeEvent {
         }
     }
 
+    /// A device-wide Service Bus entities listing (one connection's namespace).
+    pub fn service_bus_entities(
+        id: impl Into<String>,
+        created_at: impl Into<String>,
+        entities: ServiceBusEntities,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            session_id: String::new(),
+            run_id: String::new(),
+            sequence: 0,
+            created_at: created_at.into(),
+            payload: BridgeEventPayload::ServiceBusEntities { entities },
+        }
+    }
+
+    /// A device-wide Service Bus management result (create/delete/update of an entity).
+    pub fn service_bus_manage(
+        id: impl Into<String>,
+        created_at: impl Into<String>,
+        result: ServiceBusManage,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            session_id: String::new(),
+            run_id: String::new(),
+            sequence: 0,
+            created_at: created_at.into(),
+            payload: BridgeEventPayload::ServiceBusManage { result },
+        }
+    }
+
     /// A device-wide Grafana summary. Not scoped to a run or session, so
     /// `session_id`/`run_id` are empty and `sequence` is `0`.
     pub fn grafana_summary(
@@ -887,6 +1014,70 @@ impl BridgeEvent {
 
     /// A device-wide git-diff event. Not scoped to a run or session, so
     /// `session_id`/`run_id` are empty and `sequence` is `0`.
+    /// A device-wide multi-repo git overview (one status per discovered repo).
+    pub fn git_overview(
+        id: impl Into<String>,
+        created_at: impl Into<String>,
+        overview: GitOverview,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            session_id: String::new(),
+            run_id: String::new(),
+            sequence: 0,
+            created_at: created_at.into(),
+            payload: BridgeEventPayload::GitOverview { overview },
+        }
+    }
+
+    /// A device-wide git-branches event (local branches + the current one).
+    pub fn git_branches(
+        id: impl Into<String>,
+        created_at: impl Into<String>,
+        branches: GitBranches,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            session_id: String::new(),
+            run_id: String::new(),
+            sequence: 0,
+            created_at: created_at.into(),
+            payload: BridgeEventPayload::GitBranches { branches },
+        }
+    }
+
+    /// A device-wide git write-op result (feedback for stage/commit/push/pull/etc).
+    pub fn git_op(
+        id: impl Into<String>,
+        created_at: impl Into<String>,
+        result: GitOpResult,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            session_id: String::new(),
+            run_id: String::new(),
+            sequence: 0,
+            created_at: created_at.into(),
+            payload: BridgeEventPayload::GitOp { result },
+        }
+    }
+
+    /// A device-wide filesystem-change notification (host-pushed by the watcher).
+    pub fn fs_changed(
+        id: impl Into<String>,
+        created_at: impl Into<String>,
+        paths: Vec<String>,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            session_id: String::new(),
+            run_id: String::new(),
+            sequence: 0,
+            created_at: created_at.into(),
+            payload: BridgeEventPayload::FsChanged { paths },
+        }
+    }
+
     pub fn git_diff(id: impl Into<String>, created_at: impl Into<String>, diff: GitDiff) -> Self {
         Self {
             id: id.into(),
@@ -1037,6 +1228,12 @@ pub enum BridgeEventPayload {
     ServiceBusReceive {
         result: ServiceBusReceive,
     },
+    ServiceBusEntities {
+        entities: ServiceBusEntities,
+    },
+    ServiceBusManage {
+        result: ServiceBusManage,
+    },
     GrafanaSummary {
         summary: GrafanaSummary,
     },
@@ -1048,6 +1245,18 @@ pub enum BridgeEventPayload {
     },
     GitDiff {
         diff: GitDiff,
+    },
+    GitOverview {
+        overview: GitOverview,
+    },
+    GitBranches {
+        branches: GitBranches,
+    },
+    GitOp {
+        result: GitOpResult,
+    },
+    FsChanged {
+        paths: Vec<String>,
     },
     SessionList {
         sessions: Vec<DispatchSession>,
@@ -1300,6 +1509,7 @@ mod tests {
                         follow_up_to_run_id: None,
                         transcript: Vec::new(),
                         launch_command: None,
+                        attachments: Vec::new(),
                     }),
                 },
                 created_at,
@@ -1888,6 +2098,33 @@ mod tests {
             BridgeEventPayload::ServiceBusReceive { .. }
         );
         check!(
+            BridgeEvent::service_bus_entities(
+                "e",
+                at,
+                from_json!(ServiceBusEntities, {
+                    "available": true,
+                    "namespace": "ns.servicebus.windows.net",
+                    "queues": [],
+                    "topics": []
+                }),
+            ),
+            BridgeEventPayload::ServiceBusEntities { .. }
+        );
+        check!(
+            BridgeEvent::service_bus_manage(
+                "e",
+                at,
+                from_json!(ServiceBusManage, {
+                    "ok": true,
+                    "namespace": "ns.servicebus.windows.net",
+                    "op": "create",
+                    "kind": "queue",
+                    "entity": "orders"
+                }),
+            ),
+            BridgeEventPayload::ServiceBusManage { .. }
+        );
+        check!(
             BridgeEvent::grafana_summary(
                 "e",
                 at,
@@ -1937,6 +2174,46 @@ mod tests {
                 }),
             ),
             BridgeEventPayload::GitDiff { .. }
+        );
+        check!(
+            BridgeEvent::git_overview(
+                "e",
+                at,
+                from_json!(GitOverview, {
+                    "root": "C:/work",
+                    "repos": []
+                }),
+            ),
+            BridgeEventPayload::GitOverview { .. }
+        );
+        check!(
+            BridgeEvent::git_branches(
+                "e",
+                at,
+                from_json!(GitBranches, {
+                    "root": "C:/work",
+                    "current": "main",
+                    "branches": ["main", "dev"]
+                }),
+            ),
+            BridgeEventPayload::GitBranches { .. }
+        );
+        check!(
+            BridgeEvent::git_op(
+                "e",
+                at,
+                from_json!(GitOpResult, {
+                    "root": "C:/work",
+                    "op": "commit",
+                    "ok": true,
+                    "message": "1 file changed"
+                }),
+            ),
+            BridgeEventPayload::GitOp { .. }
+        );
+        check!(
+            BridgeEvent::fs_changed("e", at, vec!["C:/work/src/a.rs".to_string()]),
+            BridgeEventPayload::FsChanged { .. }
         );
         check!(
             BridgeEvent::session_list(

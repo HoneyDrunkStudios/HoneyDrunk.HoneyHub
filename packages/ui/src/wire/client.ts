@@ -85,6 +85,7 @@ export interface WireClient {
       answer arrives as a `service_bus_peek` event via `subscribe`. */
   peekServiceBus(request: {
     namespace: string;
+    connectionString?: string;
     entity: string;
     subscription?: string;
     deadLetter?: boolean;
@@ -94,6 +95,7 @@ export interface WireClient {
       UI). The answer arrives as a `service_bus_resubmit` event via `subscribe`. */
   resubmitDeadLetter(request: {
     namespace: string;
+    connectionString?: string;
     entity: string;
     subscription?: string;
     count?: number;
@@ -102,6 +104,7 @@ export interface WireClient {
       gated in the UI. The answer arrives as a `service_bus_purge` event via `subscribe`. */
   purgeServiceBus(request: {
     namespace: string;
+    connectionString?: string;
     entity: string;
     subscription?: string;
     deadLetter?: boolean;
@@ -110,6 +113,7 @@ export interface WireClient {
       a `service_bus_send` event via `subscribe`. */
   sendServiceBus(request: {
     namespace: string;
+    connectionString?: string;
     entity: string;
     body: string;
     subject?: string;
@@ -119,9 +123,24 @@ export interface WireClient {
       confirmation-gated. The answer arrives as a `service_bus_receive` event via `subscribe`. */
   receiveServiceBus(request: {
     namespace: string;
+    connectionString?: string;
     entity: string;
     subscription?: string;
     deadLetter?: boolean;
+  }): Promise<void>;
+  /** List a connection's namespace entities (queues/topics/subscriptions with counts +
+      properties). The answer arrives as a `service_bus_entities` event via `subscribe`. */
+  listServiceBusEntities(request: { namespace: string; connectionString?: string }): Promise<void>;
+  /** **Write** (confirmation-gated): create/delete/update a queue/topic/subscription. The
+      answer arrives as a `service_bus_manage` event via `subscribe`. */
+  manageServiceBus(request: {
+    namespace: string;
+    connectionString?: string;
+    op: "create" | "delete" | "update";
+    entityKind: "queue" | "topic" | "subscription";
+    entity: string;
+    subscription?: string;
+    props?: import("@honeydrunk/honeyhub-types").SbEntityProps;
   }): Promise<void>;
   /** Summarize a Grafana instance (health + dashboards). `baseUrl`/`token` are the cockpit's
       locally-held config. The answer arrives as a `grafana_summary` event via `subscribe`. */
@@ -140,6 +159,32 @@ export interface WireClient {
   /** Read a repo's read-only diff (allowlist-gated). The answer arrives as a `git_diff`
       event via `subscribe` (correlate by root + path). */
   gitDiff(root: string, path?: string): Promise<void>;
+  /** Discover the git repos under a folder (or the folder itself when it is a repo) and
+      read each one's status. The answer arrives as a `git_overview` event via `subscribe`.
+      The multi-repo dashboard. */
+  gitOverview(root: string): Promise<void>;
+  /** List a repo's local branches + the current one (branch switcher). The answer arrives
+      as a `git_branches` event via `subscribe`. */
+  gitBranches(root: string): Promise<void>;
+  /** **Write** (confirmation-gated): stage paths (`["."]` = all). Answers with a `git_op`
+      result and a fresh `git_status` via `subscribe`. */
+  gitStage(root: string, paths: string[]): Promise<void>;
+  /** **Write**: unstage paths (`["."]` = all). */
+  gitUnstage(root: string, paths: string[]): Promise<void>;
+  /** **Write**: commit the staged changes with a message. */
+  gitCommit(root: string, message: string): Promise<void>;
+  /** **Write**: push the current branch. */
+  gitPush(root: string): Promise<void>;
+  /** **Write**: fast-forward pull. */
+  gitPull(root: string): Promise<void>;
+  /** **Write**: switch to a branch, optionally creating it. */
+  gitCheckout(root: string, name: string, create?: boolean): Promise<void>;
+  /** **Write**: discard local changes to paths (`untracked` removes untracked files). */
+  gitDiscard(root: string, paths: string[], untracked?: boolean): Promise<void>;
+  /** **Write**: discard ALL local changes (restore tracked + remove untracked). */
+  gitDiscardAll(root: string): Promise<void>;
+  /** **Write**: delete a local branch (`force` uses `-D`). */
+  gitDeleteBranch(root: string, name: string, force?: boolean): Promise<void>;
   /** List the locally-persisted (durable) sessions. The answer arrives as a
       `session_list` event via `subscribe`. */
   listSessions(): Promise<void>;

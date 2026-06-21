@@ -158,11 +158,25 @@ impl BridgeRuntime {
             self.ensure_workspace_allowed(&request.workspace_root)?;
             self.ensure_request_workspace_matches(&request)?;
         }
-        if request.requested_run_id.is_none() {
-            request.requested_run_id = Some(Uuid::new_v4().to_string());
-        }
-        if let Some(requested_run_id) = &request.requested_run_id {
-            self.ensure_run_id_available(requested_run_id)?;
+        // Resolve the run id once (caller-provided or freshly minted) and reuse it for both the
+        // availability check and attachment materialization, so there is no expect/panic path
+        // when a caller omits `requested_run_id`.
+        let run_id = match request.requested_run_id.clone() {
+            Some(id) => id,
+            None => {
+                let id = Uuid::new_v4().to_string();
+                request.requested_run_id = Some(id.clone());
+                id
+            }
+        };
+        self.ensure_run_id_available(&run_id)?;
+        // Materialize any attachments to a per-run temp dir and append their paths to the
+        // task, so the agent (whatever the backend) can read them. Backend-agnostic by
+        // design (no per-CLI multimodal plumbing, HoneyHub attachments v1). Done before
+        // dispatch so the adapter seeds the augmented task as the first turn.
+        if !request.attachments.is_empty() {
+            let paths = crate::attachments::write_attachments(&run_id, &request.attachments)?;
+            request.task = crate::attachments::append_attachment_refs(&request.task, &paths);
         }
         let handle = self.adapter_for(backend)?.start(request.clone())?;
         self.ensure_run_id_available(&handle.run_id)?;
@@ -230,47 +244,59 @@ impl BridgeRuntime {
         }
 
         for event in &events {
-            match &event.payload {
-                BridgeEventPayload::Message { message } => {
-                    self.run_mut(run_id)?.transcript.push(message.clone());
-                    if let Some(store) = self.store.as_mut() {
-                        let _ = store.append_transcript(message);
-                    }
-                }
-                BridgeEventPayload::Control { event } => {
-                    self.run_mut(run_id)?
-                        .record
-                        .control_events
-                        .push(event.clone());
-                    if let Some(store) = self.store.as_mut() {
-                        let _ = store.put_control_event(&session_id, event);
-                    }
-                }
-                BridgeEventPayload::Status { status } => {
-                    self.transition_run(run_id, status.state.clone(), event.created_at.clone())?;
-                    // Persist the updated run record (state/completed_at changed).
-                    let run = self.run(run_id)?.record.run.clone();
-                    if let Some(store) = self.store.as_mut() {
-                        let _ = store.put_run(&run);
-                    }
-                }
-                BridgeEventPayload::Artifact { artifact } => {
-                    self.run_mut(run_id)?.artifacts.push(artifact.clone());
-                    if let Some(store) = self.store.as_mut() {
-                        let _ = store.put_artifact(&session_id, artifact);
-                    }
-                }
-                BridgeEventPayload::Usage { signal } => {
-                    if let Some(store) = self.store.as_mut() {
-                        let _ = store.put_usage(&session_id, signal);
-                    }
-                }
-                _ => {}
-            }
-            let managed = self.run_mut(run_id)?;
-            Self::push_bridge_event(managed, event.clone());
+            self.apply_stream_event(event, run_id, &session_id)?;
         }
         Ok(events)
+    }
+
+    /// Persist one streamed event into the run's transcript/records and store,
+    /// then enqueue it for replay.
+    fn apply_stream_event(
+        &mut self,
+        event: &BridgeEvent,
+        run_id: &str,
+        session_id: &str,
+    ) -> Result<(), BridgeError> {
+        match &event.payload {
+            BridgeEventPayload::Message { message } => {
+                self.run_mut(run_id)?.transcript.push(message.clone());
+                if let Some(store) = self.store.as_mut() {
+                    let _ = store.append_transcript(message);
+                }
+            }
+            BridgeEventPayload::Control { event } => {
+                self.run_mut(run_id)?
+                    .record
+                    .control_events
+                    .push(event.clone());
+                if let Some(store) = self.store.as_mut() {
+                    let _ = store.put_control_event(session_id, event);
+                }
+            }
+            BridgeEventPayload::Status { status } => {
+                self.transition_run(run_id, status.state.clone(), event.created_at.clone())?;
+                // Persist the updated run record (state/completed_at changed).
+                let run = self.run(run_id)?.record.run.clone();
+                if let Some(store) = self.store.as_mut() {
+                    let _ = store.put_run(&run);
+                }
+            }
+            BridgeEventPayload::Artifact { artifact } => {
+                self.run_mut(run_id)?.artifacts.push(artifact.clone());
+                if let Some(store) = self.store.as_mut() {
+                    let _ = store.put_artifact(session_id, artifact);
+                }
+            }
+            BridgeEventPayload::Usage { signal } => {
+                if let Some(store) = self.store.as_mut() {
+                    let _ = store.put_usage(session_id, signal);
+                }
+            }
+            _ => {}
+        }
+        let managed = self.run_mut(run_id)?;
+        Self::push_bridge_event(managed, event.clone());
+        Ok(())
     }
 
     pub fn reply(
@@ -338,6 +364,9 @@ impl BridgeRuntime {
             follow_up_to_run_id: Some(run_id.to_string()),
             transcript,
             launch_command: None,
+            // Attachments belong to the originating turn; a resume-based follow-up does not
+            // re-materialize them (the agent already has them on disk from the first turn).
+            attachments: Vec::new(),
         };
         if let Some(requested_run_id) = &request.requested_run_id {
             self.ensure_run_id_available(requested_run_id)?;
@@ -964,6 +993,16 @@ fn ids_match(payload_run_id: &str, payload_session_id: &str, event: &BridgeEvent
     payload_run_id == event.run_id && payload_session_id == event.session_id
 }
 
+/// Reject a stream payload whose id/backend check `ok` fails, tagging the
+/// failure with `code`/`message`.
+fn require_stream_match(ok: bool, code: &str, message: &str) -> Result<(), BridgeError> {
+    if ok {
+        Ok(())
+    } else {
+        Err(BridgeError::new(code, message))
+    }
+}
+
 /// Validate one stream payload against its containing event and the bridge adapter's
 /// backend. The device-wide, host-synthesized payloads are never adapter-streamed and
 /// are rejected outright.
@@ -973,72 +1012,54 @@ fn validate_stream_payload(
     backend: AgentBackend,
 ) -> Result<(), BridgeError> {
     match payload {
-        BridgeEventPayload::Message { message } => {
-            if !ids_match(&message.run_id, &message.session_id, event) {
-                return Err(BridgeError::new(
-                    "event_message_mismatch",
-                    "stream message ids do not match containing event",
-                ));
-            }
-        }
-        BridgeEventPayload::Control { event: control } => {
-            if !ids_match(&control.run_id, &control.session_id, event) {
-                return Err(BridgeError::new(
-                    "event_control_mismatch",
-                    "stream control event ids do not match containing event",
-                ));
-            }
-        }
+        BridgeEventPayload::Message { message } => require_stream_match(
+            ids_match(&message.run_id, &message.session_id, event),
+            "event_message_mismatch",
+            "stream message ids do not match containing event",
+        )?,
+        BridgeEventPayload::Control { event: control } => require_stream_match(
+            ids_match(&control.run_id, &control.session_id, event),
+            "event_control_mismatch",
+            "stream control event ids do not match containing event",
+        )?,
         BridgeEventPayload::Usage { signal } => {
-            if !ids_match(&signal.run_id, &signal.session_id, event) {
-                return Err(BridgeError::new(
-                    "event_usage_mismatch",
-                    "stream usage signal ids do not match containing event",
-                ));
-            }
-            if signal.backend != backend {
-                return Err(BridgeError::new(
-                    "event_backend_mismatch",
-                    "stream usage backend does not match bridge adapter",
-                ));
-            }
+            require_stream_match(
+                ids_match(&signal.run_id, &signal.session_id, event),
+                "event_usage_mismatch",
+                "stream usage signal ids do not match containing event",
+            )?;
+            require_stream_match(
+                signal.backend == backend,
+                "event_backend_mismatch",
+                "stream usage backend does not match bridge adapter",
+            )?;
         }
         BridgeEventPayload::PolicyHint { hint } => {
             let run_mismatch = hint
                 .run_id
                 .as_ref()
                 .is_some_and(|run_id| run_id != &event.run_id);
-            if hint.session_id != event.session_id || run_mismatch {
-                return Err(BridgeError::new(
-                    "event_policy_hint_mismatch",
-                    "stream policy hint ids do not match containing event",
-                ));
-            }
+            require_stream_match(
+                hint.session_id == event.session_id && !run_mismatch,
+                "event_policy_hint_mismatch",
+                "stream policy hint ids do not match containing event",
+            )?;
         }
-        BridgeEventPayload::Status { status } => {
-            if status.backend != backend {
-                return Err(BridgeError::new(
-                    "event_backend_mismatch",
-                    "stream status backend does not match bridge adapter",
-                ));
-            }
-        }
-        BridgeEventPayload::Artifact { artifact } => {
-            if !ids_match(&artifact.run_id, &artifact.session_id, event) {
-                return Err(BridgeError::new(
-                    "event_artifact_mismatch",
-                    "stream artifact ids do not match containing event",
-                ));
-            }
-        }
-        BridgeEventPayload::Activity { activity } => {
-            if !ids_match(&activity.run_id, &activity.session_id, event) {
-                return Err(BridgeError::new(
-                    "event_activity_mismatch",
-                    "stream activity ids do not match containing event",
-                ));
-            }
-        }
+        BridgeEventPayload::Status { status } => require_stream_match(
+            status.backend == backend,
+            "event_backend_mismatch",
+            "stream status backend does not match bridge adapter",
+        )?,
+        BridgeEventPayload::Artifact { artifact } => require_stream_match(
+            ids_match(&artifact.run_id, &artifact.session_id, event),
+            "event_artifact_mismatch",
+            "stream artifact ids do not match containing event",
+        )?,
+        BridgeEventPayload::Activity { activity } => require_stream_match(
+            ids_match(&activity.run_id, &activity.session_id, event),
+            "event_activity_mismatch",
+            "stream activity ids do not match containing event",
+        )?,
         BridgeEventPayload::UsageSummary { .. } => {
             // A usage summary is a device-wide, host-synthesized response to a client
             // query — never an event an adapter streams from a run. Seeing one here
@@ -1174,6 +1195,20 @@ fn validate_stream_payload(
                 "a backend stream must not emit device-wide service bus receive results",
             ));
         }
+        BridgeEventPayload::ServiceBusEntities { .. } => {
+            // Device-wide, host-synthesized Service Bus entities listing — never streamed.
+            return Err(BridgeError::new(
+                "event_unexpected_service_bus_entities",
+                "a backend stream must not emit device-wide service bus entity listings",
+            ));
+        }
+        BridgeEventPayload::ServiceBusManage { .. } => {
+            // Device-wide, host-synthesized Service Bus management result — never streamed.
+            return Err(BridgeError::new(
+                "event_unexpected_service_bus_manage",
+                "a backend stream must not emit device-wide service bus management results",
+            ));
+        }
         BridgeEventPayload::GrafanaSummary { .. } => {
             // Device-wide, host-synthesized Grafana summary — never streamed.
             return Err(BridgeError::new(
@@ -1200,6 +1235,34 @@ fn validate_stream_payload(
             return Err(BridgeError::new(
                 "event_unexpected_git_diff",
                 "a backend stream must not emit device-wide git diff",
+            ));
+        }
+        BridgeEventPayload::GitOverview { .. } => {
+            // Device-wide, host-synthesized multi-repo git overview — never streamed.
+            return Err(BridgeError::new(
+                "event_unexpected_git_overview",
+                "a backend stream must not emit device-wide git overviews",
+            ));
+        }
+        BridgeEventPayload::GitBranches { .. } => {
+            // Device-wide, host-synthesized git branch list — never streamed.
+            return Err(BridgeError::new(
+                "event_unexpected_git_branches",
+                "a backend stream must not emit device-wide git branches",
+            ));
+        }
+        BridgeEventPayload::GitOp { .. } => {
+            // Device-wide, host-synthesized git write-op result — never streamed.
+            return Err(BridgeError::new(
+                "event_unexpected_git_op",
+                "a backend stream must not emit device-wide git op results",
+            ));
+        }
+        BridgeEventPayload::FsChanged { .. } => {
+            // Host-pushed filesystem-change notification — never from an adapter stream.
+            return Err(BridgeError::new(
+                "event_unexpected_fs_changed",
+                "a backend stream must not emit device-wide fs-change notifications",
             ));
         }
         BridgeEventPayload::SessionList { .. } => {
@@ -1397,7 +1460,45 @@ mod tests {
                 "--api-key".to_string(),
                 "secret-value".to_string(),
             ]),
+            attachments: Vec::new(),
         }
+    }
+
+    #[test]
+    fn start_materializes_attachments_and_appends_paths_to_task() {
+        use crate::adapter::ChatAttachment;
+        let (allowlist_root, workspace_root) = workspace_paths();
+        let adapter = FakeAdapter::new(CapabilityFlags::claude_local());
+        let probe = adapter.probe();
+        let mut runtime = BridgeRuntime::new(
+            adapter,
+            WorkspaceAllowlist::new(vec![allowlist_root]),
+            BackendAllowlist::new(vec![AgentBackend::ClaudeLocal]),
+        );
+
+        let mut start = request(&workspace_root);
+        start.requested_run_id = Some("run-att".to_string());
+        start.task = "look at this".to_string();
+        start.attachments = vec![ChatAttachment {
+            name: "notes.txt".to_string(),
+            mime_type: Some("text/plain".to_string()),
+            data: "aGVsbG8=".to_string(), // "hello"
+        }];
+        runtime
+            .start(start, "2026-06-21T12:00:00Z")
+            .expect("starts");
+
+        // The adapter received the augmented task: the original prompt plus the path to the
+        // materialized file.
+        let requests = probe.start_requests.lock().unwrap();
+        let started = requests.last().expect("a start request was recorded");
+        assert!(started.task.starts_with("look at this"));
+        assert!(started.task.contains("0-notes.txt"));
+
+        // The file was actually written and decodes back to the original bytes.
+        let dir = crate::attachments::attachment_dir("run-att");
+        assert_eq!(fs::read(dir.join("0-notes.txt")).unwrap(), b"hello");
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

@@ -82,6 +82,7 @@ fn drives_fake_claude_through_full_lifecycle() {
         follow_up_to_run_id: None,
         transcript: Vec::new(),
         launch_command: None,
+        attachments: Vec::new(),
     };
 
     let handle = adapter.start(request).expect("claude run starts");

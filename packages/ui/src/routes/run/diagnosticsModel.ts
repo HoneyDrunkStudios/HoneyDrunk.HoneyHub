@@ -102,17 +102,17 @@ export function computeSessionDiagnostics(
   const recommendations: string[] = [];
   if (sessionTokens >= LONG_SESSION_TOKENS) {
     recommendations.push(
-      `This session has used ${sessionTokens.toLocaleString()} tokens — its context is large. Starting a fresh session can respond faster and cost less.`
+      `This session has used ${sessionTokens.toLocaleString()} tokens; its context is large. Starting a fresh session can respond faster and cost less.`
     );
   }
   if (messages.length >= LONG_SESSION_MESSAGES) {
     recommendations.push(
-      `${messages.length} messages so far — splitting the remaining work into a new session keeps the agent focused.`
+      `${messages.length} messages so far. Splitting the remaining work into a new session keeps the agent focused.`
     );
   }
   if (minutes !== undefined && minutes >= LONG_SESSION_MINUTES) {
     recommendations.push(
-      `This session has run ~${Math.round(minutes)} min — a fresh session avoids carrying stale context.`
+      `This session has run ~${Math.round(minutes)} min. A fresh session avoids carrying stale context.`
     );
   }
 

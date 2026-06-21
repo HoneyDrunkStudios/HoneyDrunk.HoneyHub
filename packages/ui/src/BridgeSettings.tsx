@@ -4,6 +4,8 @@ import { backendLabel } from "./backends";
 import { FolderBrowser } from "./routes/onboarding/FolderBrowser";
 import { ConnectPhone } from "./routes/settings/ConnectPhone";
 import { ConnectorsSettings } from "./routes/settings/ConnectorsSettings";
+import { PlansSettings } from "./routes/settings/PlansSettings";
+import type { Plans } from "./plans";
 import type { WireClient } from "./wire/client";
 import {
   acknowledgeGrant,
@@ -38,6 +40,10 @@ export interface BridgeSettingsProps {
   // events, so it is only mounted when active to avoid cross-talk with the Browse
   // view (both react to the shared `dir_listing` stream). Defaults to true.
   active?: boolean;
+  // The user's subscription plans + a setter. Optional so the component still renders
+  // standalone (tests, an uncontrolled host); when omitted the plans panel is hidden.
+  plans?: Plans;
+  onPlansChange?: (next: Plans) => void;
 }
 
 export function BridgeSettings({
@@ -47,7 +53,9 @@ export function BridgeSettings({
   onChange,
   catalog = [],
   client,
-  active = true
+  active = true,
+  plans,
+  onPlansChange
 }: Readonly<BridgeSettingsProps>) {
   // Detection lookup so each toggle can show whether the CLI was found on PATH.
   const detected = new Map<AgentBackend, BackendCapability>(
@@ -109,6 +117,17 @@ export function BridgeSettings({
     }
   };
 
+  // Extracted from the model-toggle JSX so the change handler isn't a 5th-level
+  // nested function (provider map → model map → onChange → apply callback).
+  const onModelToggle = (
+    backend: AgentBackend,
+    modelId: string,
+    allowed: boolean,
+    modelIds: string[]
+  ) => {
+    apply((prev) => setModelAllowed(prev, backend, modelId, allowed, modelIds));
+  };
+
   return (
     <section className="bridge-settings" aria-label="Settings">
       <h2>Settings</h2>
@@ -166,13 +185,17 @@ export function BridgeSettings({
 
       {client !== undefined && <ConnectPhone client={client} active={active} />}
 
-      <ConnectorsSettings {...(client !== undefined ? { client } : {})} />
+      <ConnectorsSettings {...(client === undefined ? {} : { client })} />
+
+      {plans !== undefined && onPlansChange !== undefined && (
+        <PlansSettings plans={plans} onChange={onPlansChange} />
+      )}
 
       <fieldset>
         <legend>Workspace roots</legend>
         {client !== undefined && active && (
           <>
-            <label>Browse for a folder or a .code-workspace file</label>
+            <p className="ws-browse-label">Browse for a folder or a .code-workspace file</p>
             <FolderBrowser client={client} onAddRoots={addRoots} />
           </>
         )}
@@ -236,15 +259,7 @@ export function BridgeSettings({
                           checked={isModelEnabled(state, backend, model.id)}
                           disabled={!providerOn}
                           onChange={(event) =>
-                            apply((prev) =>
-                              setModelAllowed(
-                                prev,
-                                backend,
-                                model.id,
-                                event.target.checked,
-                                modelIds
-                              )
-                            )
+                            onModelToggle(backend, model.id, event.target.checked, modelIds)
                           }
                         />
                         {model.label}

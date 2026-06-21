@@ -113,6 +113,64 @@ describe("recommendBackend", () => {
     expect(rec.rationale).not.toMatch(/less-used subscription/);
   });
 
+  it("ignores plans when none are set (behavior unchanged)", () => {
+    const withEmptyPlans = recommendBackend(
+      { task: "Fix a typo and reformat a comment", availableBackends: ALL, plans: {} },
+      BUNDLED_SNAPSHOT
+    );
+    const without = recommendBackend(
+      { task: "Fix a typo and reformat a comment", availableBackends: ALL },
+      BUNDLED_SNAPSHOT
+    );
+    expect(withEmptyPlans.backend).toBe("codex.local");
+    expect(withEmptyPlans).toEqual(without);
+  });
+
+  it("lets a flat plan on the pricier backend win a light task over a cheaper metered one", () => {
+    // Codex is cheaper per token (costTier 1) and would normally win a light task;
+    // Claude is pricier (costTier 3). A flat-rate Claude sub makes its requests
+    // effectively free, so it should win — and Codex being explicitly metered does not
+    // help it.
+    const rec = recommendBackend(
+      {
+        task: "Fix a typo and reformat a comment",
+        availableBackends: ALL,
+        plans: { "claude.local": { type: "flat", monthlyUsd: 20 }, "codex.local": { type: "metered" } }
+      },
+      BUNDLED_SNAPSHOT
+    );
+    expect(rec.backend).toBe("claude.local");
+    expect(rec.rationale).toMatch(/favoring your flat-rate Claude Code plan/);
+  });
+
+  it("mentions the flat plan only when it actually flipped the choice", () => {
+    // A flat plan on the backend that would ALREADY win (Codex, the cheapest) changes
+    // nothing, so the rationale must not claim the plan favored it.
+    const noFlip = recommendBackend(
+      {
+        task: "Fix a typo and reformat a comment",
+        availableBackends: ALL,
+        plans: { "codex.local": { type: "flat", monthlyUsd: 10 } }
+      },
+      BUNDLED_SNAPSHOT
+    );
+    expect(noFlip.backend).toBe("codex.local");
+    expect(noFlip.rationale).not.toMatch(/flat-rate/);
+
+    // A flat plan only affects COST mode: on a complex task (capability mode) it must
+    // not flip the winner nor be credited.
+    const complex = recommendBackend(
+      {
+        task: "Redesign and refactor the concurrency model; debug the race condition",
+        availableBackends: ALL,
+        plans: { "codex.local": { type: "flat", monthlyUsd: 10 } }
+      },
+      BUNDLED_SNAPSHOT
+    );
+    expect(complex.backend).toBe("claude.local");
+    expect(complex.rationale).not.toMatch(/flat-rate/);
+  });
+
   it("falls back to the default when no snapshot rate matches", () => {
     const emptyRates = { ...BUNDLED_SNAPSHOT, rates: [] };
     const rec = recommendBackend({ task: "anything", availableBackends: ALL }, emptyRates);

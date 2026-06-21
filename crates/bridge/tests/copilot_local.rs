@@ -45,6 +45,7 @@ fn start_request(workspace: &str, run_id: &str, follow_up: Option<&str>) -> Star
         follow_up_to_run_id: follow_up.map(str::to_string),
         transcript: Vec::new(),
         launch_command: None,
+        attachments: Vec::new(),
     }
 }
 

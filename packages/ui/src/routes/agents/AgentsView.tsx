@@ -75,6 +75,59 @@ export function AgentsView({ client, active, workspaceRoots }: Readonly<AgentsVi
     placeholder = <p className="agents-empty">No agents discovered yet.</p>;
   }
 
+  const emptyCatalog = (
+    <p className="agents-empty">
+      No agent definitions found. Add one under <code>.claude/agents/</code> or{" "}
+      <code>.copilot/agents/</code> (in an allowlisted workspace or your home) and refresh.
+    </p>
+  );
+
+  const catalog =
+    ordered !== undefined && ordered.length > 0 ? (
+      <ul className="agents-list">
+        {ordered.map((agent) => (
+          <li key={agent.id} className="agent-card">
+            <div className="agent-card-head">
+              <span className="agent-name">{agent.name}</span>
+              <span className="agent-backends">
+                {agent.backends.map((binding) => (
+                  <span key={binding.backend} className="agent-backend-badge">
+                    {backendLabel(binding.backend)}
+                  </span>
+                ))}
+              </span>
+            </div>
+            <ul className="agent-bindings">
+              {agent.backends.map((binding) => (
+                <li key={binding.backend} className="agent-binding">
+                  <span className="agent-binding-backend">{backendLabel(binding.backend)}</span>
+                  {binding.model !== undefined && (
+                    <span className="agent-model">{binding.model}</span>
+                  )}
+                  {binding.description !== "" && (
+                    <p className="agent-description">{binding.description}</p>
+                  )}
+                  <p className="agent-source">
+                    <span className="agent-scope">{binding.scope}</span>
+                    {/* A global binding's label is the constant "global" sentinel, which
+                        duplicates the scope — suppress it for global only. Gate on the
+                        scope itself (not label === scope) so a *project* workspace that
+                        happens to be named "global"/"project" still shows its label. */}
+                    {binding.scope !== "global" && (
+                      <span className="agent-workspace">{binding.workspaceLabel}</span>
+                    )}
+                    <span className="agent-path">{binding.sourcePath}</span>
+                  </p>
+                </li>
+              ))}
+            </ul>
+          </li>
+        ))}
+      </ul>
+    ) : (
+      emptyCatalog
+    );
+
   const createAgent = useCallback(
     (input: { name: string; description: string; body: string; model?: string; workspaceRoot?: string }) => {
       setError(undefined);
@@ -102,7 +155,7 @@ export function AgentsView({ client, active, workspaceRoots }: Readonly<AgentsVi
       <p className="agents-scope">
         Discovered from your own <code>.claude/agents/</code> and <code>.copilot/agents/</code>{" "}
         folders in your allowlisted workspaces (and your user-global config, when the host
-        enables it). Create a new Claude agent below — it is written to{" "}
+        enables it). Create a new Claude agent below; it is written to{" "}
         <code>.claude/agents/</code>.
       </p>
 
@@ -111,9 +164,9 @@ export function AgentsView({ client, active, workspaceRoots }: Readonly<AgentsVi
       )}
 
       {notice !== undefined && (
-        <p role="status" className="agents-notice">
+        <output className="agents-notice">
           {notice}
-        </p>
+        </output>
       )}
 
       {error !== undefined && (
@@ -122,55 +175,7 @@ export function AgentsView({ client, active, workspaceRoots }: Readonly<AgentsVi
         </p>
       )}
 
-      {ordered === undefined ? (
-        placeholder
-      ) : ordered.length === 0 ? (
-        <p className="agents-empty">
-          No agent definitions found. Add one under <code>.claude/agents/</code> or{" "}
-          <code>.copilot/agents/</code> (in an allowlisted workspace or your home) and refresh.
-        </p>
-      ) : (
-        <ul className="agents-list">
-          {ordered.map((agent) => (
-            <li key={agent.id} className="agent-card">
-              <div className="agent-card-head">
-                <span className="agent-name">{agent.name}</span>
-                <span className="agent-backends">
-                  {agent.backends.map((binding) => (
-                    <span key={binding.backend} className="agent-backend-badge">
-                      {backendLabel(binding.backend)}
-                    </span>
-                  ))}
-                </span>
-              </div>
-              <ul className="agent-bindings">
-                {agent.backends.map((binding) => (
-                  <li key={binding.backend} className="agent-binding">
-                    <span className="agent-binding-backend">{backendLabel(binding.backend)}</span>
-                    {binding.model !== undefined && (
-                      <span className="agent-model">{binding.model}</span>
-                    )}
-                    {binding.description !== "" && (
-                      <p className="agent-description">{binding.description}</p>
-                    )}
-                    <p className="agent-source">
-                      <span className="agent-scope">{binding.scope}</span>
-                      {/* A global binding's label is the constant "global" sentinel, which
-                          duplicates the scope — suppress it for global only. Gate on the
-                          scope itself (not label === scope) so a *project* workspace that
-                          happens to be named "global"/"project" still shows its label. */}
-                      {binding.scope !== "global" && (
-                        <span className="agent-workspace">{binding.workspaceLabel}</span>
-                      )}
-                      <span className="agent-path">{binding.sourcePath}</span>
-                    </p>
-                  </li>
-                ))}
-              </ul>
-            </li>
-          ))}
-        </ul>
-      )}
+      {ordered === undefined ? placeholder : catalog}
     </section>
   );
 }
@@ -229,7 +234,7 @@ function NewAgentForm({ workspaceRoots, onSubmit }: Readonly<NewAgentFormProps>)
       }}
     >
       <label>
-        Name
+        Name{" "}
         <input
           type="text"
           value={name}
@@ -244,7 +249,7 @@ function NewAgentForm({ workspaceRoots, onSubmit }: Readonly<NewAgentFormProps>)
         </p>
       )}
       <label>
-        Description
+        Description{" "}
         <input
           type="text"
           value={description}
@@ -253,7 +258,7 @@ function NewAgentForm({ workspaceRoots, onSubmit }: Readonly<NewAgentFormProps>)
         />
       </label>
       <label>
-        Model (optional)
+        Model (optional){" "}
         <input
           type="text"
           value={model}
@@ -262,7 +267,7 @@ function NewAgentForm({ workspaceRoots, onSubmit }: Readonly<NewAgentFormProps>)
         />
       </label>
       <label>
-        Where
+        Where{" "}
         <select value={target} onChange={(event) => setTarget(event.target.value)}>
           <option value="">My home (global)</option>
           {workspaceRoots.map((root) => (
@@ -273,7 +278,7 @@ function NewAgentForm({ workspaceRoots, onSubmit }: Readonly<NewAgentFormProps>)
         </select>
       </label>
       <label>
-        Instructions
+        Instructions{" "}
         <textarea
           value={body}
           onChange={(event) => setBody(event.target.value)}

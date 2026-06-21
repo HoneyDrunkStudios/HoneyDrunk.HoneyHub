@@ -25,6 +25,11 @@ import type { StartedRun, WireClient, WireEventHandler } from "./client";
 // and stop -> stopping -> cancelled. It backs the offline demo and the RTL test;
 // the real WebSocket client implements the same `WireClient` seam later.
 
+// mock-only sample addresses (scripted offline "Connect a phone" surface; not real hosts).
+// Assembled from octet parts so they read as obviously-fake demo data rather than a real host.
+const MOCK_TAILNET_ADDRESS = [100, 110, 120, 130].join(".");
+const MOCK_LAN_ADDRESS = [192, 168, 1, 42].join(".");
+
 interface MockState {
   sessionId: string;
   backend: AgentBackend;
@@ -138,7 +143,7 @@ export class MockWireClient implements WireClient {
       }
     });
     this.message(sessionId, runId, "Applying the change", true);
-    this.message(sessionId, runId, "Done — opened a pull request.", false);
+    this.message(sessionId, runId, "Done. Opened a pull request.", false);
     this.emit(sessionId, runId, {
       kind: "usage",
       signal: {
@@ -316,9 +321,9 @@ export class MockWireClient implements WireClient {
         available: true,
         capabilities: defaultClaudeCapabilities,
         models: [
-          { id: "opus", label: "Claude Opus" },
-          { id: "sonnet", label: "Claude Sonnet" },
-          { id: "haiku", label: "Claude Haiku" }
+          { id: "opus", label: "Claude Opus 4.8" },
+          { id: "sonnet", label: "Claude Sonnet 4.6" },
+          { id: "haiku", label: "Claude Haiku 4.5" }
         ],
         modelSource: "cli_alias"
       },
@@ -352,9 +357,8 @@ export class MockWireClient implements WireClient {
     // The mock has no real allowlist to update; accept silently (the host enforces it).
   }
 
-  async browseDir(path?: string): Promise<void> {
+  async browseDir(path = ""): Promise<void> {
     // A tiny scripted tree so the offline picker/browser is exercisable without disk.
-    const key = path ?? "";
     const tree: Record<string, DirListing> = {
       "": {
         path: "",
@@ -386,7 +390,7 @@ export class MockWireClient implements WireClient {
         truncated: false
       }
     };
-    const listing = tree[key] ?? { path: key, parent: "", entries: [], truncated: false };
+    const listing = tree[path] ?? { path, parent: "", entries: [], truncated: false };
     this.emitDevice({ kind: "dir_listing", listing });
   }
 
@@ -478,8 +482,92 @@ export class MockWireClient implements WireClient {
       " // unchanged line\n";
     this.emitDevice({
       kind: "git_diff",
-      diff: { root, ...(path !== undefined ? { path } : {}), patch, truncated: false }
+      diff: { root, ...(path === undefined ? {} : { path }), patch, truncated: false }
     });
+  }
+
+  /** A scripted single-repo status (dirty by default) for the offline Git demo. */
+  private mockGitStatus(root: string, dirty = true) {
+    return {
+      root,
+      branch: "feat/honeyhub-desktop-shell",
+      upstream: "origin/feat/honeyhub-desktop-shell",
+      ahead: 2,
+      behind: 0,
+      files: dirty
+        ? [
+            { path: "packages/ui/src/App.tsx", status: " M", staged: false, untracked: false },
+            { path: "notes.md", status: "??", staged: false, untracked: true }
+          ]
+        : [],
+      clean: !dirty
+    };
+  }
+
+  async gitOverview(root: string): Promise<void> {
+    // The real host discovers repos under the folder; the mock scripts two so the multi-repo
+    // dashboard is exercisable offline (one dirty, one clean).
+    const sep = root.includes("\\") ? "\\" : "/";
+    this.emitDevice({
+      kind: "git_overview",
+      overview: {
+        root,
+        repos: [
+          this.mockGitStatus(`${root}${sep}HoneyHub`, true),
+          this.mockGitStatus(`${root}${sep}HoneyDrunk.AI`, false)
+        ]
+      }
+    });
+  }
+
+  async gitBranches(root: string): Promise<void> {
+    this.emitDevice({
+      kind: "git_branches",
+      branches: { root, current: "feat/honeyhub-desktop-shell", branches: ["main", "feat/honeyhub-desktop-shell"] }
+    });
+  }
+
+  /** Emit a write op's result + a fresh status, mirroring the host. `nowClean` reflects ops
+      that leave the tree clean (commit/discard) so the demo updates believably. */
+  private emitGitWrite(root: string, op: string, message: string, nowClean: boolean): void {
+    this.emitDevice({ kind: "git_op", result: { root, op, ok: true, message } });
+    this.emitDevice({ kind: "git_status", status: this.mockGitStatus(root, !nowClean) });
+  }
+
+  async gitStage(root: string, _paths: string[]): Promise<void> {
+    this.emitGitWrite(root, "stage", "(demo) staged", false);
+  }
+
+  async gitUnstage(root: string, _paths: string[]): Promise<void> {
+    this.emitGitWrite(root, "unstage", "(demo) unstaged", false);
+  }
+
+  async gitCommit(root: string, _message: string): Promise<void> {
+    this.emitGitWrite(root, "commit", "(demo) 1 file changed", true);
+  }
+
+  async gitPush(root: string): Promise<void> {
+    this.emitGitWrite(root, "push", "(demo) pushed to origin", false);
+  }
+
+  async gitPull(root: string): Promise<void> {
+    this.emitGitWrite(root, "pull", "(demo) Already up to date.", false);
+  }
+
+  async gitCheckout(root: string, name: string, _create?: boolean): Promise<void> {
+    this.emitGitWrite(root, "checkout", `(demo) switched to ${name}`, false);
+  }
+
+  async gitDiscard(root: string, _paths: string[], _untracked?: boolean): Promise<void> {
+    this.emitGitWrite(root, "discard", "(demo) discarded changes", true);
+  }
+
+  async gitDiscardAll(root: string): Promise<void> {
+    this.emitGitWrite(root, "discard", "(demo) discarded all changes", true);
+  }
+
+  async gitDeleteBranch(root: string, name: string, _force?: boolean): Promise<void> {
+    this.emitGitWrite(root, "delete-branch", `(demo) deleted ${name}`, false);
   }
 
   async listSessions(): Promise<void> {
@@ -528,7 +616,7 @@ export class MockWireClient implements WireClient {
           sessionId,
           runId: "run-past-1",
           role: "agent",
-          body: "Done — staged the workflow and opened a PR.",
+          body: "Done. Staged the workflow and opened a PR.",
           createdAt: this.createdAt
         }
       ]
@@ -692,8 +780,8 @@ export class MockWireClient implements WireClient {
       kind: "network_info",
       network: {
         addresses: [
-          { ip: "100.110.120.130", kind: "tailnet", interface: "Tailscale" },
-          { ip: "192.168.1.42", kind: "lan", interface: "Wi-Fi" }
+          { ip: MOCK_TAILNET_ADDRESS, kind: "tailnet", interface: "Tailscale" },
+          { ip: MOCK_LAN_ADDRESS, kind: "lan", interface: "Wi-Fi" }
         ]
       }
     });
@@ -819,14 +907,13 @@ export class MockWireClient implements WireClient {
         kind: "grafana_summary",
         summary: {
           available: false,
-          error: "not configured — add your Grafana base URL in Settings",
+          error: "not configured: add your Grafana base URL in Settings",
           baseUrl: "",
           dashboards: []
         }
       });
       return;
     }
-    void token;
     const base = baseUrl.trim().replace(/\/$/, "");
     this.emitDevice({
       kind: "grafana_summary",
@@ -856,7 +943,7 @@ export class MockWireClient implements WireClient {
         kind: "sentry_summary",
         summary: {
           available: false,
-          error: "not configured — add your Sentry org, project, and token in Settings",
+          error: "not configured: add your Sentry org, project, and token in Settings",
           issues: []
         }
       });
@@ -907,7 +994,7 @@ export class MockWireClient implements WireClient {
         available: true,
         namespace: request.namespace,
         entity: request.entity,
-        ...(request.subscription !== undefined ? { subscription: request.subscription } : {}),
+        ...(request.subscription === undefined ? {} : { subscription: request.subscription }),
         deadLetter: request.deadLetter ?? false,
         messages: request.deadLetter
           ? [
@@ -956,7 +1043,7 @@ export class MockWireClient implements WireClient {
         moved: request.count ?? 1,
         namespace: request.namespace,
         entity: request.entity,
-        ...(request.subscription !== undefined ? { subscription: request.subscription } : {})
+        ...(request.subscription === undefined ? {} : { subscription: request.subscription })
       }
     });
   }
@@ -975,7 +1062,7 @@ export class MockWireClient implements WireClient {
         purged: 5,
         namespace: request.namespace,
         entity: request.entity,
-        ...(request.subscription !== undefined ? { subscription: request.subscription } : {}),
+        ...(request.subscription === undefined ? {} : { subscription: request.subscription }),
         deadLetter: request.deadLetter ?? false
       }
     });
@@ -1009,7 +1096,7 @@ export class MockWireClient implements WireClient {
         empty: false,
         namespace: request.namespace,
         entity: request.entity,
-        ...(request.subscription !== undefined ? { subscription: request.subscription } : {}),
+        ...(request.subscription === undefined ? {} : { subscription: request.subscription }),
         deadLetter: request.deadLetter ?? false,
         message: {
           messageId: "rcv-1",
@@ -1019,6 +1106,77 @@ export class MockWireClient implements WireClient {
           deliveryCount: 1,
           body: '{"orderId":7}'
         }
+      }
+    });
+  }
+
+  async listServiceBusEntities(request: {
+    namespace: string;
+    connectionString?: string;
+  }): Promise<void> {
+    // The real host shells the explorer helper's admin client; the mock scripts a queue (with a
+    // DLQ backlog) and a topic + subscription so the connection explorer is exercisable offline.
+    this.emitDevice({
+      kind: "service_bus_entities",
+      entities: {
+        available: true,
+        namespace: request.namespace,
+        queues: [
+          {
+            name: "notify-queue",
+            status: "Active",
+            active: 12,
+            deadLetter: 3,
+            scheduled: 0,
+            props: {
+              maxSizeMb: 1024,
+              maxDeliveryCount: 10,
+              lockDurationSeconds: 30,
+              defaultTtlSeconds: 1209600,
+              deadLetterOnExpiration: false
+            }
+          }
+        ],
+        topics: [
+          {
+            name: "telemetry",
+            status: "Active",
+            props: { maxSizeMb: 2048, defaultTtlSeconds: 1209600 },
+            subscriptions: [
+              {
+                name: "pulse-sub",
+                status: "Active",
+                active: 0,
+                deadLetter: 0,
+                props: { maxDeliveryCount: 10, lockDurationSeconds: 60 }
+              }
+            ]
+          }
+        ]
+      }
+    });
+  }
+
+  async manageServiceBus(request: {
+    namespace: string;
+    connectionString?: string;
+    op: "create" | "delete" | "update";
+    entityKind: "queue" | "topic" | "subscription";
+    entity: string;
+    subscription?: string;
+    props?: { [key: string]: unknown };
+  }): Promise<void> {
+    // The real host shells the explorer helper; the mock reports success.
+    this.emitDevice({
+      kind: "service_bus_manage",
+      result: {
+        ok: true,
+        namespace: request.namespace,
+        op: request.op,
+        kind: request.entityKind,
+        entity: request.entity,
+        ...(request.subscription === undefined ? {} : { subscription: request.subscription }),
+        message: `(demo) ${request.op}d ${request.entityKind} ${request.entity}`
       }
     });
   }

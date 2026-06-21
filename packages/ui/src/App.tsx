@@ -1,7 +1,21 @@
-import { useEffect, useRef, useState, type ReactElement } from "react";
-import type { AgentBackend, BackendCapability, Notification } from "@honeydrunk/honeyhub-types";
+import { useCallback, useEffect, useRef, useState, type ReactElement } from "react";
+import type { AgentBackend, BackendCapability } from "@honeydrunk/honeyhub-types";
 import { BridgeSettings } from "./BridgeSettings";
 import { NotificationList } from "./NotificationList";
+import { NotificationsSettings } from "./NotificationsSettings";
+import {
+  loadNotificationFeed,
+  loadNotificationPrefs,
+  mergeFeed,
+  saveNotificationFeed,
+  saveNotificationPrefs,
+  unreadCount,
+  type AppNotification,
+  type NotificationPrefs
+} from "./notifications";
+import { useNotifications } from "./useNotifications";
+import { ThemeSettings } from "./ThemeSettings";
+import { applyTheme, loadTheme, saveTheme, type ThemeId } from "./theme";
 import { RunScreen } from "./routes/run/RunScreen";
 import { SpendView } from "./routes/spend/SpendView";
 import { CoachingView } from "./routes/coaching/CoachingView";
@@ -18,7 +32,7 @@ import { GoalsView } from "./routes/goals/GoalsView";
 import { GoalOrchestrator } from "./routes/goals/goalOrchestrator";
 import { orderGoals, type GoalsState } from "./routes/goals/goalsModel";
 import { enabledIds, loadConnectorPrefs } from "./connectors";
-import { ChatDock } from "./routes/chat/ChatDock";
+import { ChatSidebar, SIDEBAR_SESSION_ID } from "./routes/chat/ChatSidebar";
 import { HubView } from "./routes/hub/HubView";
 import { PlanView } from "./routes/plan/PlanView";
 import { WorkView } from "./routes/work/WorkView";
@@ -27,8 +41,13 @@ import { JobsView } from "./routes/jobs/JobsView";
 import { GitView } from "./routes/git/GitView";
 import { UpdatesView } from "./routes/updates/UpdatesView";
 import { Onboarding } from "./routes/onboarding/Onboarding";
-import { emptyBridgeSettings, type BridgeSettingsState } from "./settingsModel";
+import {
+  emptyBridgeSettings,
+  setDefaultWorkspaceRoot,
+  type BridgeSettingsState
+} from "./settingsModel";
 import { loadProviderPrefs, saveProviderPrefs } from "./providerPrefs";
+import { loadPlans, savePlans, type Plans } from "./plans";
 import { MockWireClient } from "./wire/mockClient";
 import { bridgeWsUrl, WebSocketWireClient } from "./wire/webSocketClient";
 import type { WireClient } from "./wire/client";
@@ -108,6 +127,13 @@ export function App({ client }: AppProps = {}) {
   // backends are enabled. Seeds the bridge settings' backend allowlist.
   const [persisted] = useState(loadProviderPrefs);
   const [onboarded, setOnboarded] = useState(persisted.onboarded);
+  // Subscription plans (cost-optimizer input). Loaded once, held here, and passed to the
+  // run screen so the router can treat flat-rate subs as effectively free. Persisted on
+  // change, like provider prefs.
+  const [plans, setPlans] = useState<Plans>(loadPlans);
+  // Whether the right-hand chat sidebar is expanded (vs collapsed to a slim rail). Owned
+  // here so the shell grid can size its column to match. Hidden entirely on the Chat tab.
+  const [chatOpen, setChatOpen] = useState(true);
   // Bridge settings are owned here so the run screen can read the workspace
   // allowlist the operator edits in Bridge settings. The backend allowlist is
   // seeded from the persisted provider selection.
@@ -115,15 +141,25 @@ export function App({ client }: AppProps = {}) {
     ...emptyBridgeSettings,
     backends: persisted.enabled,
     enabledModels: persisted.enabledModels,
-    workspaceRoots: persisted.workspaceRoots
+    workspaceRoots: persisted.workspaceRoots,
+    ...(persisted.defaultWorkspaceRoot === undefined
+      ? {}
+      : { defaultWorkspaceRoot: persisted.defaultWorkspaceRoot })
   }));
   // The detected backend catalog (which CLIs are installed + their models), fetched
   // from the bridge on connect. Drives onboarding + the run-screen pickers.
   const [catalog, setCatalog] = useState<BackendCapability[]>([]);
   const [detecting, setDetecting] = useState(true);
-  // Notifications arrive from the bridge once the transport surfaces them; the
-  // surface itself is ready now.
-  const [notifications] = useState<Notification[]>([]);
+  // Notification feed + per-type prefs (the notification engine fires into the feed and OS
+  // toasts). Persisted across sessions.
+  const [notifications, setNotifications] = useState<AppNotification[]>(loadNotificationFeed);
+  const [notificationPrefs, setNotificationPrefs] = useState<NotificationPrefs>(loadNotificationPrefs);
+  // The active theme (applied via a data-theme attribute on <html>). Applied on boot in
+  // main.tsx; changes here re-apply + persist.
+  const [theme, setTheme] = useState<ThemeId>(loadTheme);
+  // The enabled connectors (work + observability), re-read when the view changes so editing
+  // them in Settings → Connectors re-points the notification poll.
+  const [connectorPrefs, setConnectorPrefs] = useState(loadConnectorPrefs);
   // Every run's live summary (status/model/cost), aggregated from the bridge event
   // stream — the active-runs dashboard. Runs are registered at launch (for task +
   // backend) and updated as their events arrive.
@@ -182,9 +218,84 @@ export function App({ client }: AppProps = {}) {
       onboarded,
       enabled: settings.backends,
       enabledModels: settings.enabledModels,
-      workspaceRoots: settings.workspaceRoots
+      workspaceRoots: settings.workspaceRoots,
+      ...(settings.defaultWorkspaceRoot === undefined
+        ? {}
+        : { defaultWorkspaceRoot: settings.defaultWorkspaceRoot })
     });
-  }, [onboarded, settings.backends, settings.enabledModels, settings.workspaceRoots]);
+  }, [
+    onboarded,
+    settings.backends,
+    settings.enabledModels,
+    settings.workspaceRoots,
+    settings.defaultWorkspaceRoot
+  ]);
+
+  // Persist subscription plans whenever they change, so the cost optimizer keeps
+  // reflecting what the user actually pays across relaunches.
+  useEffect(() => {
+    savePlans(plans);
+  }, [plans]);
+
+  // Persist the notification feed + prefs.
+  useEffect(() => {
+    saveNotificationFeed(notifications);
+  }, [notifications]);
+  useEffect(() => {
+    saveNotificationPrefs(notificationPrefs);
+  }, [notificationPrefs]);
+
+  // Apply + persist the theme whenever it changes.
+  useEffect(() => {
+    applyTheme(theme);
+    saveTheme(theme);
+  }, [theme]);
+
+  // Opening the Alerts view marks everything read (so the unread badge clears when you look).
+  // Idempotent — only rewrites when there's actually an unread item, so it can't loop.
+  useEffect(() => {
+    if (view === "notifications") {
+      setNotifications((prev) =>
+        prev.some((item) => !item.read) ? prev.map((item) => ({ ...item, read: true })) : prev
+      );
+    }
+  }, [view, notifications]);
+
+  // Re-read the enabled connectors when the view changes (so editing them in Settings →
+  // Connectors re-points the notification engine's poll without a reload).
+  useEffect(() => {
+    setConnectorPrefs(loadConnectorPrefs());
+  }, [view]);
+
+  // Whether the user is actively looking at a chat thread (so a finish there is silent). A
+  // thread is "active" only when its surface is visible AND the window is focused.
+  const isThreadActive = useCallback(
+    (sessionId: string): boolean => {
+      if (typeof document !== "undefined" && typeof document.hasFocus === "function" && !document.hasFocus()) {
+        return false;
+      }
+      if (sessionId === "session-1") {
+        return view === "run";
+      }
+      if (sessionId === SIDEBAR_SESSION_ID) {
+        return view !== "run" && chatOpen;
+      }
+      return false;
+    },
+    [view, chatOpen]
+  );
+
+  // The notification engine: fires OS toasts + the in-app feed for chat-finished, work
+  // assigned/mentioned, PR-review, and new dead-letters.
+  useNotifications({
+    client: wireClient,
+    prefs: notificationPrefs,
+    workSources: enabledIds(connectorPrefs, "work"),
+    serviceBusEnabled: enabledIds(connectorPrefs, "observability").includes("servicebus"),
+    chatSessionIds: ["session-1", SIDEBAR_SESSION_ID],
+    isThreadActive,
+    onNotifications: (items) => setNotifications((prev) => mergeFeed(prev, items))
+  });
 
   // Sync the picked repo locations to the bridge so file reads (and launches) are
   // scoped to them. Re-sent whenever the transport changes (connect) or the roots do.
@@ -192,8 +303,9 @@ export function App({ client }: AppProps = {}) {
     void wireClient.setWorkspaceRoots(settings.workspaceRoots).catch(() => undefined);
   }, [wireClient, settings.workspaceRoots]);
 
-  const completeOnboarding = (enabled: AgentBackend[], roots: string[]) => {
+  const completeOnboarding = (enabled: AgentBackend[], roots: string[], chosenPlans: Plans) => {
     setSettings((prev) => ({ ...prev, backends: enabled, workspaceRoots: roots }));
+    setPlans(chosenPlans);
     setOnboarded(true);
   };
 
@@ -230,6 +342,7 @@ export function App({ client }: AppProps = {}) {
     }
   };
 
+  const unread = unreadCount(notifications);
   const renderNav = (items: NavItem[]) =>
     items.map((item) => (
       <button
@@ -243,6 +356,11 @@ export function App({ client }: AppProps = {}) {
           {item.icon}
         </span>
         <span className="nav-label">{item.label}</span>
+        {item.view === "notifications" && unread > 0 && (
+          <span className="nav-badge" aria-label={`${unread} unread`}>
+            {unread}
+          </span>
+        )}
       </button>
     ));
 
@@ -256,13 +374,20 @@ export function App({ client }: AppProps = {}) {
         detecting={detecting}
         initialEnabled={settings.backends}
         initialRoots={settings.workspaceRoots}
+        initialPlans={plans}
         onComplete={completeOnboarding}
       />
     );
   }
 
+  // The chat sidebar shows on every page except the dedicated Chat tab (where it would
+  // double the chat). The shell grid grows a third column for it when shown.
+  const chatHidden = view === "run";
+  const chatColumnClass = chatOpen ? "chat-open" : "chat-collapsed";
+  const shellClass = chatHidden ? "app-shell" : `app-shell ${chatColumnClass}`;
+
   return (
-    <div className="app-shell">
+    <div className={shellClass}>
       <aside className="sidebar" aria-label="HoneyHub navigation">
         <div className="sidebar-brand">
           <span className="brand-mark" aria-hidden="true">
@@ -328,6 +453,13 @@ export function App({ client }: AppProps = {}) {
               availableBackends={settings.backends}
               catalog={catalog}
               enabledModels={settings.enabledModels}
+              plans={plans}
+              {...(settings.defaultWorkspaceRoot === undefined
+                ? {}
+                : { defaultWorkspaceRoot: settings.defaultWorkspaceRoot })}
+              onSetDefaultWorkspaceRoot={(root) =>
+                setSettings((prev) => setDefaultWorkspaceRoot(prev, root))
+              }
               onAddWorkspaceRoots={(paths) =>
                 setSettings((prev) => {
                   const next = [...prev.workspaceRoots];
@@ -379,6 +511,9 @@ export function App({ client }: AppProps = {}) {
               client={wireClient}
               workspaceRoots={settings.workspaceRoots}
               active={view === "browse"}
+              {...(settings.defaultWorkspaceRoot === undefined
+                ? {}
+                : { defaultWorkspaceRoot: settings.defaultWorkspaceRoot })}
             />
           </div>
 
@@ -387,6 +522,9 @@ export function App({ client }: AppProps = {}) {
               client={wireClient}
               active={view === "git"}
               workspaceRoots={settings.workspaceRoots}
+              {...(settings.defaultWorkspaceRoot === undefined
+                ? {}
+                : { defaultWorkspaceRoot: settings.defaultWorkspaceRoot })}
             />
           </div>
 
@@ -413,7 +551,11 @@ export function App({ client }: AppProps = {}) {
               catalog={catalog}
               client={wireClient}
               active={view === "settings"}
+              plans={plans}
+              onPlansChange={setPlans}
             />
+            <NotificationsSettings prefs={notificationPrefs} onChange={setNotificationPrefs} />
+            <ThemeSettings theme={theme} onChange={setTheme} />
           </div>
 
           <div hidden={view !== "updates"}>
@@ -421,19 +563,49 @@ export function App({ client }: AppProps = {}) {
           </div>
 
           <div hidden={view !== "notifications"}>
-            <NotificationList notifications={notifications} />
+            <NotificationList
+              notifications={notifications}
+              active={view === "notifications"}
+              onMarkAllRead={() =>
+                setNotifications((prev) => prev.map((item) => ({ ...item, read: true })))
+              }
+              onClear={() => setNotifications([])}
+            />
           </div>
         </div>
       </main>
 
-      {/* Floating quick-chat: always mounted (so the conversation survives tab switches),
-          hidden on the full Chat tab where it would just double up. */}
-      <ChatDock
-        client={wireClient}
-        hidden={view === "run"}
-        availableBackends={settings.backends}
-        workspaceRoots={settings.workspaceRoots}
-        catalog={catalog}
+      {/* Right-hand chat sidebar: the full chat (history, model picker, attachments) on
+          every page. Always mounted (so the conversation survives a collapse or a tab
+          switch), hidden on the full Chat tab where it would just double up. */}
+      <ChatSidebar
+        hidden={chatHidden}
+        open={chatOpen}
+        onToggle={() => setChatOpen((prev) => !prev)}
+        run={{
+          client: wireClient,
+          workspaceRoots: settings.workspaceRoots,
+          availableBackends: settings.backends,
+          catalog,
+          enabledModels: settings.enabledModels,
+          plans,
+          ...(settings.defaultWorkspaceRoot === undefined
+            ? {}
+            : { defaultWorkspaceRoot: settings.defaultWorkspaceRoot }),
+          onSetDefaultWorkspaceRoot: (root) =>
+            setSettings((prev) => setDefaultWorkspaceRoot(prev, root)),
+          onAddWorkspaceRoots: (paths) =>
+            setSettings((prev) => {
+              const next = [...prev.workspaceRoots];
+              for (const path of paths) {
+                if (!next.includes(path)) {
+                  next.push(path);
+                }
+              }
+              return { ...prev, workspaceRoots: next };
+            }),
+          onRunStarted: (init) => setRuns((prev) => registerRun(prev, init))
+        }}
       />
     </div>
   );

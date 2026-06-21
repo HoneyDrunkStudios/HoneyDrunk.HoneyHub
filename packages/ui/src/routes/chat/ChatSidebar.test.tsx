@@ -1,0 +1,56 @@
+import { fireEvent, render, screen } from "@testing-library/react";
+import { describe, expect, it, vi } from "vitest";
+import { MockWireClient } from "../../wire/mockClient";
+import { ChatSidebar, type ChatSidebarProps } from "./ChatSidebar";
+
+function renderSidebar(overrides: Partial<ChatSidebarProps> = {}) {
+  const client = new MockWireClient();
+  const onToggle = overrides.onToggle ?? vi.fn();
+  render(
+    <ChatSidebar
+      hidden={overrides.hidden ?? false}
+      open={overrides.open ?? true}
+      onToggle={onToggle}
+      run={{
+        client,
+        availableBackends: ["claude.local"],
+        workspaceRoots: ["/repo"],
+        catalog: [],
+        ...overrides.run
+      }}
+    />
+  );
+  return { client, onToggle };
+}
+
+describe("ChatSidebar", () => {
+  it("renders the full chat and streams an agent reply", async () => {
+    renderSidebar();
+    fireEvent.change(screen.getByLabelText("Task"), { target: { value: "hello" } });
+    fireEvent.click(screen.getByRole("button", { name: "Start session" }));
+
+    expect(
+      await screen.findByText("I can take that on. Which file should I change?")
+    ).toBeTruthy();
+  });
+
+  it("is hidden on the Chat tab", () => {
+    renderSidebar({ hidden: true });
+    const sidebar = document.querySelector(".chat-sidebar");
+    expect(sidebar?.getAttribute("aria-hidden")).toBe("true");
+    expect(sidebar?.className).toContain("is-hidden");
+  });
+
+  it("collapses to a rail and exposes an open control", () => {
+    // Collapsed: the panel is hidden and a rail "Open chat" button shows.
+    renderSidebar({ open: false });
+    expect(screen.getByRole("button", { name: "Open chat" })).toBeTruthy();
+  });
+
+  it("toggles via the collapse control", () => {
+    const onToggle = vi.fn();
+    renderSidebar({ open: true, onToggle });
+    fireEvent.click(screen.getByRole("button", { name: "Collapse chat" }));
+    expect(onToggle).toHaveBeenCalledTimes(1);
+  });
+});

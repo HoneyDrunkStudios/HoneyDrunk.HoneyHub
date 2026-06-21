@@ -12,9 +12,9 @@
 //! A client presents its pairing token (packet 05) as the `token` query parameter
 //! on the WebSocket URL; an unknown/revoked token is rejected at the handshake.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -27,9 +27,16 @@ use axum::Router;
 use futures_util::{SinkExt, StreamExt};
 use honeyhub_bridge::clock::now_rfc3339;
 use honeyhub_bridge::{BridgeError, BridgeEvent, ClientCommand, PairingRegistry, WireFrame};
+use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use tokio::net::TcpListener;
 use tokio::sync::{broadcast, mpsc, Mutex};
 use tower_http::services::ServeDir;
+
+/// Debounce window for coalescing a burst of filesystem events into one notification.
+const FS_DEBOUNCE: Duration = Duration::from_millis(400);
+/// Cap on paths carried in one `fs_changed` event, so a huge operation (e.g. a checkout
+/// touching thousands of files) never floods the wire.
+const FS_PATHS_CAP: usize = 64;
 
 /// Default poll cadence for draining the runtime's event stream.
 pub const DEFAULT_POLL_INTERVAL: Duration = Duration::from_millis(80);
@@ -40,6 +47,10 @@ struct Host {
     runtime: Mutex<honeyhub_bridge::BridgeRuntime>,
     active_runs: Mutex<std::collections::HashSet<String>>,
     events: broadcast::Sender<BridgeEvent>,
+    /// The live filesystem watcher (the recommended OS-native backend) plus the roots it is
+    /// currently watching. Re-pointed whenever the workspace allowlist changes. `None` until
+    /// the watcher is installed in `serve`, or if the platform watcher could not start.
+    watcher: Mutex<Option<(RecommendedWatcher, Vec<String>)>>,
 }
 
 struct AppState {
@@ -77,6 +88,7 @@ pub async fn serve(
         runtime: Mutex::new(runtime),
         active_runs: Mutex::new(std::collections::HashSet::new()),
         events: events_tx,
+        watcher: Mutex::new(None),
     });
 
     {
@@ -89,6 +101,10 @@ pub async fn serve(
             }
         });
     }
+
+    // Install the filesystem watcher so Browse + Git update near-instantly on disk changes
+    // (debounced) instead of polling.
+    install_fs_watcher(&host).await;
 
     let state = AppState {
         host,
@@ -117,6 +133,98 @@ async fn ws_handler(
         return (StatusCode::UNAUTHORIZED, "invalid pairing token").into_response();
     }
     upgrade.on_upgrade(move |socket| handle_socket(socket, state.host))
+}
+
+/// Directories whose churn is build/VCS noise rather than user edits: filesystem events anywhere
+/// under one of these are dropped before debouncing, so generated output and VCS internals do not
+/// flood `fs_changed` during builds/checkouts.
+const FS_IGNORED_DIRS: &[&str] = &[".git", "node_modules", "target", "dist"];
+
+/// True when any component of `path` is one of [`FS_IGNORED_DIRS`].
+fn is_noise_path(path: &Path) -> bool {
+    path.components().any(|component| {
+        matches!(
+            component,
+            std::path::Component::Normal(name)
+                if name.to_str().is_some_and(|name| FS_IGNORED_DIRS.contains(&name))
+        )
+    })
+}
+
+/// Install the OS-native filesystem watcher and a debounce task that coalesces raw events
+/// into `fs_changed` broadcasts. The watcher handle is stored on the host so the workspace
+/// allowlist changes can re-point it. Best-effort: if the platform watcher can't start,
+/// live updates are simply disabled (the cockpit still works).
+async fn install_fs_watcher(host: &Arc<Host>) {
+    let (raw_tx, mut raw_rx) = mpsc::unbounded_channel::<String>();
+    let watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
+        if let Ok(event) = res {
+            for path in event.paths {
+                // Skip build/VCS churn (a `git checkout`, `npm install`, or `cargo build` would
+                // otherwise flood the cockpit with thousands of irrelevant events).
+                if is_noise_path(&path) {
+                    continue;
+                }
+                let _ = raw_tx.send(path.to_string_lossy().to_string());
+            }
+        }
+    });
+    let Ok(watcher) = watcher else {
+        eprintln!("bridge-host: filesystem watcher unavailable; live updates disabled");
+        return;
+    };
+    *host.watcher.lock().await = Some((watcher, Vec::new()));
+
+    {
+        let host = Arc::clone(host);
+        tokio::spawn(async move {
+            let mut pending: HashSet<String> = HashSet::new();
+            let mut ticker = tokio::time::interval(FS_DEBOUNCE);
+            loop {
+                tokio::select! {
+                    received = raw_rx.recv() => match received {
+                        Some(path) => {
+                            pending.insert(path);
+                        }
+                        None => break,
+                    },
+                    _ = ticker.tick() => {
+                        if !pending.is_empty() {
+                            let mut paths: Vec<String> = pending.drain().collect();
+                            paths.truncate(FS_PATHS_CAP);
+                            let _ = host
+                                .events
+                                .send(BridgeEvent::fs_changed(new_id(), now_rfc3339(), paths));
+                        }
+                    }
+                }
+            }
+        });
+    }
+
+    let roots = host.runtime.lock().await.workspace_roots();
+    apply_watch(host, roots).await;
+}
+
+/// Re-point the watcher at `roots`: unwatch the previous set, watch each existing root
+/// recursively. Called on startup and whenever the workspace allowlist changes.
+async fn apply_watch(host: &Arc<Host>, roots: Vec<String>) {
+    let mut guard = host.watcher.lock().await;
+    let Some((watcher, watched)) = guard.as_mut() else {
+        return;
+    };
+    for old in watched.drain(..) {
+        let _ = watcher.unwatch(Path::new(&old));
+    }
+    for root in roots {
+        if Path::new(&root).exists()
+            && watcher
+                .watch(Path::new(&root), RecursiveMode::Recursive)
+                .is_ok()
+        {
+            watched.push(root);
+        }
+    }
 }
 
 async fn poll_active_runs(host: &Arc<Host>) {
@@ -242,16 +350,18 @@ async fn handle_command(
     outbound_tx: &mpsc::Sender<WireFrame>,
 ) {
     let mut to_register: Option<String> = None;
+    // Set when the workspace allowlist changes, so the watcher is re-pointed after the
+    // runtime lock is released.
+    let mut rewatch: Option<Vec<String>> = None;
     let result: Result<Option<Vec<BridgeEvent>>, BridgeError> = {
         let mut runtime = host.runtime.lock().await;
         match command {
-            ClientCommand::Start { request } => match runtime.start(*request, now_rfc3339()) {
-                Ok(handle) => {
+            ClientCommand::Start { request } => {
+                runtime.start(*request, now_rfc3339()).map(|handle| {
                     to_register = Some(handle.run_id);
-                    Ok(None)
-                }
-                Err(error) => Err(error),
-            },
+                    None
+                })
+            }
             ClientCommand::Reply { run_id, text } => {
                 runtime.reply(&run_id, &text, now_rfc3339()).map(|_| None)
             }
@@ -274,84 +384,51 @@ async fn handle_command(
                     hints,
                 )]))
             }
-            ClientCommand::DiscoverAgents { workspace_root } => {
-                match runtime.discover_agents(workspace_root.as_deref()) {
-                    Ok(agents) => Ok(Some(vec![BridgeEvent::agent_catalog(
-                        new_id(),
-                        now_rfc3339(),
-                        agents,
-                    )])),
-                    Err(error) => Err(error),
-                }
-            }
+            ClientCommand::DiscoverAgents { workspace_root } => runtime
+                .discover_agents(workspace_root.as_deref())
+                .map(|agents| one(BridgeEvent::agent_catalog(new_id(), now_rfc3339(), agents))),
             ClientCommand::DiscoverBackends => Ok(Some(vec![BridgeEvent::backend_catalog(
                 new_id(),
                 now_rfc3339(),
                 honeyhub_bridge::detect_default_backends(),
             )])),
             ClientCommand::SetWorkspaceRoots { roots } => {
+                rewatch = Some(roots.clone());
                 runtime.set_workspace_roots(roots);
                 Ok(None)
             }
-            ClientCommand::BrowseDir { path } => {
-                match honeyhub_bridge::browse_dir(path.as_deref()) {
-                    Ok(listing) => Ok(Some(vec![BridgeEvent::dir_listing(
-                        new_id(),
-                        now_rfc3339(),
-                        listing,
-                    )])),
-                    Err(error) => Err(error),
-                }
-            }
+            ClientCommand::BrowseDir { path } => honeyhub_bridge::browse_dir(path.as_deref())
+                .map(|listing| one(BridgeEvent::dir_listing(new_id(), now_rfc3339(), listing))),
             ClientCommand::ReadFile { path } => {
                 // Gate file *contents* to the user's allowlisted roots (browse lists
                 // names unscoped, but reading content requires an added root).
-                if !runtime.workspace_allows(&path) {
-                    Err(BridgeError::new(
-                        "workspace_not_allowed",
-                        "file is outside an allowlisted workspace root",
-                    ))
-                } else {
-                    match honeyhub_bridge::read_file(&path) {
-                        Ok(file) => Ok(Some(vec![BridgeEvent::file_contents(
-                            new_id(),
-                            now_rfc3339(),
-                            file,
-                        )])),
-                        Err(error) => Err(error),
-                    }
-                }
+                require(runtime.workspace_allows(&path), "file")
+                    .and_then(|()| honeyhub_bridge::read_file(&path))
+                    .map(|file| one(BridgeEvent::file_contents(new_id(), now_rfc3339(), file)))
             }
             ClientCommand::ResolveWorkspaceFile { path } => {
                 // Unscoped like browse: the user selects a .code-workspace to *add* its
                 // repos as roots, so it must be readable before those roots exist. It
                 // only reads the small workspace JSON (folder paths), not repo contents.
-                match honeyhub_bridge::resolve_workspace_file(&path) {
-                    Ok(folders) => Ok(Some(vec![BridgeEvent::workspace_folders(
+                honeyhub_bridge::resolve_workspace_file(&path).map(|folders| {
+                    one(BridgeEvent::workspace_folders(
                         new_id(),
                         now_rfc3339(),
                         folders,
-                    )])),
-                    Err(error) => Err(error),
-                }
+                    ))
+                })
             }
             ClientCommand::SearchFiles { root, query } => {
                 // Search is gated to an allowlisted root (it reads the tree there).
-                if !runtime.workspace_allows(&root) {
-                    Err(BridgeError::new(
-                        "workspace_not_allowed",
-                        "search root is outside an allowlisted workspace root",
-                    ))
-                } else {
-                    match honeyhub_bridge::search_files(&root, &query) {
-                        Ok(results) => Ok(Some(vec![BridgeEvent::search_results(
+                require(runtime.workspace_allows(&root), "search root")
+                    .and_then(|()| honeyhub_bridge::search_files(&root, &query))
+                    .map(|results| {
+                        one(BridgeEvent::search_results(
                             new_id(),
                             now_rfc3339(),
                             results,
-                        )])),
-                        Err(error) => Err(error),
-                    }
-                }
+                        ))
+                    })
             }
             ClientCommand::WriteAgent {
                 name,
@@ -359,31 +436,20 @@ async fn handle_command(
                 body,
                 model,
                 workspace_root,
-            } => match runtime.write_agent(
-                workspace_root.as_deref(),
-                &name,
-                &description,
-                &body,
-                model.as_deref(),
-            ) {
-                Ok(agent) => Ok(Some(vec![BridgeEvent::agent_written(
-                    new_id(),
-                    now_rfc3339(),
-                    agent,
-                )])),
-                Err(error) => Err(error),
-            },
+            } => runtime
+                .write_agent(
+                    workspace_root.as_deref(),
+                    &name,
+                    &description,
+                    &body,
+                    model.as_deref(),
+                )
+                .map(|agent| one(BridgeEvent::agent_written(new_id(), now_rfc3339(), agent))),
             ClientCommand::ListJobs {
                 extra_probes,
                 extra_task_keywords,
-            } => match honeyhub_bridge::job_snapshot(&extra_probes, &extra_task_keywords) {
-                Ok(snapshot) => Ok(Some(vec![BridgeEvent::job_snapshot(
-                    new_id(),
-                    now_rfc3339(),
-                    snapshot,
-                )])),
-                Err(error) => Err(error),
-            },
+            } => honeyhub_bridge::job_snapshot(&extra_probes, &extra_task_keywords)
+                .map(|snapshot| one(BridgeEvent::job_snapshot(new_id(), now_rfc3339(), snapshot))),
             ClientCommand::DetectEnvironment => Ok(Some(vec![BridgeEvent::environment_info(
                 new_id(),
                 now_rfc3339(),
@@ -406,6 +472,7 @@ async fn handle_command(
             )])),
             ClientCommand::PeekServiceBus {
                 namespace,
+                connection_string,
                 entity,
                 subscription,
                 dead_letter,
@@ -415,6 +482,7 @@ async fn handle_command(
                 now_rfc3339(),
                 honeyhub_bridge::service_bus_peek(
                     &namespace,
+                    connection_string.as_deref(),
                     &entity,
                     subscription.as_deref(),
                     dead_letter,
@@ -423,6 +491,7 @@ async fn handle_command(
             )])),
             ClientCommand::ResubmitDeadLetter {
                 namespace,
+                connection_string,
                 entity,
                 subscription,
                 count,
@@ -431,6 +500,7 @@ async fn handle_command(
                 now_rfc3339(),
                 honeyhub_bridge::service_bus_resubmit(
                     &namespace,
+                    connection_string.as_deref(),
                     &entity,
                     subscription.as_deref(),
                     count,
@@ -438,6 +508,7 @@ async fn handle_command(
             )])),
             ClientCommand::PurgeServiceBus {
                 namespace,
+                connection_string,
                 entity,
                 subscription,
                 dead_letter,
@@ -446,6 +517,7 @@ async fn handle_command(
                 now_rfc3339(),
                 honeyhub_bridge::service_bus_purge(
                     &namespace,
+                    connection_string.as_deref(),
                     &entity,
                     subscription.as_deref(),
                     dead_letter,
@@ -453,6 +525,7 @@ async fn handle_command(
             )])),
             ClientCommand::SendServiceBus {
                 namespace,
+                connection_string,
                 entity,
                 body,
                 subject,
@@ -462,6 +535,7 @@ async fn handle_command(
                 now_rfc3339(),
                 honeyhub_bridge::service_bus_send(
                     &namespace,
+                    connection_string.as_deref(),
                     &entity,
                     &body,
                     subject.as_deref(),
@@ -470,6 +544,7 @@ async fn handle_command(
             )])),
             ClientCommand::ReceiveServiceBus {
                 namespace,
+                connection_string,
                 entity,
                 subscription,
                 dead_letter,
@@ -478,9 +553,39 @@ async fn handle_command(
                 now_rfc3339(),
                 honeyhub_bridge::service_bus_receive(
                     &namespace,
+                    connection_string.as_deref(),
                     &entity,
                     subscription.as_deref(),
                     dead_letter,
+                ),
+            )])),
+            ClientCommand::ListServiceBusEntities {
+                namespace,
+                connection_string,
+            } => Ok(Some(vec![BridgeEvent::service_bus_entities(
+                new_id(),
+                now_rfc3339(),
+                honeyhub_bridge::service_bus_entities(&namespace, connection_string.as_deref()),
+            )])),
+            ClientCommand::ManageServiceBus {
+                namespace,
+                connection_string,
+                op,
+                entity_kind,
+                entity,
+                subscription,
+                props,
+            } => Ok(Some(vec![BridgeEvent::service_bus_manage(
+                new_id(),
+                now_rfc3339(),
+                honeyhub_bridge::service_bus_manage(
+                    &namespace,
+                    connection_string.as_deref(),
+                    &op,
+                    &entity_kind,
+                    &entity,
+                    subscription.as_deref(),
+                    &props,
                 ),
             )])),
             ClientCommand::GrafanaSummary { base_url, token } => {
@@ -502,38 +607,116 @@ async fn handle_command(
             )])),
             ClientCommand::GitStatus { root } => {
                 // Git status reads the repo, so gate the root to the allowlist.
-                if !runtime.workspace_allows(&root) {
-                    Err(BridgeError::new(
-                        "workspace_not_allowed",
-                        "git root is outside an allowlisted workspace root",
-                    ))
-                } else {
-                    match honeyhub_bridge::git_status(&root) {
-                        Ok(status) => Ok(Some(vec![BridgeEvent::git_status(
-                            new_id(),
-                            now_rfc3339(),
-                            status,
-                        )])),
-                        Err(error) => Err(error),
-                    }
-                }
+                require(runtime.workspace_allows(&root), "git root")
+                    .and_then(|()| honeyhub_bridge::git_status(&root))
+                    .map(|status| one(BridgeEvent::git_status(new_id(), now_rfc3339(), status)))
             }
             ClientCommand::GitDiff { root, path } => {
-                if !runtime.workspace_allows(&root) {
-                    Err(BridgeError::new(
-                        "workspace_not_allowed",
-                        "git root is outside an allowlisted workspace root",
+                require(runtime.workspace_allows(&root), "git root")
+                    .and_then(|()| honeyhub_bridge::git_diff(&root, path.as_deref()))
+                    .map(|diff| one(BridgeEvent::git_diff(new_id(), now_rfc3339(), diff)))
+            }
+            ClientCommand::GitOverview { root } => {
+                // Discover repos under the folder + status each (multi-repo dashboard). The
+                // folder is gated, exactly like a single-repo read.
+                require(runtime.workspace_allows(&root), "git root").map(|()| {
+                    one(BridgeEvent::git_overview(
+                        new_id(),
+                        now_rfc3339(),
+                        honeyhub_bridge::git_overview(&root),
                     ))
-                } else {
-                    match honeyhub_bridge::git_diff(&root, path.as_deref()) {
-                        Ok(diff) => Ok(Some(vec![BridgeEvent::git_diff(
-                            new_id(),
-                            now_rfc3339(),
-                            diff,
-                        )])),
-                        Err(error) => Err(error),
-                    }
-                }
+                })
+            }
+            ClientCommand::GitBranches { root } => {
+                require(runtime.workspace_allows(&root), "git root")
+                    .and_then(|()| honeyhub_bridge::git_branches(&root))
+                    .map(|branches| {
+                        one(BridgeEvent::git_branches(new_id(), now_rfc3339(), branches))
+                    })
+            }
+            // Git writes (confirmation-gated in the UI): gate the repo to the allowlist, run
+            // the op, then return its result + a fresh status so the view updates. A failed op
+            // surfaces as a `GitOp { ok: false }` event (friendlier than a transport error).
+            ClientCommand::GitStage { root, paths } => {
+                require(runtime.workspace_allows(&root), "git root").map(|()| {
+                    Some(git_write_events(
+                        &root,
+                        "stage",
+                        honeyhub_bridge::git_stage(&root, &paths),
+                    ))
+                })
+            }
+            ClientCommand::GitUnstage { root, paths } => {
+                require(runtime.workspace_allows(&root), "git root").map(|()| {
+                    Some(git_write_events(
+                        &root,
+                        "unstage",
+                        honeyhub_bridge::git_unstage(&root, &paths),
+                    ))
+                })
+            }
+            ClientCommand::GitCommit { root, message } => {
+                require(runtime.workspace_allows(&root), "git root").map(|()| {
+                    Some(git_write_events(
+                        &root,
+                        "commit",
+                        honeyhub_bridge::git_commit(&root, &message),
+                    ))
+                })
+            }
+            ClientCommand::GitPush { root } => require(runtime.workspace_allows(&root), "git root")
+                .map(|()| {
+                    Some(git_write_events(
+                        &root,
+                        "push",
+                        honeyhub_bridge::git_push(&root),
+                    ))
+                }),
+            ClientCommand::GitPull { root } => require(runtime.workspace_allows(&root), "git root")
+                .map(|()| {
+                    Some(git_write_events(
+                        &root,
+                        "pull",
+                        honeyhub_bridge::git_pull(&root),
+                    ))
+                }),
+            ClientCommand::GitCheckout { root, name, create } => {
+                require(runtime.workspace_allows(&root), "git root").map(|()| {
+                    Some(git_write_events(
+                        &root,
+                        "checkout",
+                        honeyhub_bridge::git_checkout(&root, &name, create),
+                    ))
+                })
+            }
+            ClientCommand::GitDiscard {
+                root,
+                paths,
+                untracked,
+            } => require(runtime.workspace_allows(&root), "git root").map(|()| {
+                Some(git_write_events(
+                    &root,
+                    "discard",
+                    honeyhub_bridge::git_discard(&root, &paths, untracked),
+                ))
+            }),
+            ClientCommand::GitDiscardAll { root } => {
+                require(runtime.workspace_allows(&root), "git root").map(|()| {
+                    Some(git_write_events(
+                        &root,
+                        "discard",
+                        honeyhub_bridge::git_discard_all(&root),
+                    ))
+                })
+            }
+            ClientCommand::GitDeleteBranch { root, name, force } => {
+                require(runtime.workspace_allows(&root), "git root").map(|()| {
+                    Some(git_write_events(
+                        &root,
+                        "delete-branch",
+                        honeyhub_bridge::git_delete_branch(&root, &name, force),
+                    ))
+                })
             }
             ClientCommand::ListSessions => Ok(Some(vec![BridgeEvent::session_list(
                 new_id(),
@@ -563,29 +746,13 @@ async fn handle_command(
             }
             ClientCommand::ScaffoldArchitecture { name, location } => {
                 let roots = runtime.workspace_roots();
-                match honeyhub_bridge::scaffold_architecture(
-                    name.as_deref(),
-                    location.as_deref(),
-                    &roots,
-                ) {
-                    Ok(snapshot) => Ok(Some(vec![BridgeEvent::roadmap(
-                        new_id(),
-                        now_rfc3339(),
-                        snapshot,
-                    )])),
-                    Err(error) => Err(error),
-                }
+                honeyhub_bridge::scaffold_architecture(name.as_deref(), location.as_deref(), &roots)
+                    .map(|snapshot| one(BridgeEvent::roadmap(new_id(), now_rfc3339(), snapshot)))
             }
             ClientCommand::PullArchitecture => {
                 let roots = runtime.workspace_roots();
-                match honeyhub_bridge::pull_architecture(&roots) {
-                    Ok(snapshot) => Ok(Some(vec![BridgeEvent::roadmap(
-                        new_id(),
-                        now_rfc3339(),
-                        snapshot,
-                    )])),
-                    Err(error) => Err(error),
-                }
+                honeyhub_bridge::pull_architecture(&roots)
+                    .map(|snapshot| one(BridgeEvent::roadmap(new_id(), now_rfc3339(), snapshot)))
             }
             ClientCommand::Resume { .. } => Err(BridgeError::new(
                 "unsupported_command",
@@ -596,6 +763,10 @@ async fn handle_command(
 
     if let Some(run_id) = to_register {
         host.active_runs.lock().await.insert(run_id);
+    }
+    // Re-point the filesystem watcher after a workspace-allowlist change (lock released).
+    if let Some(roots) = rewatch {
+        apply_watch(host, roots).await;
     }
 
     match result {
@@ -633,4 +804,64 @@ async fn send_frame(
 
 fn new_id() -> String {
     uuid::Uuid::new_v4().to_string()
+}
+
+/// Gate a command on an allowlisted workspace root, yielding a uniform error
+/// keyed by the human-readable `scope` (e.g. "file", "search root", "git root").
+fn require(allowed: bool, scope: &str) -> Result<(), BridgeError> {
+    if allowed {
+        Ok(())
+    } else {
+        Err(BridgeError::new(
+            "workspace_not_allowed",
+            format!("{scope} is outside an allowlisted workspace root"),
+        ))
+    }
+}
+
+/// Wrap a single event as the one-event success payload returned by command arms.
+fn one(event: BridgeEvent) -> Option<Vec<BridgeEvent>> {
+    Some(vec![event])
+}
+
+/// Build the events for a git write op: a `GitOp` result (success or failure) plus, on
+/// success, a fresh `GitStatus` so the cockpit reflects the change immediately. A failed op
+/// reports as `GitOp { ok: false }` rather than a transport error, so the UI can show it
+/// inline next to the repo.
+fn git_write_events(root: &str, op: &str, result: Result<String, BridgeError>) -> Vec<BridgeEvent> {
+    match result {
+        Ok(message) => {
+            let op_event = BridgeEvent::git_op(
+                new_id(),
+                now_rfc3339(),
+                honeyhub_bridge::GitOpResult {
+                    root: root.to_string(),
+                    op: op.to_string(),
+                    ok: true,
+                    message: if message.is_empty() {
+                        None
+                    } else {
+                        Some(message)
+                    },
+                },
+            );
+            match honeyhub_bridge::git_status(root) {
+                Ok(status) => vec![
+                    op_event,
+                    BridgeEvent::git_status(new_id(), now_rfc3339(), status),
+                ],
+                Err(_) => vec![op_event],
+            }
+        }
+        Err(error) => vec![BridgeEvent::git_op(
+            new_id(),
+            now_rfc3339(),
+            honeyhub_bridge::GitOpResult {
+                root: root.to_string(),
+                op: op.to_string(),
+                ok: false,
+                message: Some(error.message),
+            },
+        )],
+    }
 }

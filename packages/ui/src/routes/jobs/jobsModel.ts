@@ -7,7 +7,7 @@ import type { JobSnapshot, ProcessInfo } from "@honeydrunk/honeyhub-types";
 /** Format a KiB figure as a human-readable size (KB / MB / GB). */
 export function formatMemoryKb(memoryKb: number | undefined): string {
   if (memoryKb === undefined || memoryKb <= 0) {
-    return "—";
+    return "-";
   }
   if (memoryKb < 1024) {
     return `${memoryKb} KB`;

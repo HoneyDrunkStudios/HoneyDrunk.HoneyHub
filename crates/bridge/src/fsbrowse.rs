@@ -309,48 +309,55 @@ fn strip_jsonc(input: &str) -> String {
     let mut out = String::with_capacity(input.len());
     let bytes = input.as_bytes();
     let mut i = 0;
-    let mut in_string = false;
-    let mut escaped = false;
     while i < bytes.len() {
-        let c = bytes[i];
-        if in_string {
-            out.push(c as char);
-            if escaped {
-                escaped = false;
-            } else if c == b'\\' {
-                escaped = true;
-            } else if c == b'"' {
-                in_string = false;
+        if bytes[i] == b'"' {
+            i = copy_json_string(bytes, i, &mut out);
+        } else if is_two_byte(bytes, i, b'/') {
+            // Skip a `//` line comment up to (but not including) the newline.
+            while i < bytes.len() && bytes[i] != b'\n' {
+                i += 1;
             }
+        } else if is_two_byte(bytes, i, b'*') {
+            // Skip a `/* ... */` block comment.
+            i += 2;
+            while i + 1 < bytes.len() && !(bytes[i] == b'*' && bytes[i + 1] == b'/') {
+                i += 1;
+            }
+            i += 2;
+        } else {
+            out.push(bytes[i] as char);
             i += 1;
-            continue;
-        }
-        match c {
-            b'"' => {
-                in_string = true;
-                out.push('"');
-                i += 1;
-            }
-            b'/' if i + 1 < bytes.len() && bytes[i + 1] == b'/' => {
-                while i < bytes.len() && bytes[i] != b'\n' {
-                    i += 1;
-                }
-            }
-            b'/' if i + 1 < bytes.len() && bytes[i + 1] == b'*' => {
-                i += 2;
-                while i + 1 < bytes.len() && !(bytes[i] == b'*' && bytes[i + 1] == b'/') {
-                    i += 1;
-                }
-                i += 2;
-            }
-            _ => {
-                out.push(c as char);
-                i += 1;
-            }
         }
     }
     // Drop trailing commas before } or ].
     strip_trailing_commas(&out)
+}
+
+/// True when `bytes[i]` opens a `/`-prefixed pair whose second byte is `second`
+/// (i.e. `//` for `second == b'/'`, `/*` for `second == b'*'`).
+fn is_two_byte(bytes: &[u8], i: usize, second: u8) -> bool {
+    bytes[i] == b'/' && i + 1 < bytes.len() && bytes[i + 1] == second
+}
+
+/// Copy a JSON string literal beginning at the opening quote `bytes[start]`,
+/// honoring backslash escapes, into `out`. Returns the index past the closing quote.
+fn copy_json_string(bytes: &[u8], start: usize, out: &mut String) -> usize {
+    out.push('"');
+    let mut i = start + 1;
+    let mut escaped = false;
+    while i < bytes.len() {
+        let c = bytes[i];
+        out.push(c as char);
+        i += 1;
+        if escaped {
+            escaped = false;
+        } else if c == b'\\' {
+            escaped = true;
+        } else if c == b'"' {
+            break;
+        }
+    }
+    i
 }
 
 /// Remove commas that immediately precede a `}` or `]` (ignoring whitespace), which
@@ -402,35 +409,15 @@ pub fn search_files(root: &str, query: &str) -> Result<SearchResults, BridgeErro
 
     let mut stack = vec![root_path.to_path_buf()];
     let mut visited = 0usize;
-    'walk: while let Some(dir) = stack.pop() {
+    while let Some(dir) = stack.pop() {
         visited += 1;
         if visited > MAX_SEARCH_DIRS {
             truncated = true;
             break;
         }
-        let Ok(read) = std::fs::read_dir(&dir) else {
-            continue;
-        };
-        for item in read.flatten() {
-            let Ok(file_type) = item.file_type() else {
-                continue;
-            };
-            let name = item.file_name().to_string_lossy().to_string();
-            if file_type.is_dir() {
-                if SEARCH_SKIP_DIRS.contains(&name.as_str()) {
-                    continue;
-                }
-                stack.push(item.path());
-            } else if file_type.is_file() && name.to_lowercase().contains(&needle) {
-                if hits.len() >= MAX_SEARCH_HITS {
-                    truncated = true;
-                    break 'walk;
-                }
-                hits.push(SearchHit {
-                    path: item.path().to_string_lossy().to_string(),
-                    name,
-                });
-            }
+        if scan_dir(&dir, &needle, &mut hits, &mut stack) {
+            truncated = true;
+            break;
         }
     }
 
@@ -441,6 +428,40 @@ pub fn search_files(root: &str, query: &str) -> Result<SearchResults, BridgeErro
         hits,
         truncated,
     })
+}
+
+/// Scan one directory: push matching files onto `hits` and child directories
+/// (minus skipped ones) onto `stack`. Returns `true` once [`MAX_SEARCH_HITS`] is
+/// reached so the caller can stop and mark the results truncated.
+fn scan_dir(
+    dir: &Path,
+    needle: &str,
+    hits: &mut Vec<SearchHit>,
+    stack: &mut Vec<std::path::PathBuf>,
+) -> bool {
+    let Ok(read) = std::fs::read_dir(dir) else {
+        return false;
+    };
+    for item in read.flatten() {
+        let Ok(file_type) = item.file_type() else {
+            continue;
+        };
+        let name = item.file_name().to_string_lossy().to_string();
+        if file_type.is_dir() {
+            if !SEARCH_SKIP_DIRS.contains(&name.as_str()) {
+                stack.push(item.path());
+            }
+        } else if file_type.is_file() && name.to_lowercase().contains(needle) {
+            if hits.len() >= MAX_SEARCH_HITS {
+                return true;
+            }
+            hits.push(SearchHit {
+                path: item.path().to_string_lossy().to_string(),
+                name,
+            });
+        }
+    }
+    false
 }
 
 /// The synthetic top level for the picker: existing drive roots on Windows, `/`
