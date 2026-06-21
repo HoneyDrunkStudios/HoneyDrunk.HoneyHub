@@ -79,4 +79,28 @@ describe("ModelMenu", () => {
     fireEvent.click(screen.getByRole("button", { name: "Close model picker" }));
     expect(screen.queryByRole("listbox", { name: "Select model" })).toBeNull();
   });
+
+  it("closes on Escape and returns focus to the trigger", () => {
+    renderMenu();
+    const trigger = screen.getByRole("button", { name: "Model" });
+    fireEvent.click(trigger);
+    fireEvent.keyDown(screen.getByRole("listbox", { name: "Select model" }), { key: "Escape" });
+    expect(screen.queryByRole("listbox", { name: "Select model" })).toBeNull();
+    expect(document.activeElement).toBe(trigger);
+  });
+
+  it("roves focus across options with the arrow keys", () => {
+    renderMenu();
+    fireEvent.click(screen.getByRole("button", { name: "Model" }));
+    const listbox = screen.getByRole("listbox", { name: "Select model" });
+    // Opening focuses the active option; ArrowDown/ArrowUp move between options.
+    const opus = within(listbox).getByRole("option", { name: /Claude Opus 4\.8/ });
+    expect(document.activeElement).toBe(opus);
+    fireEvent.keyDown(listbox, { key: "ArrowDown" });
+    expect(document.activeElement).toBe(
+      within(listbox).getByRole("option", { name: /Claude Sonnet 4\.6/ })
+    );
+    fireEvent.keyDown(listbox, { key: "ArrowUp" });
+    expect(document.activeElement).toBe(opus);
+  });
 });
