@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import type { ServiceBusSnapshot, WorkSnapshot } from "@honeydrunk/honeyhub-types";
 import {
+  chatFinishedNotification,
+  collectWorkItems,
   deadLetterNotifications,
   defaultNotificationPrefs,
   kindForCategory,
@@ -143,6 +145,37 @@ describe("notifications model", () => {
     // A genuine rise after the gap still fires.
     const rise = deadLetterNotifications(snap(8), defaultNotificationPrefs, back.counts, NOW);
     expect(rise.notifications).toHaveLength(1);
+  });
+
+  it("maps review-requested to pr_review and unknown categories to undefined", () => {
+    expect(kindForCategory("Review requested")).toBe("pr_review");
+    expect(kindForCategory("Authored")).toBeUndefined();
+  });
+
+  it("collects work items only from available sources", () => {
+    const snapshot = {
+      sources: [
+        ...workSnap([{ id: "a", category: "assigned" }]).sources,
+        { source: "ado", available: false, error: "not signed in" }
+      ]
+    };
+    expect(collectWorkItems(snapshot).map((i) => i.id)).toEqual(["a"]);
+  });
+
+  it("omits the link when a work item has no url", () => {
+    const snap = workSnap([{ id: "x", category: "assigned" }]);
+    snap.sources[0]!.items![0]!.url = "";
+    const { notifications } = workNotifications(snap, defaultNotificationPrefs, new Set(), NOW);
+    expect(notifications).toHaveLength(1);
+    expect(notifications[0]?.link).toBeUndefined();
+  });
+
+  it("builds a chat-finished notification and treats empty incoming as a no-op merge", () => {
+    const note = chatFinishedNotification("run-1", "Claude finished responding.", NOW);
+    expect(note.kind).toBe("chat_finished");
+    expect(note.id).toBe("chat:run-1");
+    const feed: AppNotification[] = [note];
+    expect(mergeFeed(feed, [])).toBe(feed);
   });
 
   it("merges the feed by id (newest first), and counts unread", () => {

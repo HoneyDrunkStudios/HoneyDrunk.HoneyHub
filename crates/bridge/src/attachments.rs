@@ -198,6 +198,25 @@ mod tests {
     }
 
     #[test]
+    fn write_attachments_empty_is_noop() {
+        let paths = write_attachments("run", &[]).expect("empty is ok");
+        assert!(paths.is_empty());
+    }
+
+    #[test]
+    fn write_attachments_rejects_invalid_base64() {
+        let run_id = format!("test-bad-{}", uuid::Uuid::new_v4());
+        let attachments = vec![ChatAttachment {
+            name: "bad.bin".to_string(),
+            mime_type: None,
+            data: "not*base64".to_string(),
+        }];
+        let error = write_attachments(&run_id, &attachments).expect_err("invalid base64 fails");
+        assert_eq!(error.code, "attachment_decode_failed");
+        let _ = std::fs::remove_dir_all(attachment_dir(&run_id));
+    }
+
+    #[test]
     fn append_attachment_refs_is_noop_without_paths() {
         assert_eq!(append_attachment_refs("do it", &[]), "do it");
     }
