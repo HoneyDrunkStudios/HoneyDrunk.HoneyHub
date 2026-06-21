@@ -233,8 +233,23 @@ pub fn pull(root: &str) -> Result<String, BridgeError> {
     run_git(root, &["pull", "--ff-only"], "git_pull_failed")
 }
 
+/// Reject a branch/ref name that could be mistaken for a `git` option (a leading `-`) or is
+/// otherwise unsafe to pass to a shelled-out `git` (control chars / spaces — never valid in a
+/// ref anyway). Refs can't be guarded with `--` the way paths can, so validate before shelling.
+fn validate_ref_name(name: &str) -> Result<(), BridgeError> {
+    if name.is_empty() || name.starts_with('-') || name.chars().any(|c| c.is_control() || c == ' ')
+    {
+        return Err(BridgeError::new(
+            "git_invalid_ref",
+            "invalid branch name".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 /// Switch to a branch, optionally creating it (`git checkout [-b] <name>`).
 pub fn checkout(root: &str, name: &str, create: bool) -> Result<String, BridgeError> {
+    validate_ref_name(name)?;
     let args = if create {
         vec!["checkout", "-b", name]
     } else {
@@ -275,6 +290,7 @@ pub fn discard_all(root: &str) -> Result<String, BridgeError> {
 /// Delete a local branch (`git branch -d`, or `-D` when `force`). Git refuses `-d` on an
 /// unmerged branch unless forced.
 pub fn delete_branch(root: &str, name: &str, force: bool) -> Result<String, BridgeError> {
+    validate_ref_name(name)?;
     let flag = if force { "-D" } else { "-d" };
     run_git(root, &["branch", flag, name], "git_delete_branch_failed")
 }

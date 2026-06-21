@@ -20,6 +20,10 @@ const MAX_ATTACHMENTS: usize = 20;
 /// Max total decoded bytes per chat turn (50 MiB), so a malformed or hostile client cannot make
 /// the bridge buffer unbounded data in memory / on disk.
 const MAX_TOTAL_ATTACHMENT_BYTES: usize = 50 * 1024 * 1024;
+/// Max total ENCODED (base64) bytes accepted before decoding, so an oversized payload is rejected
+/// up front rather than after allocating the decoded buffer (~4/3 of the decoded cap, plus slack
+/// for padding/whitespace).
+const MAX_TOTAL_ENCODED_BYTES: usize = MAX_TOTAL_ATTACHMENT_BYTES / 3 * 4 + 4096;
 
 /// The per-run directory attachments are written to:
 /// `<temp>/honeyhub/attachments/<run_id>`.
@@ -118,7 +122,17 @@ pub fn write_attachments(
 
     let mut paths = Vec::with_capacity(attachments.len());
     let mut total_bytes: usize = 0;
+    let mut encoded_bytes: usize = 0;
     for (index, attachment) in attachments.iter().enumerate() {
+        // Bound the encoded input BEFORE decoding so an oversized payload can't force a large
+        // allocation in decode_base64 before the decoded-size cap below would catch it.
+        encoded_bytes = encoded_bytes.saturating_add(attachment.data.len());
+        if encoded_bytes > MAX_TOTAL_ENCODED_BYTES {
+            return Err(BridgeError::new(
+                "attachment_rejected",
+                "attachments exceed the encoded-size limit".to_string(),
+            ));
+        }
         let bytes = decode_base64(&attachment.data).map_err(|error| {
             BridgeError::new(
                 "attachment_decode_failed",
