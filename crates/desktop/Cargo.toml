@@ -16,3 +16,8 @@ tauri-build = { version = "2", features = [] }
 honeyhub-bridge = { path = "../bridge" }
 honeyhub-bridge-host = { path = "../bridge-host" }
 tauri = { version = "2", features = [] }
+# Self-update: check a signed release manifest, download + verify, install, relaunch.
+tauri-plugin-updater = "2"
+tauri-plugin-dialog = "2"
+# Required by `tauri::generate_context!` once the updater plugin config is present.
+serde_json = "1"

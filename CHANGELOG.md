@@ -1,5 +1,41 @@
 # Changelog
 
+## [0.18.0] - 2026-06-21
+
+A large control-hub expansion driven by operator dogfooding: a docked chat sidebar with
+attachments, a full multi-repo Git client, a Service Bus connections explorer, desktop
+notifications, themes, and desktop auto-update. (Version tracks: this changelog and the npm
+packages share the 0.18.0 user-facing version; the Rust crate workspace is at 0.24.0 and the
+Tauri app build at 0.23.0, each on its own internal track.)
+
+- **Chat everywhere**: the floating quick-chat dock is now a collapsible right **sidebar** that
+  renders the full chat (session history, model/provider picker, new chat, slash menu, agents)
+  on every page. Both the Chat page and the sidebar accept **document uploads and pasted/dropped
+  images**, materialized to a temp dir by the bridge and referenced by path (works across all
+  backends).
+- **Default workspace**: pick a default repo/folder (a star in the workspace picker) that is
+  pre-selected across Chat, Git, and Browse, changeable anytime.
+- **Multi-repo Git client**: select a folder and every repo inside it shows its branch,
+  ahead/behind, and change count. Per repo: stage/unstage, commit, push, pull, switch/create/
+  delete branches, discard (per-file + all), and quick diffs. All writes are confirmation-gated.
+- **Live updates**: a filesystem watcher pushes change events so Browse + Git refresh near
+  instantly (with a live indicator); Browse gained a changed-files panel grouped by repo, with
+  inline diffs.
+- **Service Bus connections**: save namespaces (Azure AD) or SAS connection strings (cockpit-held,
+  never persisted host-side), open several at once, browse entities, peek/send/receive/purge/
+  resubmit, and **manage** queues/topics/subscriptions (create/delete/edit properties) via a
+  .NET admin-client helper. Connection strings ride per-request only.
+- **Notifications**: OS toasts + an in-app Alerts feed (with unread badge) for a chat finishing
+  while you are away, work assigned to you, mentions, PR review requests, and new dead-letters
+  (GitHub + Azure DevOps where the APIs allow). Per-type toggles in Settings; opening Alerts
+  marks them read.
+- **Themes**: a Settings theme picker — Honey Cyberpunk (default), Midnight, Matrix, Daylight —
+  applied via CSS variables and persisted.
+- **Number stepper**: native number spinners replaced with a themed `− value +` control.
+- **Desktop auto-update**: the Tauri shell checks a signed release manifest on launch and offers
+  to install + relaunch; a tagged `release` workflow builds, signs, and publishes per-OS bundles
+  (see `crates/desktop/RELEASING.md` for the one-time signing-key setup).
+
 ## [0.17.0] - 2026-06-20
 
 Cockpit polish plus subscription-aware cost routing, driven by operator dogfooding.

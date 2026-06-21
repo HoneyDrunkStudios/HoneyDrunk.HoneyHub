@@ -18,6 +18,9 @@ export interface ProviderPrefs {
   /** Repo locations the user picked — the bridge's workspace roots + Browse starting
       points. */
   workspaceRoots: string[];
+  /** The user's default workspace: the location pre-selected across Chat / Git / Browse.
+      Changeable at any time. Absent = fall back to the first configured root. */
+  defaultWorkspaceRoot?: string;
 }
 
 export const emptyProviderPrefs: ProviderPrefs = {
@@ -50,12 +53,20 @@ export function loadProviderPrefs(): ProviderPrefs {
     const roots = Array.isArray(record.workspaceRoots)
       ? record.workspaceRoots.filter((root): root is string => typeof root === "string")
       : [];
+    const dedupedRoots = [...new Set(roots)];
+    // Keep the default only if it still names a configured root.
+    const defaultRoot =
+      typeof record.defaultWorkspaceRoot === "string" &&
+      dedupedRoots.includes(record.defaultWorkspaceRoot)
+        ? record.defaultWorkspaceRoot
+        : undefined;
     return {
       onboarded: record.onboarded === true,
       // De-dupe defensively so a corrupt store can't seed duplicate toggles.
       enabled: [...new Set(enabled)],
       enabledModels: parseEnabledModels(record.enabledModels),
-      workspaceRoots: [...new Set(roots)]
+      workspaceRoots: dedupedRoots,
+      ...(defaultRoot === undefined ? {} : { defaultWorkspaceRoot: defaultRoot })
     };
   } catch {
     return emptyProviderPrefs;

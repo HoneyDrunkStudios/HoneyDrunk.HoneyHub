@@ -92,6 +92,22 @@ impl CapabilityFlags {
     }
 }
 
+/// A file the user attached to a chat turn (a document or a pasted/dropped image).
+/// Carried inline (base64) over the wire; the runtime writes it to a per-run temp dir
+/// and references the path in the task, so every adapter gets attachments uniformly via
+/// path references — no per-CLI multimodal plumbing (HoneyHub attachments v1).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatAttachment {
+    /// The original file name. Sanitized to a safe basename before it is written.
+    pub name: String,
+    /// The MIME type when the client reported one (e.g. `image/png`); informational.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mime_type: Option<String>,
+    /// Base64-encoded file contents, with no `data:` URI prefix.
+    pub data: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StartRunRequest {
@@ -121,6 +137,11 @@ pub struct StartRunRequest {
     pub transcript: Vec<DispatchMessage>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub launch_command: Option<Vec<String>>,
+    /// Files attached to this turn (documents, pasted/dropped images). The runtime
+    /// materializes them to a temp dir and appends their paths to the task so the agent
+    /// can read them. Empty = none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<ChatAttachment>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

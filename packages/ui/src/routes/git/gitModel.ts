@@ -1,3 +1,5 @@
+import type { GitFileStatus, GitOverview, GitStatus } from "@honeydrunk/honeyhub-types";
+
 // Pure helpers for rendering a unified diff (parity polish #9). Classifying each line so
 // the viewer can colour it, and a small +/- stat — kept out of the component for testing.
 
@@ -58,4 +60,33 @@ export function diffStat(patch: string): { added: number; removed: number } {
     }
   }
   return { added, removed };
+}
+
+// --- Multi-repo helpers (the Git dashboard) ---
+
+/** Replace a single repo's status within an overview (a write re-emits one repo's status),
+    appending it if the repo is not already listed. Pure, so the merge is testable. */
+export function replaceRepoStatus(overview: GitOverview, status: GitStatus): GitOverview {
+  const exists = overview.repos.some((repo) => repo.root === status.root);
+  return {
+    ...overview,
+    repos: exists
+      ? overview.repos.map((repo) => (repo.root === status.root ? status : repo))
+      : [...overview.repos, status]
+  };
+}
+
+export interface GroupedFiles {
+  staged: GitFileStatus[];
+  unstaged: GitFileStatus[];
+}
+
+/** Split a repo's changed files into staged vs unstaged (untracked counts as unstaged). */
+export function groupFiles(files: GitFileStatus[]): GroupedFiles {
+  const staged: GitFileStatus[] = [];
+  const unstaged: GitFileStatus[] = [];
+  for (const file of files) {
+    (file.staged ? staged : unstaged).push(file);
+  }
+  return { staged, unstaged };
 }

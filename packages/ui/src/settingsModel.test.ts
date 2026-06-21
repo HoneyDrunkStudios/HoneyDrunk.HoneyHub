@@ -8,8 +8,10 @@ import {
   isModelEnabled,
   pairDevice,
   removeWorkspaceRoot,
+  resolveDefaultWorkspaceRoot,
   revokeDevice,
   setBackendAllowed,
+  setDefaultWorkspaceRoot,
   setModelAllowed,
   type BridgeSettingsState,
   type PairingFactory
@@ -33,6 +35,44 @@ describe("defaultPairingFactory", () => {
 
     expect(defaultPairingFactory.deviceId()).not.toBe(defaultPairingFactory.deviceId());
     expect(defaultPairingFactory.now()).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+  });
+});
+
+describe("default workspace", () => {
+  const withRoots: BridgeSettingsState = {
+    ...emptyBridgeSettings,
+    workspaceRoots: ["/a", "/b", "/c"]
+  };
+
+  it("sets a default that must be a configured root", () => {
+    const next = setDefaultWorkspaceRoot(withRoots, "/b");
+    expect(next.defaultWorkspaceRoot).toBe("/b");
+    expect(() => setDefaultWorkspaceRoot(withRoots, "/nope")).toThrow(/configured root/);
+  });
+
+  it("clears the default with undefined", () => {
+    const set = setDefaultWorkspaceRoot(withRoots, "/b");
+    expect(setDefaultWorkspaceRoot(set, undefined).defaultWorkspaceRoot).toBeUndefined();
+  });
+
+  it("clears the default when its root is removed", () => {
+    const set = setDefaultWorkspaceRoot(withRoots, "/b");
+    const removed = removeWorkspaceRoot(set, "/b");
+    expect(removed.defaultWorkspaceRoot).toBeUndefined();
+    expect(removed.workspaceRoots).toEqual(["/a", "/c"]);
+  });
+
+  it("keeps the default when a different root is removed", () => {
+    const set = setDefaultWorkspaceRoot(withRoots, "/b");
+    expect(removeWorkspaceRoot(set, "/a").defaultWorkspaceRoot).toBe("/b");
+  });
+
+  it("resolves the effective default with sensible fallbacks", () => {
+    expect(resolveDefaultWorkspaceRoot(["/a", "/b"], "/b")).toBe("/b");
+    // Stale default (not a current root) falls back to the first root.
+    expect(resolveDefaultWorkspaceRoot(["/a", "/b"], "/gone")).toBe("/a");
+    expect(resolveDefaultWorkspaceRoot(["/a", "/b"], undefined)).toBe("/a");
+    expect(resolveDefaultWorkspaceRoot([], undefined)).toBe("");
   });
 });
 

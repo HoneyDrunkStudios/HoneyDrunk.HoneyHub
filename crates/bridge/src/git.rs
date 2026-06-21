@@ -1,11 +1,19 @@
-//! Git status + read-only diff (parity polish #9). The cockpit can't read the repo, so the
-//! bridge shells out to `git` for a workspace's branch/ahead-behind/dirty status and a
-//! read-only unified diff. **Read-only**: it only runs `git status`/`git diff` — never a
-//! mutating command. The host gates the `root` against the workspace allowlist, exactly like
-//! file reads, before calling here.
+//! Git status, diffs, repo discovery, and (confirmation-gated) write operations.
+//!
+//! The cockpit can't touch the repo, so the bridge shells out to `git`. Reads (status,
+//! diff, branches, repo discovery, the multi-repo overview) are unconditional. **Writes**
+//! (stage/unstage/commit/push/pull/checkout/discard) cross the bridge's normally read-only
+//! boundary (ADR-0090 D2); they are a scoped, confirmation-gated exception driven from the
+//! Git screen, the same posture the Service Bus explorer uses for its destructive ops
+//! (ADR-0094 D5). The host gates every `root` against the workspace allowlist first.
+//!
+//! Repo discovery makes the screen "smart": people add a *folder* of repos as a workspace
+//! root, which has no `.git` of its own, so [`discover_repos`] returns the folder itself
+//! when it is a repo, otherwise each immediate child that is one.
 
 use crate::adapter::BridgeError;
 use serde::{Deserialize, Serialize};
+use std::path::Path;
 use std::process::Command;
 
 /// Cap a diff so an enormous change never floods the wire (chars).
@@ -45,6 +53,41 @@ pub struct GitDiff {
     pub path: Option<String>,
     pub patch: String,
     pub truncated: bool,
+}
+
+/// The git status of every repo discovered under a selected folder (or just the one repo
+/// when the selected root is itself a repo). Powers the multi-repo dashboard.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitOverview {
+    /// The selected folder/root this overview is for (echoed so the UI can correlate).
+    pub root: String,
+    /// One status per discovered repo, sorted by path.
+    pub repos: Vec<GitStatus>,
+}
+
+/// A repo's local branches and which one is checked out (for the branch switcher).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitBranches {
+    pub root: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub current: Option<String>,
+    pub branches: Vec<String>,
+}
+
+/// The outcome of a git write operation, surfaced to the UI as feedback (the host also
+/// re-emits a fresh `GitStatus` for the repo so the view updates).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitOpResult {
+    pub root: String,
+    /// The operation name (e.g. `commit`, `push`, `pull`, `checkout`, `stage`, `discard`).
+    pub op: String,
+    pub ok: bool,
+    /// A short human message (git's output, or the error).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
 }
 
 /// Run `git status` for a repo root and parse it. Errors when `git` is missing or the
@@ -96,6 +139,191 @@ pub fn diff(root: &str, path: Option<&str>) -> Result<GitDiff, BridgeError> {
         patch,
         truncated,
     })
+}
+
+/// Discover the git repos under a selected folder. If the folder is itself a repo (has a
+/// `.git`), it is the only result; otherwise each immediate subdirectory that is a repo is
+/// returned, sorted by path. This is what lets the user add a *folder of repos* as a
+/// workspace root and still see every repo.
+pub fn discover_repos(root: &str) -> Vec<String> {
+    let base = Path::new(root);
+    if base.join(".git").exists() {
+        return vec![root.to_string()];
+    }
+    let mut repos = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(base) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() && path.join(".git").exists() {
+                repos.push(path.to_string_lossy().to_string());
+            }
+        }
+    }
+    repos.sort();
+    repos
+}
+
+/// The status of every repo discovered under `root` (the multi-repo dashboard). Repos whose
+/// status can't be read are skipped rather than failing the whole overview.
+pub fn overview(root: &str) -> GitOverview {
+    let repos = discover_repos(root)
+        .iter()
+        .filter_map(|repo| status(repo).ok())
+        .collect();
+    GitOverview {
+        root: root.to_string(),
+        repos,
+    }
+}
+
+/// A repo's local branches plus the checked-out one (for the branch switcher).
+pub fn branches(root: &str) -> Result<GitBranches, BridgeError> {
+    let listing = run_git(
+        root,
+        &["branch", "--format=%(refname:short)"],
+        "git_branches_failed",
+    )?;
+    let branches = listing
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(str::to_string)
+        .collect();
+    // A detached HEAD reports literally "HEAD" — treat that as "no current branch".
+    let current = run_git(
+        root,
+        &["rev-parse", "--abbrev-ref", "HEAD"],
+        "git_branches_failed",
+    )
+    .ok()
+    .map(|name| name.trim().to_string())
+    .filter(|name| !name.is_empty() && name != "HEAD");
+    Ok(GitBranches {
+        root: root.to_string(),
+        current,
+        branches,
+    })
+}
+
+/// Stage paths (`git add`). Pass `["."]` to stage everything in the repo.
+pub fn stage(root: &str, paths: &[String]) -> Result<String, BridgeError> {
+    run_git(root, &git_paths_args("add", paths), "git_stage_failed")
+}
+
+/// Unstage paths (`git restore --staged`). Pass `["."]` to unstage everything.
+pub fn unstage(root: &str, paths: &[String]) -> Result<String, BridgeError> {
+    let mut args = vec!["restore", "--staged", "--"];
+    args.extend(paths.iter().map(String::as_str));
+    run_git(root, &args, "git_unstage_failed")
+}
+
+/// Commit the staged changes with a message.
+pub fn commit(root: &str, message: &str) -> Result<String, BridgeError> {
+    run_git(root, &["commit", "-m", message], "git_commit_failed")
+}
+
+/// Push the current branch (`git push`). Surfaces git's own message (often on stderr).
+pub fn push(root: &str) -> Result<String, BridgeError> {
+    run_git(root, &["push"], "git_push_failed")
+}
+
+/// Pull fast-forward only (`git pull --ff-only`) — never creates a surprise merge commit.
+pub fn pull(root: &str) -> Result<String, BridgeError> {
+    run_git(root, &["pull", "--ff-only"], "git_pull_failed")
+}
+
+/// Switch to a branch, optionally creating it (`git checkout [-b] <name>`).
+pub fn checkout(root: &str, name: &str, create: bool) -> Result<String, BridgeError> {
+    let args = if create {
+        vec!["checkout", "-b", name]
+    } else {
+        vec!["checkout", name]
+    };
+    run_git(root, &args, "git_checkout_failed")
+}
+
+/// Discard local changes to paths. `untracked` removes untracked files (`git clean -f`);
+/// otherwise tracked files are restored to HEAD (`git restore --staged --worktree`).
+pub fn discard(root: &str, paths: &[String], untracked: bool) -> Result<String, BridgeError> {
+    let args = if untracked {
+        git_paths_args_extra("clean", &["-f"], paths)
+    } else {
+        let mut args = vec!["restore", "--staged", "--worktree", "--"];
+        args.extend(paths.iter().map(String::as_str));
+        args
+    };
+    run_git(root, &args, "git_discard_failed")
+}
+
+/// Discard **all** local changes: restore every tracked file to HEAD and remove all
+/// untracked files + directories. Two steps so both tracked and untracked changes go.
+pub fn discard_all(root: &str) -> Result<String, BridgeError> {
+    let restored = run_git(
+        root,
+        &["restore", "--staged", "--worktree", "--", "."],
+        "git_discard_failed",
+    )?;
+    let cleaned = run_git(root, &["clean", "-fd"], "git_discard_failed")?;
+    Ok([restored, cleaned]
+        .into_iter()
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n"))
+}
+
+/// Delete a local branch (`git branch -d`, or `-D` when `force`). Git refuses `-d` on an
+/// unmerged branch unless forced.
+pub fn delete_branch(root: &str, name: &str, force: bool) -> Result<String, BridgeError> {
+    let flag = if force { "-D" } else { "-d" };
+    run_git(root, &["branch", flag, name], "git_delete_branch_failed")
+}
+
+/// Build `git <verb> -- <paths>` argument list.
+fn git_paths_args<'a>(verb: &'a str, paths: &'a [String]) -> Vec<&'a str> {
+    let mut args = vec![verb, "--"];
+    args.extend(paths.iter().map(String::as_str));
+    args
+}
+
+/// Build `git <verb> <flags...> -- <paths>` argument list.
+fn git_paths_args_extra<'a>(verb: &'a str, flags: &[&'a str], paths: &'a [String]) -> Vec<&'a str> {
+    let mut args = vec![verb];
+    args.extend_from_slice(flags);
+    args.push("--");
+    args.extend(paths.iter().map(String::as_str));
+    args
+}
+
+/// Run a `git` subcommand in `root`, returning its combined stdout+stderr (trimmed) on
+/// success, or a `BridgeError` tagged `fail_code` with git's first error line. (Several git
+/// write commands report their useful output on stderr even when they succeed.)
+fn run_git(root: &str, args: &[&str], fail_code: &str) -> Result<String, BridgeError> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(args)
+        .output()
+        .map_err(|error| BridgeError::new("git_unavailable", error.to_string()))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(BridgeError::new(
+            fail_code,
+            first_line(&stderr)
+                .unwrap_or("git command failed")
+                .to_string(),
+        ));
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let mut message = stdout.trim().to_string();
+    let stderr = stderr.trim();
+    if !stderr.is_empty() {
+        if !message.is_empty() {
+            message.push('\n');
+        }
+        message.push_str(stderr);
+    }
+    Ok(message)
 }
 
 /// Parse `git status --porcelain=v1 --branch` output. Pure, so the branch/ahead-behind and
@@ -218,5 +446,34 @@ mod tests {
         let status = parse_status("/repo", "## HEAD (no branch)\n");
         assert_eq!(status.branch, None);
         assert!(status.clean);
+    }
+
+    #[test]
+    fn discover_repos_returns_the_root_when_it_is_a_repo() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        std::fs::create_dir(dir.path().join(".git")).expect("mk .git");
+        let root = dir.path().to_string_lossy().to_string();
+        assert_eq!(discover_repos(&root), vec![root]);
+    }
+
+    #[test]
+    fn discover_repos_finds_child_repos_in_a_folder() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        for name in ["alpha", "beta"] {
+            std::fs::create_dir_all(dir.path().join(name).join(".git")).expect("mk child repo");
+        }
+        // A non-repo subdir is ignored.
+        std::fs::create_dir(dir.path().join("notarepo")).expect("mk plain dir");
+        let repos = discover_repos(&dir.path().to_string_lossy());
+        assert_eq!(repos.len(), 2);
+        assert!(repos[0].ends_with("alpha"));
+        assert!(repos[1].ends_with("beta"));
+    }
+
+    #[test]
+    fn discover_repos_empty_for_a_plain_folder() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        std::fs::create_dir(dir.path().join("plain")).expect("mk plain dir");
+        assert!(discover_repos(&dir.path().to_string_lossy()).is_empty());
     }
 }

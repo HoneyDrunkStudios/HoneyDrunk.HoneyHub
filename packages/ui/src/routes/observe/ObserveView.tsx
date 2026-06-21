@@ -16,6 +16,7 @@ import { enabledIds, getConnectorConfig, loadConnectorConfig, loadConnectorPrefs
 import { formatRelative, useRelativeNow } from "../../relativeTime";
 import type { ServiceBusTotals } from "./serviceBusModel";
 import { byAttention, filterEntities, serviceBusTotals } from "./serviceBusModel";
+import { ServiceBusConnectionsPanel } from "./ServiceBusConnectionsPanel";
 
 export interface ObserveViewProps {
   client: WireClient;
@@ -74,7 +75,12 @@ export function ObserveView({ client, active }: Readonly<ObserveViewProps>): Rea
         </p>
       ) : (
         <>
-          {sources.includes("servicebus") && <ServiceBusPanel client={client} active={active} />}
+          {sources.includes("servicebus") && (
+            <>
+              <ServiceBusConnectionsPanel client={client} active={active} />
+              <ServiceBusPanel client={client} active={active} />
+            </>
+          )}
           {sources.includes("grafana") && (
             <GrafanaPanel
               client={client}
@@ -610,7 +616,7 @@ function receiveResultText(result: ServiceBusReceive): string {
 /** The expanded read-only message browse for one entity: a list of peeked messages (id, seq,
     enqueued time, body), or the honest "helper not installed / not signed in" state. When
     viewing a dead-letter peek, offers a confirmation-gated **Resubmit** (move back to source). */
-function PeekDetail({
+export function PeekDetail({
   peeking,
   peek,
   resubmitting,

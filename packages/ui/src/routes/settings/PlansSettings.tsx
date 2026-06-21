@@ -1,5 +1,6 @@
 import type { AgentBackend } from "@honeydrunk/honeyhub-types";
 import { backendLabel } from "../../backends";
+import { NumberField } from "../../components/NumberField";
 import { getPlan, setPlan, type PlanType, type Plans } from "../../plans";
 import { allBackends } from "../../settingsModel";
 
@@ -74,16 +75,14 @@ export function PlansSettings({ plans, onChange, heading = "Subscription plans" 
                 <option value="metered">Metered (pay per token)</option>
               </select>
               {plan.type === "flat" && (
-                <input
-                  className="chip-input plan-monthly"
-                  type="number"
+                <NumberField
+                  className="plan-monthly"
                   min={0}
-                  step="any"
-                  inputMode="decimal"
-                  aria-label={`${backendLabel(backend)} monthly cost (USD)`}
+                  step={5}
+                  ariaLabel={`${backendLabel(backend)} monthly cost (USD)`}
                   placeholder="$ / month"
-                  value={plan.monthlyUsd ?? ""}
-                  onChange={(event) => setMonthly(backend, event.target.value)}
+                  value={plan.monthlyUsd === undefined ? "" : String(plan.monthlyUsd)}
+                  onChange={(monthly) => setMonthly(backend, monthly)}
                 />
               )}
             </li>

@@ -1,4 +1,13 @@
-import { useEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactElement } from "react";
+import {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ClipboardEvent,
+  type DragEvent,
+  type KeyboardEvent,
+  type ReactElement
+} from "react";
 import type {
   AgentBackend,
   AgentDefinition,
@@ -13,6 +22,7 @@ import type {
 } from "@honeydrunk/honeyhub-types";
 import { UsageBadge } from "../../components/UsageBadge";
 import { backendLabel } from "../../backends";
+import { resolveDefaultWorkspaceRoot } from "../../settingsModel";
 import type { Plans } from "../../plans";
 import { recommendBackend } from "../routing/router";
 import { loadRoutingSnapshot } from "../routing/routingSnapshot";
@@ -20,6 +30,13 @@ import { SessionDiagnostics } from "./SessionDiagnostics";
 import { WorkspacePicker } from "./WorkspacePicker";
 import { ModelMenu, type ModelOption } from "./ModelMenu";
 import { getChat, loadChatSummaries, saveChat, type ChatRecord } from "../../chatHistory";
+import {
+  formatBytes,
+  MAX_ATTACHMENT_BYTES,
+  readFileAsAttachment,
+  toChatAttachments,
+  type PendingAttachment
+} from "../chat/attachments";
 import {
   availableSlashCommands,
   filterSlashCommands,
@@ -55,6 +72,18 @@ export interface RunScreenProps {
   /** The user's subscription plans. Used only to enrich the router's recommendation:
       a flat-rate plan makes that backend effectively free in cost-optimize mode. */
   plans?: Plans;
+  /** Layout variant. `full` is the dedicated Chat page (transcript + a details aside);
+      `sidebar` is the compact docked panel (single column, no aside) that the
+      ChatSidebar renders. Both share all the chat logic — only the chrome differs. */
+  variant?: "full" | "sidebar";
+  /** The session id this surface runs under. Defaults to the original single-session id.
+      The sidebar passes its own so its runs do not collide with the full Chat page's. */
+  sessionId?: string;
+  /** The user's default workspace, pre-selected in the composer's workspace picker.
+      Falls back to the first root when unset or no longer configured. */
+  defaultWorkspaceRoot?: string;
+  /** Set the default workspace (the picker's star). Omitted = no default affordance. */
+  onSetDefaultWorkspaceRoot?: (root: string) => void;
   /** Persist locations browsed from the composer's workspace picker (folder or the
       repos a `.code-workspace` resolves to). */
   onAddWorkspaceRoots?: (paths: string[]) => void;
@@ -105,6 +134,16 @@ function isTerminal(state: DispatchRunState | undefined): boolean {
   return state !== undefined && TERMINAL.has(state);
 }
 
+/** Append a short note naming the attached files to the displayed user turn, so the
+    transcript honestly reflects what was sent (the bridge injects the real paths). */
+function withAttachmentNote(text: string, attachments: PendingAttachment[]): string {
+  if (attachments.length === 0) {
+    return text;
+  }
+  const names = attachments.map((item) => item.name).join(", ");
+  return `${text}\n\n[Attached: ${names}]`;
+}
+
 export function RunScreen({
   client,
   workspaceRoots = [],
@@ -112,6 +151,10 @@ export function RunScreen({
   catalog = [],
   enabledModels = {},
   plans = {},
+  variant = "full",
+  sessionId = "session-1",
+  defaultWorkspaceRoot,
+  onSetDefaultWorkspaceRoot,
   onAddWorkspaceRoots,
   onRunStarted
 }: Readonly<RunScreenProps>) {
@@ -125,7 +168,9 @@ export function RunScreen({
   const [task, setTask] = useState("");
   // A varied prompt per mount (time-seeded), intentionally not reactive to clicks.
   const [promptIndex] = useState(() => Date.now() % COMPOSER_PROMPTS.length);
-  const [workspaceRoot, setWorkspaceRoot] = useState(workspaceRoots[0] ?? "");
+  const [workspaceRoot, setWorkspaceRoot] = useState(() =>
+    resolveDefaultWorkspaceRoot(workspaceRoots, defaultWorkspaceRoot)
+  );
   const [runId, setRunId] = useState<string | undefined>(undefined);
   const [runState, setRunState] = useState<DispatchRunState | undefined>(undefined);
   const [messages, setMessages] = useState<DispatchMessage[]>([]);
@@ -163,6 +208,11 @@ export function RunScreen({
   // Durable, bridge-backed past sessions (synced history). Populated from the bridge's
   // LocalStore when available; clicking one reopens it read-only.
   const [syncedSessions, setSyncedSessions] = useState<DispatchSession[]>([]);
+  // Files staged in the composer (picked, pasted, or dropped) to send with the next turn.
+  // The bridge writes them to a temp dir and references their paths in the task.
+  const [attachments, setAttachments] = useState<PendingAttachment[]>([]);
+  const [attachError, setAttachError] = useState<string | undefined>(undefined);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   // The routing snapshot, loaded once through the consumption seam (a fetch-shaped
   // loader; v1 returns the bundled JSON projection).
@@ -442,19 +492,74 @@ export function RunScreen({
 
   const userMessage = (id: string, forRunId: string, body: string): DispatchMessage => ({
     id,
-    sessionId: "session-1",
+    sessionId,
     runId: forRunId,
     role: "user",
     body,
     createdAt: new Date().toISOString()
   });
 
+  // Stage files for the next turn (from the picker, a paste, or a drop). Oversized files
+  // are rejected with an inline note; the rest are read to base64 and added as chips.
+  const addFiles = async (files: FileList | File[] | null | undefined): Promise<void> => {
+    if (files === null || files === undefined) {
+      return;
+    }
+    const list = Array.from(files);
+    if (list.length === 0) {
+      return;
+    }
+    setAttachError(undefined);
+    for (const file of list) {
+      if (file.size > MAX_ATTACHMENT_BYTES) {
+        setAttachError(
+          `${file.name.length > 0 ? file.name : "That file"} is too large (max ${formatBytes(
+            MAX_ATTACHMENT_BYTES
+          )}).`
+        );
+        continue;
+      }
+      try {
+        const attachment = await readFileAsAttachment(file);
+        setAttachments((prev) => [...prev, attachment]);
+      } catch {
+        setAttachError("Could not read that file.");
+      }
+    }
+  };
+
+  const removeAttachment = (id: string): void => {
+    setAttachments((prev) => prev.filter((item) => item.id !== id));
+  };
+
+  // Pasting an image (or any file) into the composer stages it, matching how the major
+  // chat clients accept a screenshot from the clipboard.
+  const onComposerPaste = (event: ClipboardEvent<HTMLElement>): void => {
+    const files = event.clipboardData?.files;
+    if (files !== undefined && files.length > 0) {
+      void addFiles(files);
+    }
+  };
+
+  // Dropping files onto the composer stages them too.
+  const onComposerDrop = (event: DragEvent<HTMLElement>): void => {
+    const files = event.dataTransfer?.files;
+    if (files !== undefined && files.length > 0) {
+      event.preventDefault();
+      void addFiles(files);
+    }
+  };
+
   // Begin a run under a client-preallocated id. Binding `runIdRef` (and the
   // request's `requestedRunId`) before `start` means the event handler filters to
   // this run from the first event, rather than briefly accepting all events.
   const beginRun = async (
     taskText: string,
-    options?: { followUpToRunId?: string; transcript?: DispatchMessage[] }
+    options?: {
+      followUpToRunId?: string;
+      transcript?: DispatchMessage[];
+      attachments?: PendingAttachment[];
+    }
   ): Promise<string> => {
     const newRunId = crypto.randomUUID();
     runIdRef.current = newRunId;
@@ -476,7 +581,7 @@ export function RunScreen({
     setRunStartedAt(startedAt);
     onRunStarted?.({
       runId: newRunId,
-      sessionId: "session-1",
+      sessionId,
       backend: launchBackend,
       task: taskText,
       ...(launchModel === undefined ? {} : { model: launchModel }),
@@ -485,7 +590,7 @@ export function RunScreen({
 
     const request: StartRunRequest = {
       session: {
-        id: "session-1",
+        id: sessionId,
         backend: launchBackend,
         title: taskText,
         workspaceRoot,
@@ -514,16 +619,22 @@ export function RunScreen({
     if (options?.transcript !== undefined) {
       request.transcript = options.transcript;
     }
+    if (options?.attachments !== undefined && options.attachments.length > 0) {
+      request.attachments = toChatAttachments(options.attachments);
+    }
     await client.start(request);
     return newRunId;
   };
 
   const onStart = async () => {
     const trimmed = task.trim();
-    if (trimmed.length === 0) {
-      setError("Enter a task to start a run.");
+    if (trimmed.length === 0 && attachments.length === 0) {
+      setError("Enter a task or attach a file to start a run.");
       return;
     }
+    // An attachment-only turn still needs a prompt for the agent; supply a neutral one.
+    const taskText = trimmed.length > 0 ? trimmed : "Take a look at the attached file(s).";
+    const sent = attachments;
     // A workspace is optional — with none picked, the bridge runs a "just chat" session
     // in the user's home dir.
     setError(undefined);
@@ -531,35 +642,53 @@ export function RunScreen({
     setActivities([]);
     setUsage([]);
     try {
-      const newRunId = await beginRun(trimmed);
-      setMessages([userMessage("user-0", newRunId, trimmed)]);
+      const newRunId = await beginRun(taskText, sent.length > 0 ? { attachments: sent } : undefined);
+      setMessages([userMessage("user-0", newRunId, withAttachmentNote(taskText, sent))]);
+      setAttachments([]);
+      setAttachError(undefined);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "failed to start run");
     }
   };
 
   const onSend = async () => {
-    const trimmed = reply.trim();
-    if (trimmed.length === 0 || runId === undefined) {
+    if (runId === undefined) {
       return;
     }
-    setReply("");
+    const trimmed = reply.trim();
     try {
       if (needsInput) {
-        // Live, same-process reply into the active run.
+        // Live, same-process reply into the active run (text only; attachments belong to a
+        // new run, not a live in-process reply).
+        if (trimmed.length === 0) {
+          return;
+        }
+        setReply("");
         setMessages((prev) => [...prev, userMessage(`user-${prev.length}`, runId, trimmed)]);
         await client.reply(runId, trimmed);
       } else if (canFollowUp) {
         // A follow-up after completion is a NEW run carrying the prior transcript
         // (ADR-0090 D4 / StartRunRequest.followUpToRunId), not a reply into the
-        // completed run.
+        // completed run. It can carry its own attachments.
+        if (trimmed.length === 0 && attachments.length === 0) {
+          return;
+        }
+        const taskText = trimmed.length > 0 ? trimmed : "Take a look at the attached file(s).";
+        const sent = attachments;
+        setReply("");
         const priorTranscript = messages;
         const previousRunId = runId;
-        const newRunId = await beginRun(trimmed, {
+        const newRunId = await beginRun(taskText, {
           followUpToRunId: previousRunId,
-          transcript: priorTranscript
+          transcript: priorTranscript,
+          ...(sent.length > 0 ? { attachments: sent } : {})
         });
-        setMessages((prev) => [...prev, userMessage(`user-${prev.length}`, newRunId, trimmed)]);
+        setMessages((prev) => [
+          ...prev,
+          userMessage(`user-${prev.length}`, newRunId, withAttachmentNote(taskText, sent))
+        ]);
+        setAttachments([]);
+        setAttachError(undefined);
       }
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "failed to send");
@@ -733,6 +862,68 @@ export function RunScreen({
     </>
   );
 
+  // The "attach a file" control: a paperclip button that opens the OS file picker. The
+  // staged files render as chips (below the composer) via `attachmentChips`. Paste + drop
+  // are wired on the input surfaces themselves.
+  const attachButton = (
+    <>
+      <input
+        ref={fileInputRef}
+        type="file"
+        multiple
+        className="visually-hidden"
+        aria-label="Attach files"
+        onChange={(event) => {
+          void addFiles(event.target.files);
+          // Reset so re-picking the same file fires another change.
+          event.target.value = "";
+        }}
+      />
+      <button
+        type="button"
+        className="chip-button attach-button"
+        aria-label="Attach files"
+        title="Attach files or paste an image"
+        onClick={() => fileInputRef.current?.click()}
+      >
+        <IconPaperclip />
+      </button>
+    </>
+  );
+
+  // The staged-attachment chips + any read error. Shown above the send row in the composer
+  // and the follow-up box so the user can see and remove what they are about to send.
+  const attachmentChips =
+    attachments.length === 0 && attachError === undefined ? null : (
+      <div className="attachment-tray">
+        {attachments.length > 0 && (
+          <ul className="attachment-list" aria-label="Attachments">
+            {attachments.map((item) => (
+              <li key={item.id} className="attachment-chip">
+                <span className="attachment-name" title={item.name}>
+                  {item.name}
+                </span>
+                <span className="attachment-size">{formatBytes(item.size)}</span>
+                <button
+                  type="button"
+                  className="attachment-remove"
+                  aria-label={`Remove ${item.name}`}
+                  onClick={() => removeAttachment(item.id)}
+                >
+                  ×
+                </button>
+              </li>
+            ))}
+          </ul>
+        )}
+        {attachError !== undefined && (
+          <p role="alert" className="attachment-error">
+            {attachError}
+          </p>
+        )}
+      </div>
+    );
+
   const renderHistory = (chat: ChatRecord) => (
     <div className="chat-history-view">
           <header className="chat-head">
@@ -764,7 +955,7 @@ export function RunScreen({
   const renderComposer = () => (
     <div className="chat-start">
           <h2 className="chat-heading">{COMPOSER_PROMPTS[promptIndex]}</h2>
-          <div className="composer">
+          <div className="composer" onDrop={onComposerDrop} onDragOver={(event) => event.preventDefault()}>
             {slashOpen && (
               <SlashMenu
                 commands={slashCommands}
@@ -782,9 +973,11 @@ export function RunScreen({
                 setTask(event.target.value);
               }}
               onKeyDown={onComposerKeyDown}
+              onPaste={onComposerPaste}
               placeholder="Do anything"
               rows={3}
             />
+            {attachmentChips}
             <div className="composer-bar">
               <div className="composer-controls">
                 <WorkspacePicker
@@ -793,7 +986,14 @@ export function RunScreen({
                   value={workspaceRoot}
                   onSelect={setWorkspaceRoot}
                   onAddRoots={onAddWorkspaceRoots ?? (() => undefined)}
+                  {...(defaultWorkspaceRoot === undefined
+                    ? {}
+                    : { defaultRoot: defaultWorkspaceRoot })}
+                  {...(onSetDefaultWorkspaceRoot === undefined
+                    ? {}
+                    : { onSetDefault: onSetDefaultWorkspaceRoot })}
                 />
+                {attachButton}
                 {modelControls}
               </div>
               <button
@@ -909,12 +1109,17 @@ export function RunScreen({
 
             <div className="run-controls">
               {(needsInput || canFollowUp) && (
-                <div className="reply-box">
+                <div
+                  className="reply-box"
+                  onDrop={canFollowUp ? onComposerDrop : undefined}
+                  onDragOver={canFollowUp ? (event) => event.preventDefault() : undefined}
+                >
                   <label htmlFor="reply">{needsInput ? "Reply" : "Follow up"}</label>
                   <input
                     id="reply"
                     value={reply}
                     onChange={(event) => setReply(event.target.value)}
+                    onPaste={canFollowUp ? onComposerPaste : undefined}
                     onKeyDown={(event) => {
                       if (event.key === "Enter") {
                         event.preventDefault();
@@ -922,11 +1127,14 @@ export function RunScreen({
                       }
                     }}
                   />
+                  {/* Attachments ride with a follow-up (a new run), not a live in-process reply. */}
+                  {canFollowUp && attachButton}
                   <button type="button" onClick={onSend}>
                     Send
                   </button>
                 </div>
               )}
+              {canFollowUp && attachmentChips}
               {active && (
                 <button type="button" className="stop" onClick={onStop}>
                   Stop
@@ -935,6 +1143,7 @@ export function RunScreen({
             </div>
           </div>
 
+          {variant === "full" && (
           <aside className="chat-details" aria-label="Run details">
             <p className="eyebrow">Details</p>
             <SessionDiagnostics backend={runBackend ?? provider} messages={messages} usage={usage} />
@@ -976,6 +1185,7 @@ export function RunScreen({
               </ul>
             )}
           </aside>
+          )}
     </div>
   );
 
@@ -991,7 +1201,7 @@ export function RunScreen({
   }
 
   return (
-    <section className="chat" aria-label="Run">
+    <section className={`chat ${variant === "sidebar" ? "chat--sidebar" : ""}`} aria-label="Run">
       {error !== undefined && (
         <p role="alert" className="settings-error">
           {error}
@@ -999,6 +1209,24 @@ export function RunScreen({
       )}
       {body}
     </section>
+  );
+}
+
+function IconPaperclip(): ReactElement {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      width="16"
+      height="16"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={2}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <path d="M21 11.5l-8.5 8.5a5 5 0 0 1-7-7l8.5-8.5a3.5 3.5 0 0 1 5 5l-8.5 8.5a2 2 0 0 1-3-3l7.8-7.8" />
+    </svg>
   );
 }
 

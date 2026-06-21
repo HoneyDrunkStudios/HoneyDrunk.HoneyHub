@@ -172,6 +172,7 @@ async fn streams_events_to_an_authenticated_client() {
                 follow_up_to_run_id: None,
                 transcript: Vec::new(),
                 launch_command: None,
+                attachments: Vec::new(),
             }),
         },
         "2026-06-07T12:00:00.000Z",

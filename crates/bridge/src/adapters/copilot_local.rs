@@ -1173,6 +1173,7 @@ mod tests {
             follow_up_to_run_id: Some("does-not-exist".to_string()),
             transcript: Vec::new(),
             launch_command: None,
+            attachments: Vec::new(),
         };
         let error = adapter
             .start(request)
@@ -1203,6 +1204,7 @@ mod tests {
             follow_up_to_run_id: None,
             transcript: Vec::new(),
             launch_command: None,
+            attachments: Vec::new(),
         };
         let error = adapter.start(request).expect_err("missing binary fails");
         assert_eq!(error.code, "backend_unavailable");

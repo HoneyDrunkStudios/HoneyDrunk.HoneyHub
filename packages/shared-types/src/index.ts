@@ -223,6 +223,20 @@ export interface PolicyHint {
   createdAt: string;
 }
 
+/** A file the user attached to a chat turn (a document or a pasted/dropped image).
+    Sent inline (base64) over the wire; the bridge writes it to a per-run temp dir and
+    references the path in the task so the agent can read it. Kept backend-agnostic on
+    purpose: every adapter gets attachments via path references, no per-CLI multimodal
+    plumbing (HoneyHub attachments v1). */
+export interface ChatAttachment {
+  /** The original file name (the bridge sanitizes it to a safe basename before writing). */
+  name: string;
+  /** The MIME type when the browser reported one (e.g. `image/png`); informational. */
+  mimeType?: string;
+  /** Base64-encoded file contents, with no `data:` URI prefix. */
+  data: string;
+}
+
 export interface StartRunRequest {
   session: DispatchSession;
   workspaceRoot: string;
@@ -241,6 +255,10 @@ export interface StartRunRequest {
   followUpToRunId?: string;
   transcript?: DispatchMessage[];
   launchCommand?: string[];
+  /** Files attached to this turn (documents, pasted/dropped images). The bridge
+      materializes them to a temp dir and appends their paths to the task so the agent
+      can read them. Omitted/empty = none. */
+  attachments?: ChatAttachment[];
 }
 
 /** One model a backend can run, offered in the model picker. `id` is the value the
@@ -586,6 +604,64 @@ export interface ServiceBusReceive {
   deadLetter: boolean;
 }
 
+// --- Service Bus connections: entity listing + management (admin client) ---
+
+/** Editable entity properties (a focused subset). Reported for an entity's current settings
+    and used to request changes; an absent field on a manage request leaves it unchanged. */
+export interface SbEntityProps {
+  maxSizeMb?: number;
+  maxDeliveryCount?: number;
+  lockDurationSeconds?: number;
+  defaultTtlSeconds?: number;
+  deadLetterOnExpiration?: boolean;
+  status?: string;
+}
+
+export interface SbQueue {
+  name: string;
+  status: string;
+  active: number;
+  deadLetter: number;
+  scheduled: number;
+  props: SbEntityProps;
+}
+
+export interface SbSubscription {
+  name: string;
+  status: string;
+  active: number;
+  deadLetter: number;
+  props: SbEntityProps;
+}
+
+export interface SbTopic {
+  name: string;
+  status: string;
+  props: SbEntityProps;
+  subscriptions: SbSubscription[];
+}
+
+/** The entities of one connection's namespace (the per-connection explorer view). */
+export interface ServiceBusEntities {
+  available: boolean;
+  error?: string;
+  namespace: string;
+  queues: SbQueue[];
+  topics: SbTopic[];
+}
+
+/** The result of a Service Bus management write (create/delete/update of an entity). */
+export interface ServiceBusManage {
+  ok: boolean;
+  error?: string;
+  namespace: string;
+  op: string;
+  kind: string;
+  entity: string;
+  subscription?: string;
+  message?: string;
+}
+
 // --- Observability connector: Grafana (opt-in, read-only summary + deep-links) ---
 
 export interface GrafanaDashboard {
@@ -653,6 +729,29 @@ export interface GitDiff {
   truncated: boolean;
 }
 
+/** The status of every repo discovered under a selected folder (or just the one repo when
+    the selected root is itself a repo). Powers the multi-repo Git dashboard. */
+export interface GitOverview {
+  root: string;
+  repos: GitStatus[];
+}
+
+/** A repo's local branches and the checked-out one (for the branch switcher). */
+export interface GitBranches {
+  root: string;
+  current?: string;
+  branches: string[];
+}
+
+/** The outcome of a git write op (stage/commit/push/pull/checkout/discard), surfaced as
+    feedback. The host also re-emits a fresh GitStatus so the view updates. */
+export interface GitOpResult {
+  root: string;
+  op: string;
+  ok: boolean;
+  message?: string;
+}
+
 export interface RunHandle {
   runId: string;
   processId?: number;
@@ -695,6 +794,7 @@ export type ClientCommand =
   | {
       kind: "peek_service_bus";
       namespace: string;
+      connectionString?: string;
       entity: string;
       subscription?: string;
       deadLetter?: boolean;
@@ -703,6 +803,7 @@ export type ClientCommand =
   | {
       kind: "resubmit_dead_letter";
       namespace: string;
+      connectionString?: string;
       entity: string;
       subscription?: string;
       count?: number;
@@ -710,6 +811,7 @@ export type ClientCommand =
   | {
       kind: "purge_service_bus";
       namespace: string;
+      connectionString?: string;
       entity: string;
       subscription?: string;
       deadLetter?: boolean;
@@ -717,6 +819,7 @@ export type ClientCommand =
   | {
       kind: "send_service_bus";
       namespace: string;
+      connectionString?: string;
       entity: string;
       body: string;
       subject?: string;
@@ -725,14 +828,37 @@ export type ClientCommand =
   | {
       kind: "receive_service_bus";
       namespace: string;
+      connectionString?: string;
       entity: string;
       subscription?: string;
       deadLetter?: boolean;
+    }
+  | { kind: "list_service_bus_entities"; namespace: string; connectionString?: string }
+  | {
+      kind: "manage_service_bus";
+      namespace: string;
+      connectionString?: string;
+      op: string;
+      entityKind: string;
+      entity: string;
+      subscription?: string;
+      props?: SbEntityProps;
     }
   | { kind: "grafana_summary"; baseUrl: string; token?: string }
   | { kind: "sentry_summary"; baseUrl?: string; org: string; project: string; token?: string }
   | { kind: "git_status"; root: string }
   | { kind: "git_diff"; root: string; path?: string }
+  | { kind: "git_overview"; root: string }
+  | { kind: "git_branches"; root: string }
+  | { kind: "git_stage"; root: string; paths: string[] }
+  | { kind: "git_unstage"; root: string; paths: string[] }
+  | { kind: "git_commit"; root: string; message: string }
+  | { kind: "git_push"; root: string }
+  | { kind: "git_pull"; root: string }
+  | { kind: "git_checkout"; root: string; name: string; create?: boolean }
+  | { kind: "git_discard"; root: string; paths: string[]; untracked?: boolean }
+  | { kind: "git_discard_all"; root: string }
+  | { kind: "git_delete_branch"; root: string; name: string; force?: boolean }
   | { kind: "list_sessions" }
   | { kind: "session_detail"; sessionId: string }
   | { kind: "roadmap" }
@@ -795,10 +921,18 @@ export type BridgeEventPayload =
   | { kind: "service_bus_purge"; result: ServiceBusPurge }
   | { kind: "service_bus_send"; result: ServiceBusSend }
   | { kind: "service_bus_receive"; result: ServiceBusReceive }
+  | { kind: "service_bus_entities"; entities: ServiceBusEntities }
+  | { kind: "service_bus_manage"; result: ServiceBusManage }
   | { kind: "grafana_summary"; summary: GrafanaSummary }
   | { kind: "sentry_summary"; summary: SentrySummary }
   | { kind: "git_status"; status: GitStatus }
   | { kind: "git_diff"; diff: GitDiff }
+  | { kind: "git_overview"; overview: GitOverview }
+  | { kind: "git_branches"; branches: GitBranches }
+  | { kind: "git_op"; result: GitOpResult }
+  /** Host-pushed: files changed on disk under the watched workspace roots (debounced). The
+      Browse + Git surfaces refresh in response. `paths` are the changed file/dir paths. */
+  | { kind: "fs_changed"; paths: string[] }
   | { kind: "session_list"; sessions: DispatchSession[] }
   | {
       kind: "session_detail";

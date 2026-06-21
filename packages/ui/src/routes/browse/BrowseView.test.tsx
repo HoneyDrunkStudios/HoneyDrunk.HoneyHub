@@ -17,7 +17,8 @@ describe("BrowseView", () => {
 
     // Navigate into the location → its listing loads (the mock scripts /demo).
     fireEvent.click(screen.getByRole("button", { name: "/demo" }));
-    await waitFor(() => expect(screen.getByText("HoneyHub")).toBeTruthy());
+    // The directory entry is a button (the changed-files panel also mentions repo names).
+    await waitFor(() => expect(screen.getByRole("button", { name: "HoneyHub" })).toBeTruthy());
     const afterOpen = browseCalls;
 
     // The Refresh button appears once inside a folder; clicking re-reads the same path.

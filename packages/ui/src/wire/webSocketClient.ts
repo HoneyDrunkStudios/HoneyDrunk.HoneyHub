@@ -315,6 +315,7 @@ export class WebSocketWireClient implements WireClient {
 
   async peekServiceBus(request: {
     namespace: string;
+    connectionString?: string;
     entity: string;
     subscription?: string;
     deadLetter?: boolean;
@@ -323,6 +324,7 @@ export class WebSocketWireClient implements WireClient {
     await this.dispatch({
       kind: "peek_service_bus",
       namespace: request.namespace,
+      ...(request.connectionString === undefined ? {} : { connectionString: request.connectionString }),
       entity: request.entity,
       ...(request.subscription === undefined ? {} : { subscription: request.subscription }),
       ...(request.deadLetter === undefined ? {} : { deadLetter: request.deadLetter }),
@@ -332,6 +334,7 @@ export class WebSocketWireClient implements WireClient {
 
   async resubmitDeadLetter(request: {
     namespace: string;
+    connectionString?: string;
     entity: string;
     subscription?: string;
     count?: number;
@@ -339,6 +342,7 @@ export class WebSocketWireClient implements WireClient {
     await this.dispatch({
       kind: "resubmit_dead_letter",
       namespace: request.namespace,
+      ...(request.connectionString === undefined ? {} : { connectionString: request.connectionString }),
       entity: request.entity,
       ...(request.subscription === undefined ? {} : { subscription: request.subscription }),
       ...(request.count === undefined ? {} : { count: request.count })
@@ -347,6 +351,7 @@ export class WebSocketWireClient implements WireClient {
 
   async purgeServiceBus(request: {
     namespace: string;
+    connectionString?: string;
     entity: string;
     subscription?: string;
     deadLetter?: boolean;
@@ -354,6 +359,7 @@ export class WebSocketWireClient implements WireClient {
     await this.dispatch({
       kind: "purge_service_bus",
       namespace: request.namespace,
+      ...(request.connectionString === undefined ? {} : { connectionString: request.connectionString }),
       entity: request.entity,
       ...(request.subscription === undefined ? {} : { subscription: request.subscription }),
       ...(request.deadLetter === undefined ? {} : { deadLetter: request.deadLetter })
@@ -362,6 +368,7 @@ export class WebSocketWireClient implements WireClient {
 
   async sendServiceBus(request: {
     namespace: string;
+    connectionString?: string;
     entity: string;
     body: string;
     subject?: string;
@@ -370,6 +377,7 @@ export class WebSocketWireClient implements WireClient {
     await this.dispatch({
       kind: "send_service_bus",
       namespace: request.namespace,
+      ...(request.connectionString === undefined ? {} : { connectionString: request.connectionString }),
       entity: request.entity,
       body: request.body,
       ...(request.subject === undefined ? {} : { subject: request.subject }),
@@ -379,6 +387,7 @@ export class WebSocketWireClient implements WireClient {
 
   async receiveServiceBus(request: {
     namespace: string;
+    connectionString?: string;
     entity: string;
     subscription?: string;
     deadLetter?: boolean;
@@ -386,9 +395,42 @@ export class WebSocketWireClient implements WireClient {
     await this.dispatch({
       kind: "receive_service_bus",
       namespace: request.namespace,
+      ...(request.connectionString === undefined ? {} : { connectionString: request.connectionString }),
       entity: request.entity,
       ...(request.subscription === undefined ? {} : { subscription: request.subscription }),
       ...(request.deadLetter === undefined ? {} : { deadLetter: request.deadLetter })
+    });
+  }
+
+  async listServiceBusEntities(request: {
+    namespace: string;
+    connectionString?: string;
+  }): Promise<void> {
+    await this.dispatch({
+      kind: "list_service_bus_entities",
+      namespace: request.namespace,
+      ...(request.connectionString === undefined ? {} : { connectionString: request.connectionString })
+    });
+  }
+
+  async manageServiceBus(request: {
+    namespace: string;
+    connectionString?: string;
+    op: "create" | "delete" | "update";
+    entityKind: "queue" | "topic" | "subscription";
+    entity: string;
+    subscription?: string;
+    props?: import("@honeydrunk/honeyhub-types").SbEntityProps;
+  }): Promise<void> {
+    await this.dispatch({
+      kind: "manage_service_bus",
+      namespace: request.namespace,
+      ...(request.connectionString === undefined ? {} : { connectionString: request.connectionString }),
+      op: request.op,
+      entityKind: request.entityKind,
+      entity: request.entity,
+      ...(request.subscription === undefined ? {} : { subscription: request.subscription }),
+      ...(request.props === undefined ? {} : { props: request.props })
     });
   }
 
@@ -418,6 +460,62 @@ export class WebSocketWireClient implements WireClient {
   async gitDiff(root: string, path?: string): Promise<void> {
     await this.dispatch(
       path === undefined ? { kind: "git_diff", root } : { kind: "git_diff", root, path }
+    );
+  }
+
+  async gitOverview(root: string): Promise<void> {
+    await this.dispatch({ kind: "git_overview", root });
+  }
+
+  async gitBranches(root: string): Promise<void> {
+    await this.dispatch({ kind: "git_branches", root });
+  }
+
+  async gitStage(root: string, paths: string[]): Promise<void> {
+    await this.dispatch({ kind: "git_stage", root, paths });
+  }
+
+  async gitUnstage(root: string, paths: string[]): Promise<void> {
+    await this.dispatch({ kind: "git_unstage", root, paths });
+  }
+
+  async gitCommit(root: string, message: string): Promise<void> {
+    await this.dispatch({ kind: "git_commit", root, message });
+  }
+
+  async gitPush(root: string): Promise<void> {
+    await this.dispatch({ kind: "git_push", root });
+  }
+
+  async gitPull(root: string): Promise<void> {
+    await this.dispatch({ kind: "git_pull", root });
+  }
+
+  async gitCheckout(root: string, name: string, create?: boolean): Promise<void> {
+    await this.dispatch(
+      create === undefined
+        ? { kind: "git_checkout", root, name }
+        : { kind: "git_checkout", root, name, create }
+    );
+  }
+
+  async gitDiscard(root: string, paths: string[], untracked?: boolean): Promise<void> {
+    await this.dispatch(
+      untracked === undefined
+        ? { kind: "git_discard", root, paths }
+        : { kind: "git_discard", root, paths, untracked }
+    );
+  }
+
+  async gitDiscardAll(root: string): Promise<void> {
+    await this.dispatch({ kind: "git_discard_all", root });
+  }
+
+  async gitDeleteBranch(root: string, name: string, force?: boolean): Promise<void> {
+    await this.dispatch(
+      force === undefined
+        ? { kind: "git_delete_branch", root, name }
+        : { kind: "git_delete_branch", root, name, force }
     );
   }
 

@@ -485,6 +485,90 @@ export class MockWireClient implements WireClient {
     });
   }
 
+  /** A scripted single-repo status (dirty by default) for the offline Git demo. */
+  private mockGitStatus(root: string, dirty = true) {
+    return {
+      root,
+      branch: "feat/honeyhub-desktop-shell",
+      upstream: "origin/feat/honeyhub-desktop-shell",
+      ahead: 2,
+      behind: 0,
+      files: dirty
+        ? [
+            { path: "packages/ui/src/App.tsx", status: " M", staged: false, untracked: false },
+            { path: "notes.md", status: "??", staged: false, untracked: true }
+          ]
+        : [],
+      clean: !dirty
+    };
+  }
+
+  async gitOverview(root: string): Promise<void> {
+    // The real host discovers repos under the folder; the mock scripts two so the multi-repo
+    // dashboard is exercisable offline (one dirty, one clean).
+    const sep = root.includes("\\") ? "\\" : "/";
+    this.emitDevice({
+      kind: "git_overview",
+      overview: {
+        root,
+        repos: [
+          this.mockGitStatus(`${root}${sep}HoneyHub`, true),
+          this.mockGitStatus(`${root}${sep}HoneyDrunk.AI`, false)
+        ]
+      }
+    });
+  }
+
+  async gitBranches(root: string): Promise<void> {
+    this.emitDevice({
+      kind: "git_branches",
+      branches: { root, current: "feat/honeyhub-desktop-shell", branches: ["main", "feat/honeyhub-desktop-shell"] }
+    });
+  }
+
+  /** Emit a write op's result + a fresh status, mirroring the host. `nowClean` reflects ops
+      that leave the tree clean (commit/discard) so the demo updates believably. */
+  private emitGitWrite(root: string, op: string, message: string, nowClean: boolean): void {
+    this.emitDevice({ kind: "git_op", result: { root, op, ok: true, message } });
+    this.emitDevice({ kind: "git_status", status: this.mockGitStatus(root, !nowClean) });
+  }
+
+  async gitStage(root: string, _paths: string[]): Promise<void> {
+    this.emitGitWrite(root, "stage", "(demo) staged", false);
+  }
+
+  async gitUnstage(root: string, _paths: string[]): Promise<void> {
+    this.emitGitWrite(root, "unstage", "(demo) unstaged", false);
+  }
+
+  async gitCommit(root: string, _message: string): Promise<void> {
+    this.emitGitWrite(root, "commit", "(demo) 1 file changed", true);
+  }
+
+  async gitPush(root: string): Promise<void> {
+    this.emitGitWrite(root, "push", "(demo) pushed to origin", false);
+  }
+
+  async gitPull(root: string): Promise<void> {
+    this.emitGitWrite(root, "pull", "(demo) Already up to date.", false);
+  }
+
+  async gitCheckout(root: string, name: string, _create?: boolean): Promise<void> {
+    this.emitGitWrite(root, "checkout", `(demo) switched to ${name}`, false);
+  }
+
+  async gitDiscard(root: string, _paths: string[], _untracked?: boolean): Promise<void> {
+    this.emitGitWrite(root, "discard", "(demo) discarded changes", true);
+  }
+
+  async gitDiscardAll(root: string): Promise<void> {
+    this.emitGitWrite(root, "discard", "(demo) discarded all changes", true);
+  }
+
+  async gitDeleteBranch(root: string, name: string, _force?: boolean): Promise<void> {
+    this.emitGitWrite(root, "delete-branch", `(demo) deleted ${name}`, false);
+  }
+
   async listSessions(): Promise<void> {
     // The real host reads the LocalStore; the mock scripts one durable past session so the
     // synced-history surface is exercisable offline.
@@ -1021,6 +1105,77 @@ export class MockWireClient implements WireClient {
           deliveryCount: 1,
           body: '{"orderId":7}'
         }
+      }
+    });
+  }
+
+  async listServiceBusEntities(request: {
+    namespace: string;
+    connectionString?: string;
+  }): Promise<void> {
+    // The real host shells the explorer helper's admin client; the mock scripts a queue (with a
+    // DLQ backlog) and a topic + subscription so the connection explorer is exercisable offline.
+    this.emitDevice({
+      kind: "service_bus_entities",
+      entities: {
+        available: true,
+        namespace: request.namespace,
+        queues: [
+          {
+            name: "notify-queue",
+            status: "Active",
+            active: 12,
+            deadLetter: 3,
+            scheduled: 0,
+            props: {
+              maxSizeMb: 1024,
+              maxDeliveryCount: 10,
+              lockDurationSeconds: 30,
+              defaultTtlSeconds: 1209600,
+              deadLetterOnExpiration: false
+            }
+          }
+        ],
+        topics: [
+          {
+            name: "telemetry",
+            status: "Active",
+            props: { maxSizeMb: 2048, defaultTtlSeconds: 1209600 },
+            subscriptions: [
+              {
+                name: "pulse-sub",
+                status: "Active",
+                active: 0,
+                deadLetter: 0,
+                props: { maxDeliveryCount: 10, lockDurationSeconds: 60 }
+              }
+            ]
+          }
+        ]
+      }
+    });
+  }
+
+  async manageServiceBus(request: {
+    namespace: string;
+    connectionString?: string;
+    op: "create" | "delete" | "update";
+    entityKind: "queue" | "topic" | "subscription";
+    entity: string;
+    subscription?: string;
+    props?: { [key: string]: unknown };
+  }): Promise<void> {
+    // The real host shells the explorer helper; the mock reports success.
+    this.emitDevice({
+      kind: "service_bus_manage",
+      result: {
+        ok: true,
+        namespace: request.namespace,
+        op: request.op,
+        kind: request.entityKind,
+        entity: request.entity,
+        ...(request.subscription === undefined ? {} : { subscription: request.subscription }),
+        message: `(demo) ${request.op}d ${request.entityKind} ${request.entity}`
       }
     });
   }

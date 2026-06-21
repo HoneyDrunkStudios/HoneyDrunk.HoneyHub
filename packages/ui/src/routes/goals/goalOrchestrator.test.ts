@@ -48,10 +48,23 @@ class FakeClient implements WireClient {
   async purgeServiceBus(): Promise<void> {}
   async sendServiceBus(): Promise<void> {}
   async receiveServiceBus(): Promise<void> {}
+  async listServiceBusEntities(): Promise<void> {}
+  async manageServiceBus(): Promise<void> {}
   async grafanaSummary(): Promise<void> {}
   async sentrySummary(): Promise<void> {}
   async gitStatus(): Promise<void> {}
   async gitDiff(): Promise<void> {}
+  async gitOverview(): Promise<void> {}
+  async gitBranches(): Promise<void> {}
+  async gitStage(): Promise<void> {}
+  async gitUnstage(): Promise<void> {}
+  async gitCommit(): Promise<void> {}
+  async gitPush(): Promise<void> {}
+  async gitPull(): Promise<void> {}
+  async gitCheckout(): Promise<void> {}
+  async gitDiscard(): Promise<void> {}
+  async gitDiscardAll(): Promise<void> {}
+  async gitDeleteBranch(): Promise<void> {}
   async listSessions(): Promise<void> {}
   async sessionDetail(): Promise<void> {}
   async roadmap(): Promise<void> {}

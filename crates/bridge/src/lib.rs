@@ -3,6 +3,7 @@ pub mod adapter;
 pub mod adapters;
 pub mod agents;
 pub mod artifact;
+pub mod attachments;
 pub mod backend_catalog;
 pub mod clock;
 pub mod coaching;
@@ -26,7 +27,8 @@ pub mod work;
 
 pub use activity::{ActivityKind, DispatchActivity};
 pub use adapter::{
-    AgentBackend, AgentBackendAdapter, BridgeError, CapabilityFlags, RunHandle, StartRunRequest,
+    AgentBackend, AgentBackendAdapter, BridgeError, CapabilityFlags, ChatAttachment, RunHandle,
+    StartRunRequest,
 };
 pub use adapters::{
     default_event_clock, ClaudeLocalAdapter, CodexLocalAdapter, CopilotLocalAdapter, EventClock,
@@ -36,6 +38,7 @@ pub use agents::{
     AgentBackendBinding, AgentDefinition, AgentScope, RawAgent, GLOBAL_LABEL,
 };
 pub use artifact::{ArtifactKind, DispatchArtifact};
+pub use attachments::{append_attachment_refs, attachment_dir, write_attachments};
 pub use backend_catalog::{
     detect_default_backends, detect_one, program_on_path, BackendCapability, BackendModel,
     ModelSource,
@@ -47,7 +50,14 @@ pub use fsbrowse::{
     browse_dir, is_workspace_file, read_file, resolve_workspace_file, search_files, DirEntry,
     DirEntryKind, DirListing, FileContents, SearchHit, SearchResults, WorkspaceFolders,
 };
-pub use git::{diff as git_diff, status as git_status, GitDiff, GitFileStatus, GitStatus};
+pub use git::{
+    branches as git_branches, checkout as git_checkout, commit as git_commit,
+    delete_branch as git_delete_branch, diff as git_diff, discard as git_discard,
+    discard_all as git_discard_all, discover_repos as git_discover_repos, overview as git_overview,
+    pull as git_pull, push as git_push, stage as git_stage, status as git_status,
+    unstage as git_unstage, GitBranches, GitDiff, GitFileStatus, GitOpResult, GitOverview,
+    GitStatus,
+};
 pub use grafana::{summary as grafana_summary, GrafanaDashboard, GrafanaSummary};
 pub use jobs::{
     snapshot as job_snapshot, JobProbe, JobSnapshot, KnownJob, ProcessInfo, ScheduledTask,
@@ -68,9 +78,11 @@ pub use roadmap::{
 };
 pub use sentry::{summary as sentry_summary, SentryIssue, SentrySummary};
 pub use servicebus::{
-    peek as service_bus_peek, purge as service_bus_purge, receive_one as service_bus_receive,
+    list_entities as service_bus_entities, manage as service_bus_manage, peek as service_bus_peek,
+    purge as service_bus_purge, receive_one as service_bus_receive,
     resubmit_dead_letter as service_bus_resubmit, send as service_bus_send,
-    snapshot as service_bus_snapshot, PeekMessage, ServiceBusEntity, ServiceBusEntityKind,
+    snapshot as service_bus_snapshot, PeekMessage, SbEntityProps, SbQueue, SbSubscription, SbTopic,
+    ServiceBusEntities, ServiceBusEntity, ServiceBusEntityKind, ServiceBusManage,
     ServiceBusNamespace, ServiceBusPeek, ServiceBusPurge, ServiceBusReceive, ServiceBusResubmit,
     ServiceBusSend, ServiceBusSnapshot,
 };

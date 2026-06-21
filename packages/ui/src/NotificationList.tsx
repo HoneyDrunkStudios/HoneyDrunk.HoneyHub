@@ -1,41 +1,76 @@
-import type { Notification, NotificationKind } from "@honeydrunk/honeyhub-types";
+import type { ReactElement } from "react";
+import type { AppNotification, AppNotificationKind } from "./notifications";
+import { formatRelative, useRelativeNow } from "./relativeTime";
 
-const KIND_LABEL: Record<NotificationKind, string> = {
-  needs_input: "Needs input",
-  completed: "Completed",
-  failed: "Failed",
-  cancelled: "Cancelled",
-  pr_opened: "PR opened"
+const KIND_LABEL: Record<AppNotificationKind, string> = {
+  chat_finished: "Chat",
+  work_assigned: "Assigned",
+  work_mentioned: "Mentioned",
+  pr_review: "Review",
+  dead_letter: "Dead-letter"
 };
 
 export interface NotificationListProps {
-  notifications: Notification[];
+  notifications: AppNotification[];
+  active: boolean;
+  onMarkAllRead: () => void;
+  onClear: () => void;
 }
 
-// Renders the state-only notifications (status/backend/repo/link). It can only
-// show what the Notification type carries, so no transcript/path content can
-// reach the UI here.
-export function NotificationList({ notifications }: Readonly<NotificationListProps>) {
+/** The Alerts feed: chat-finished, work assigned/mentioned, PR review requests, and new
+    dead-letters. Populated by the notification engine; OS toasts mirror these when desktop
+    notifications are enabled in Settings. */
+export function NotificationList({
+  notifications,
+  active,
+  onMarkAllRead,
+  onClear
+}: Readonly<NotificationListProps>): ReactElement {
+  const now = useRelativeNow(active);
   return (
     <section className="notifications" aria-label="Notifications">
       <header className="notifications-header">
-        <h2>Notifications</h2>
-        <span className="notifications-badge" aria-label="Notification count">
-          {notifications.length}
-        </span>
+        <h2>Alerts</h2>
+        <div className="notifications-actions">
+          <span className="notifications-badge" aria-label="Notification count">
+            {notifications.length}
+          </span>
+          {notifications.length > 0 && (
+            <>
+              <button type="button" className="link-button" onClick={onMarkAllRead}>
+                Mark all read
+              </button>
+              <button type="button" className="link-button" onClick={onClear}>
+                Clear
+              </button>
+            </>
+          )}
+        </div>
       </header>
 
       {notifications.length === 0 ? (
-        <p className="body">No notifications yet.</p>
+        <p className="body">
+          No alerts yet. You will be notified when a chat finishes while you are elsewhere, work
+          is assigned to you or mentions you, a PR needs your review, or a new dead-letter
+          arrives. Tune these in <strong>Settings → Notifications</strong>.
+        </p>
       ) : (
         <ul aria-label="Notification list">
           {notifications.map((notification) => (
-            <li key={notification.id} className={`notification kind-${notification.kind}`}>
-              <span className="notification-kind">{KIND_LABEL[notification.kind]}</span>
-              <span className="notification-backend">{notification.backend}</span>
-              {notification.repo !== undefined && (
-                <span className="notification-repo">{notification.repo}</span>
-              )}
+            <li
+              key={notification.id}
+              className={`notification kind-${notification.kind} ${notification.read ? "is-read" : "is-unread"}`}
+            >
+              <span className={`notification-kind kind-${notification.kind}`}>
+                {KIND_LABEL[notification.kind]}
+              </span>
+              <div className="notification-main">
+                <span className="notification-title">{notification.title}</span>
+                <span className="notification-body">{notification.body}</span>
+              </div>
+              <span className="notification-time">
+                {formatRelative(now, Date.parse(notification.createdAt))}
+              </span>
               {notification.link !== undefined && (
                 <a href={notification.link} target="_blank" rel="noopener noreferrer">
                   open

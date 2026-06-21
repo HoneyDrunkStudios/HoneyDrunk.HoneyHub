@@ -26,9 +26,13 @@ use honeyhub_bridge::{
     PairingRegistry, WorkspaceAllowlist,
 };
 use honeyhub_bridge_host::{bind, serve, DEFAULT_POLL_INTERVAL};
+use tauri_plugin_dialog::{DialogExt, MessageDialogButtons};
+use tauri_plugin_updater::UpdaterExt;
 
 fn main() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             let (url, _bound) = start_bridge()?;
             tauri::WebviewWindowBuilder::new(
@@ -40,10 +44,54 @@ fn main() {
             .inner_size(1280.0, 860.0)
             .min_inner_size(960.0, 640.0)
             .build()?;
+            // Best-effort self-update check on launch (no-op until the updater endpoint +
+            // public key are configured; see tauri.conf.json + .github/workflows/release.yml).
+            check_for_update(app.handle().clone());
             Ok(())
         })
         .run(tauri::generate_context!())
         .expect("error while running HoneyHub desktop");
+}
+
+/// Check the release manifest for a newer signed build; if one exists, ask the user, then
+/// download + verify + install and relaunch. Entirely best-effort: a missing/placeholder
+/// updater config, no network, or a failed check just means "no update right now" — it must
+/// never break the app. Only the native shell runs this; the served PWA updates via its assets.
+fn check_for_update(app: tauri::AppHandle) {
+    tauri::async_runtime::spawn(async move {
+        let Ok(updater) = app.updater() else {
+            return;
+        };
+        let update = match updater.check().await {
+            Ok(Some(update)) => update,
+            _ => return,
+        };
+        let version = update.version.clone();
+        let restart_app = app.clone();
+        app.dialog()
+            .message(format!(
+                "HoneyHub {version} is available. Install it now? The app will restart."
+            ))
+            .title("Update available")
+            .buttons(MessageDialogButtons::OkCancelCustom(
+                "Install & restart".to_string(),
+                "Later".to_string(),
+            ))
+            .show(move |install| {
+                if !install {
+                    return;
+                }
+                tauri::async_runtime::spawn(async move {
+                    if update
+                        .download_and_install(|_chunk, _total| {}, || {})
+                        .await
+                        .is_ok()
+                    {
+                        restart_app.restart();
+                    }
+                });
+            });
+    });
 }
 
 /// Build the bridge runtime, bind an ephemeral loopback port, spawn the cockpit

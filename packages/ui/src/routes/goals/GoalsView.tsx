@@ -2,6 +2,7 @@ import { useState } from "react";
 import type { ReactElement } from "react";
 import type { AgentBackend } from "@honeydrunk/honeyhub-types";
 import { backendLabel } from "../../backends";
+import { NumberField } from "../../components/NumberField";
 import { isGoalActive, type Goal } from "./goalsModel";
 import type { GoalStartInput } from "./goalOrchestrator";
 
@@ -158,22 +159,16 @@ function NewGoalForm({ backends, onCreate }: Readonly<NewGoalFormProps>): ReactE
         </label>
         <label>
           Max iterations{" "}
-          <input
-            type="number"
-            min={1}
-            value={maxIterations}
-            onChange={(event) => setMaxIterations(event.target.value)}
-          />
+          <NumberField min={1} value={maxIterations} onChange={setMaxIterations} ariaLabel="Max iterations" />
         </label>
         <label>
           Spend cap (USD, optional){" "}
-          <input
-            type="number"
+          <NumberField
             min={0}
-            step={0.01}
             value={spendCap}
-            onChange={(event) => setSpendCap(event.target.value)}
+            onChange={setSpendCap}
             placeholder="none"
+            ariaLabel="Spend cap (USD, optional)"
           />
         </label>
       </div>

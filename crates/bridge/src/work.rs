@@ -144,6 +144,23 @@ fn fetch_github() -> WorkSource {
                 "number,title,repository,url,state,updatedAt,labels",
             ],
         ),
+        (
+            // Issues/PRs that @-mention you (including in comments) — the "tagged me" source.
+            WorkItemKind::Issue,
+            "Mentioned",
+            vec![
+                "search",
+                "issues",
+                "--mentions",
+                "@me",
+                "--state",
+                "open",
+                "--limit",
+                "50",
+                "--json",
+                "number,title,repository,url,state,updatedAt,labels",
+            ],
+        ),
     ];
 
     let mut items: Vec<WorkItem> = Vec::new();
@@ -280,12 +297,21 @@ fn fetch_ado() -> WorkSource {
         };
     }
     match run_az_boards() {
-        Ok(json) => WorkSource {
-            source: ADO_SOURCE.to_string(),
-            available: true,
-            error: None,
-            items: parse_ado_items(&json),
-        },
+        Ok(json) => {
+            let mut items = parse_ado_items(&json);
+            // Best-effort: also surface PRs awaiting your review (the "PR put up for you"
+            // source for ADO). Resolving the signed-in user can fail (Graph perms), and the
+            // PR query needs a default project — either failure just contributes no PRs rather
+            // than flipping the whole source unavailable.
+            items.extend(fetch_ado_review_prs());
+            dedup_by_id(&mut items);
+            WorkSource {
+                source: ADO_SOURCE.to_string(),
+                available: true,
+                error: None,
+                items,
+            }
+        }
         Err(error) => WorkSource {
             source: ADO_SOURCE.to_string(),
             available: false,
@@ -374,6 +400,127 @@ fn ado_html_url(api_url: &str, id: u64) -> String {
         return format!("{base}/_workitems/edit/{id}");
     }
     String::new()
+}
+
+/// Best-effort: PRs in the configured ADO project awaiting the signed-in user's review (the
+/// "PR put up for you" source for ADO). Returns an empty vec on any failure — no signed-in
+/// user, no default project, or a CLI error — so the assigned work items still surface.
+fn fetch_ado_review_prs() -> Vec<WorkItem> {
+    let Some(user) = signed_in_user() else {
+        return Vec::new();
+    };
+    match run_az(&[
+        "repos",
+        "pr",
+        "list",
+        "--reviewer",
+        &user,
+        "--status",
+        "active",
+        "-o",
+        "json",
+    ]) {
+        Ok(json) => parse_ado_prs(&json),
+        Err(_) => Vec::new(),
+    }
+}
+
+/// Resolve the signed-in user's principal name (for the PR `--reviewer` filter). `None` on any
+/// failure (e.g. missing Microsoft Graph permission), which simply disables the PR query.
+fn signed_in_user() -> Option<String> {
+    let output = Command::new("az")
+        .args([
+            "ad",
+            "signed-in-user",
+            "show",
+            "--query",
+            "userPrincipalName",
+            "-o",
+            "tsv",
+        ])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let upn = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if upn.is_empty() {
+        None
+    } else {
+        Some(upn)
+    }
+}
+
+/// Run a generic `az <args>` returning stdout, or a short sanitized error.
+fn run_az(args: &[&str]) -> Result<String, String> {
+    let output = Command::new("az")
+        .args(args)
+        .output()
+        .map_err(|_| "could not run the Azure CLI".to_string())?;
+    if !output.status.success() {
+        return Err("the Azure CLI returned an error".to_string());
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+/// Parse `az repos pr list -o json` into normalized review-requested PR work items. The browser
+/// URL is derived from the repository web URL + the PR id when present.
+pub fn parse_ado_prs(json: &str) -> Vec<WorkItem> {
+    let Ok(serde_json::Value::Array(rows)) = serde_json::from_str::<serde_json::Value>(json) else {
+        return Vec::new();
+    };
+    rows.into_iter()
+        .filter_map(|row| {
+            let id = row.get("pullRequestId").and_then(|v| v.as_u64())?;
+            let title = row
+                .get("title")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let repository = row.get("repository");
+            let repo_name = repository
+                .and_then(|r| r.get("name"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let project = repository
+                .and_then(|r| r.get("project"))
+                .and_then(|p| p.get("name"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let web_url = repository
+                .and_then(|r| r.get("webUrl"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let url = if web_url.is_empty() {
+                String::new()
+            } else {
+                format!("{web_url}/pullrequest/{id}")
+            };
+            let state = row
+                .get("status")
+                .and_then(|v| v.as_str())
+                .unwrap_or("active")
+                .to_string();
+            let repository_label = if project.is_empty() {
+                repo_name.to_string()
+            } else {
+                format!("{project}/{repo_name}")
+            };
+            Some(WorkItem {
+                id: format!("ado-pr-{id}"),
+                source: ADO_SOURCE.to_string(),
+                kind: WorkItemKind::PullRequest,
+                category: "Review requested".to_string(),
+                title,
+                repository: repository_label,
+                url,
+                state,
+                number: Some(id),
+                updated_at: None,
+                labels: Vec::new(),
+            })
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -466,6 +613,27 @@ mod tests {
         assert_eq!(
             item.url,
             "https://dev.azure.com/honeydrunk/proj/_workitems/edit/501"
+        );
+    }
+
+    #[test]
+    fn parses_ado_pr_rows() {
+        let json = r#"[
+            {"pullRequestId":42,"title":"Add the thing","status":"active",
+             "repository":{"name":"widgets","webUrl":"https://dev.azure.com/org/proj/_git/widgets",
+                           "project":{"name":"proj"}}},
+            {"title":"no id dropped"}
+        ]"#;
+        let items = parse_ado_prs(json);
+        assert_eq!(items.len(), 1);
+        let item = &items[0];
+        assert_eq!(item.kind, WorkItemKind::PullRequest);
+        assert_eq!(item.category, "Review requested");
+        assert_eq!(item.id, "ado-pr-42");
+        assert_eq!(item.repository, "proj/widgets");
+        assert_eq!(
+            item.url,
+            "https://dev.azure.com/org/proj/_git/widgets/pullrequest/42"
         );
     }
 

@@ -13,6 +13,10 @@ export interface WorkspacePickerProps {
   onSelect: (path: string) => void;
   /** Persist newly-browsed locations (folder or resolved .code-workspace repos). */
   onAddRoots: (paths: string[]) => void;
+  /** The user's default workspace (pre-selected across the app), if any. */
+  defaultRoot?: string;
+  /** Set a root as the default. Omitted = the default-marking affordance is hidden. */
+  onSetDefault?: (root: string) => void;
 }
 
 /** A non-typable workspace chip: clicking it opens a panel to pick "no workspace", a
@@ -22,7 +26,9 @@ export function WorkspacePicker({
   roots,
   value,
   onSelect,
-  onAddRoots
+  onAddRoots,
+  defaultRoot,
+  onSetDefault
 }: Readonly<WorkspacePickerProps>) {
   const [open, setOpen] = useState(false);
 
@@ -67,22 +73,38 @@ export function WorkspacePicker({
             </button>
             {roots.length > 0 && (
               <ul className="ws-roots" aria-label="Configured locations">
-                {roots.map((root) => (
-                  <li key={root}>
-                    <button
-                      type="button"
-                      className="ws-option"
-                      title={root}
-                      onClick={() => {
-                        onSelect(root);
-                        setOpen(false);
-                      }}
-                    >
-                      {basename(root)}
-                      <span className="ws-option-sub">{root}</span>
-                    </button>
-                  </li>
-                ))}
+                {roots.map((root) => {
+                  const isDefault = root === defaultRoot;
+                  return (
+                    <li key={root} className="ws-root-row">
+                      <button
+                        type="button"
+                        className="ws-option"
+                        title={root}
+                        onClick={() => {
+                          onSelect(root);
+                          setOpen(false);
+                        }}
+                      >
+                        {basename(root)}
+                        {isDefault && <span className="ws-default-tag">default</span>}
+                        <span className="ws-option-sub">{root}</span>
+                      </button>
+                      {onSetDefault !== undefined && (
+                        <button
+                          type="button"
+                          className={`ws-default-star ${isDefault ? "is-default" : ""}`}
+                          aria-label={isDefault ? `${basename(root)} is the default` : `Set ${basename(root)} as default`}
+                          aria-pressed={isDefault}
+                          title={isDefault ? "Default workspace" : "Set as default"}
+                          onClick={() => onSetDefault(root)}
+                        >
+                          {isDefault ? "★" : "☆"}
+                        </button>
+                      )}
+                    </li>
+                  );
+                })}
               </ul>
             )}
             <p className="ws-browse-label">Browse for a folder or .code-workspace</p>

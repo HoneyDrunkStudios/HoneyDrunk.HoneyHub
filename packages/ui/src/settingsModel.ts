@@ -21,6 +21,9 @@ export type EnabledModels = Partial<Record<AgentBackend, string[]>>;
 export interface BridgeSettingsState {
   devices: PairedDeviceView[];
   workspaceRoots: string[];
+  /** The default workspace, pre-selected across Chat / Git / Browse. Changeable any time.
+      Absent (or no longer a configured root) = fall back to the first root. */
+  defaultWorkspaceRoot?: string;
   backends: AgentBackend[];
   // Which models are enabled per provider (Bridge settings, not onboarding). Absent
   // entry = all models on. Both the manual model picker and the optimize-mode auto
@@ -127,10 +130,48 @@ export function removeWorkspaceRoot(
   if (!state.workspaceRoots.includes(root)) {
     throw new Error("workspace root is not on the allowlist");
   }
-  return {
+  const next: BridgeSettingsState = {
     ...state,
     workspaceRoots: state.workspaceRoots.filter((existing) => existing !== root)
   };
+  // Dropping the default root clears the default (consumers fall back to the first root).
+  if (next.defaultWorkspaceRoot === root) {
+    delete next.defaultWorkspaceRoot;
+  }
+  return next;
+}
+
+/** Set (or clear, with `undefined`) the default workspace. Setting requires the root to be
+    on the allowlist, so the default never points at a location that is not configured. */
+export function setDefaultWorkspaceRoot(
+  state: BridgeSettingsState,
+  root: string | undefined
+): BridgeSettingsState {
+  if (root === undefined) {
+    if (state.defaultWorkspaceRoot === undefined) {
+      return state;
+    }
+    const next = { ...state };
+    delete next.defaultWorkspaceRoot;
+    return next;
+  }
+  if (!state.workspaceRoots.includes(root)) {
+    throw new Error("default workspace must be a configured root");
+  }
+  return { ...state, defaultWorkspaceRoot: root };
+}
+
+/** The effective default workspace for a consumer: the configured default when it is still
+    a valid root, else the first root, else "" (no workspace). Centralizes the fallback so
+    Chat / Git / Browse all agree on which location is pre-selected. */
+export function resolveDefaultWorkspaceRoot(
+  roots: string[],
+  defaultRoot: string | undefined
+): string {
+  if (defaultRoot !== undefined && roots.includes(defaultRoot)) {
+    return defaultRoot;
+  }
+  return roots[0] ?? "";
 }
 
 export function setBackendAllowed(
