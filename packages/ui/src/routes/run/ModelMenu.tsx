@@ -89,7 +89,7 @@ export function ModelMenu({
     if (items.length === 0) {
       return;
     }
-    const current = items.findIndex((item) => item === document.activeElement);
+    const current = items.indexOf(document.activeElement as HTMLButtonElement);
     let next: number;
     if (event.key === "Home") {
       next = 0;
@@ -134,6 +134,7 @@ export function ModelMenu({
             className="model-popover"
             role="listbox"
             aria-label="Select model"
+            tabIndex={-1}
             onKeyDown={onListKeyDown}
           >
             {options.map((option) => {

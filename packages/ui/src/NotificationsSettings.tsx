@@ -70,6 +70,7 @@ export function NotificationsSettings({
           <input
             id="notif-toggle-desktop"
             type="checkbox"
+            aria-label="Desktop notifications"
             checked={prefs.desktop}
             disabled={permission === "unsupported" || permission === "denied"}
             onChange={() => toggle("desktop")}
@@ -94,6 +95,7 @@ export function NotificationsSettings({
               <input
                 id={`notif-toggle-${row.key}`}
                 type="checkbox"
+                aria-label={row.label}
                 checked={prefs[row.key]}
                 onChange={() => toggle(row.key)}
               />
