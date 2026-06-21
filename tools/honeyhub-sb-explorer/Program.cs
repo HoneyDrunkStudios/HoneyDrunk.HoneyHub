@@ -5,10 +5,12 @@ using Azure.Messaging.ServiceBus.Administration;
 
 // HoneyHub Service Bus explorer helper — see the .csproj header for the why.
 //
-// Auth (HoneyHub connections, ADR-0094 D5): every verb takes EITHER `--connection-string`
-// (a SAS string, cockpit-held, never persisted host-side) OR `--namespace <fqdn>` (Azure AD
-// via DefaultAzureCredential, reusing `az login`). Data-plane verbs use ServiceBusClient;
-// management + entity listing use ServiceBusAdministrationClient — both support either auth.
+// Auth (HoneyHub connections, ADR-0094 D5): every verb uses EITHER a SAS connection string
+// (cockpit-held, never persisted host-side) read from the HONEYHUB_SB_CONNECTION_STRING
+// environment variable (passed via the child env, NOT argv, so it cannot be read from a local
+// process list) OR `--namespace <fqdn>` (Azure AD via DefaultAzureCredential, reusing `az
+// login`). Data-plane verbs use ServiceBusClient; management + entity listing use
+// ServiceBusAdministrationClient — both support either auth.
 //
 // On success: a JSON document on stdout, exit 0. On failure: a short message on stderr, exit 1
 // (the bridge maps the exit/stderr to a sanitized hint; it never surfaces raw stderr to the UI).
@@ -63,7 +65,8 @@ static async Task<int> UnknownVerb(string verb)
 
 static ServiceBusClient CreateClient(Dictionary<string, string> opts)
 {
-    if (opts.TryGetValue("connection-string", out var cs) && !string.IsNullOrWhiteSpace(cs))
+    var cs = ResolveConnectionString(opts);
+    if (!string.IsNullOrWhiteSpace(cs))
     {
         return new ServiceBusClient(cs);
     }
@@ -72,11 +75,27 @@ static ServiceBusClient CreateClient(Dictionary<string, string> opts)
 
 static ServiceBusAdministrationClient CreateAdmin(Dictionary<string, string> opts)
 {
-    if (opts.TryGetValue("connection-string", out var cs) && !string.IsNullOrWhiteSpace(cs))
+    var cs = ResolveConnectionString(opts);
+    if (!string.IsNullOrWhiteSpace(cs))
     {
         return new ServiceBusAdministrationClient(cs);
     }
     return new ServiceBusAdministrationClient(Require(opts, "namespace"), new DefaultAzureCredential());
+}
+
+// Resolve the SAS connection string: the HONEYHUB_SB_CONNECTION_STRING environment variable
+// (how the bridge passes it, kept off argv so it cannot be read from a local process list),
+// with a legacy --connection-string option honored as a fallback. Null means "use Azure AD".
+static string? ResolveConnectionString(Dictionary<string, string> opts)
+{
+    var fromEnv = Environment.GetEnvironmentVariable("HONEYHUB_SB_CONNECTION_STRING");
+    if (!string.IsNullOrWhiteSpace(fromEnv))
+    {
+        return fromEnv;
+    }
+    return opts.TryGetValue("connection-string", out var cs) && !string.IsNullOrWhiteSpace(cs)
+        ? cs
+        : null;
 }
 
 // --- Data-plane verbs ---

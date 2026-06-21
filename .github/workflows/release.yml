@@ -73,10 +73,11 @@ jobs:
         run: npm run build
 
       # tauri-action builds + signs the per-OS bundles and creates/updates the draft release,
-      # generating + uploading latest.json (the updater manifest) across the matrix.
-      # NOTE: pin this to a commit SHA before merge to match the repo's action-pinning policy.
+      # generating + uploading latest.json (the updater manifest) across the matrix. Pinned to an
+      # immutable commit SHA (the signing key + contents:write make this a supply-chain-sensitive
+      # step); bump the SHA deliberately when upgrading.
       - name: Build + publish desktop app
-        uses: tauri-apps/tauri-action@v0
+        uses: tauri-apps/tauri-action@84b9d35b5fc46c1e45415bdb6144030364f7ebc5 # v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}

@@ -135,6 +135,22 @@ async fn ws_handler(
     upgrade.on_upgrade(move |socket| handle_socket(socket, state.host))
 }
 
+/// Directories whose churn is build/VCS noise rather than user edits: filesystem events anywhere
+/// under one of these are dropped before debouncing, so generated output and VCS internals do not
+/// flood `fs_changed` during builds/checkouts.
+const FS_IGNORED_DIRS: &[&str] = &[".git", "node_modules", "target", "dist"];
+
+/// True when any component of `path` is one of [`FS_IGNORED_DIRS`].
+fn is_noise_path(path: &Path) -> bool {
+    path.components().any(|component| {
+        matches!(
+            component,
+            std::path::Component::Normal(name)
+                if name.to_str().is_some_and(|name| FS_IGNORED_DIRS.contains(&name))
+        )
+    })
+}
+
 /// Install the OS-native filesystem watcher and a debounce task that coalesces raw events
 /// into `fs_changed` broadcasts. The watcher handle is stored on the host so the workspace
 /// allowlist changes can re-point it. Best-effort: if the platform watcher can't start,
@@ -144,6 +160,11 @@ async fn install_fs_watcher(host: &Arc<Host>) {
     let watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
         if let Ok(event) = res {
             for path in event.paths {
+                // Skip build/VCS churn (a `git checkout`, `npm install`, or `cargo build` would
+                // otherwise flood the cockpit with thousands of irrelevant events).
+                if is_noise_path(&path) {
+                    continue;
+                }
                 let _ = raw_tx.send(path.to_string_lossy().to_string());
             }
         }

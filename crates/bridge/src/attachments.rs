@@ -15,6 +15,12 @@
 use crate::adapter::{BridgeError, ChatAttachment};
 use std::path::PathBuf;
 
+/// Max attachments per chat turn. A generous cap that still bounds a single request.
+const MAX_ATTACHMENTS: usize = 20;
+/// Max total decoded bytes per chat turn (50 MiB), so a malformed or hostile client cannot make
+/// the bridge buffer unbounded data in memory / on disk.
+const MAX_TOTAL_ATTACHMENT_BYTES: usize = 50 * 1024 * 1024;
+
 /// The per-run directory attachments are written to:
 /// `<temp>/honeyhub/attachments/<run_id>`.
 pub fn attachment_dir(run_id: &str) -> PathBuf {
@@ -93,6 +99,15 @@ pub fn write_attachments(
     if attachments.is_empty() {
         return Ok(Vec::new());
     }
+    if attachments.len() > MAX_ATTACHMENTS {
+        return Err(BridgeError::new(
+            "attachment_rejected",
+            format!(
+                "too many attachments: {} (max {MAX_ATTACHMENTS} per message)",
+                attachments.len()
+            ),
+        ));
+    }
     let dir = attachment_dir(run_id);
     std::fs::create_dir_all(&dir).map_err(|error| {
         BridgeError::new(
@@ -102,6 +117,7 @@ pub fn write_attachments(
     })?;
 
     let mut paths = Vec::with_capacity(attachments.len());
+    let mut total_bytes: usize = 0;
     for (index, attachment) in attachments.iter().enumerate() {
         let bytes = decode_base64(&attachment.data).map_err(|error| {
             BridgeError::new(
@@ -109,6 +125,15 @@ pub fn write_attachments(
                 format!("attachment {:?}: {error}", attachment.name),
             )
         })?;
+        total_bytes = total_bytes.saturating_add(bytes.len());
+        if total_bytes > MAX_TOTAL_ATTACHMENT_BYTES {
+            return Err(BridgeError::new(
+                "attachment_rejected",
+                format!(
+                    "attachments exceed the {MAX_TOTAL_ATTACHMENT_BYTES}-byte per-message limit"
+                ),
+            ));
+        }
         let file_name = format!("{index}-{}", sanitize_name(&attachment.name));
         let path = dir.join(&file_name);
         std::fs::write(&path, &bytes).map_err(|error| {
@@ -213,6 +238,21 @@ mod tests {
         }];
         let error = write_attachments(&run_id, &attachments).expect_err("invalid base64 fails");
         assert_eq!(error.code, "attachment_decode_failed");
+        let _ = std::fs::remove_dir_all(attachment_dir(&run_id));
+    }
+
+    #[test]
+    fn write_attachments_rejects_too_many() {
+        let run_id = format!("test-many-{}", uuid::Uuid::new_v4());
+        let attachments: Vec<ChatAttachment> = (0..=MAX_ATTACHMENTS)
+            .map(|i| ChatAttachment {
+                name: format!("f{i}.txt"),
+                mime_type: None,
+                data: "aGk=".to_string(),
+            })
+            .collect();
+        let error = write_attachments(&run_id, &attachments).expect_err("over the count cap");
+        assert_eq!(error.code, "attachment_rejected");
         let _ = std::fs::remove_dir_all(attachment_dir(&run_id));
     }
 

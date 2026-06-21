@@ -1,9 +1,11 @@
-//! **Azure Service Bus** observability connector (opt-in, read-only): a management-plane view
-//! of the operator's namespaces — queues, and topic subscriptions — with their message counts
-//! (active / dead-letter / scheduled). It rides the operator's existing `az` sign-in (so no
-//! connection string is stored) and only ever **reads** the management plane via `az
-//! servicebus` — it never sends, receives, completes, or purges a message. Data-plane peek /
-//! replay is a deliberately separate, later step.
+//! **Azure Service Bus** explorer connector (opt-in). The management-plane snapshot
+//! ([`snapshot`]) rides the operator's existing `az` sign-in and only ever reads namespace +
+//! entity counts (active / dead-letter / scheduled). The richer per-connection surface
+//! (data-plane peek / send / receive / purge / dead-letter resubmit, and entity create / delete
+//! / update) shells the optional `honeyhub-sb-explorer` helper and authenticates per connection:
+//! either Azure AD against the namespace, or a cockpit-held SAS connection string passed via the
+//! child environment (never argv, never persisted host-side). Destructive ops are
+//! confirmation-gated in the cockpit (ADR-0094 D5).
 
 use crate::backend_catalog::program_on_path;
 use serde::{Deserialize, Serialize};
@@ -339,7 +341,7 @@ pub fn peek(
         args.push("--dlq".to_string());
     }
 
-    let output = match Command::new(&program).args(&args).output() {
+    let output = match explorer_command(&program, &args, connection_string).output() {
         Ok(output) => output,
         Err(_) => return unavailable("could not run the Service Bus explorer helper".to_string()),
     };
@@ -367,19 +369,34 @@ pub fn peek(
     }
 }
 
-/// Append the auth flags for an explorer invocation: a cockpit-held `--connection-string`
-/// when present (a SAS string, never persisted host-side), else `--namespace <fqdn>` for the
-/// Azure AD path. The dual-auth posture for HoneyHub Service Bus connections (ADR-0094 D5).
+/// Env var the explorer helper reads a SAS connection string from. The secret is passed
+/// through the child's environment (NOT argv) so it cannot be read from a local process list
+/// (`ps` / Task Manager) the way `--connection-string <value>` could.
+const SB_CONNECTION_ENV: &str = "HONEYHUB_SB_CONNECTION_STRING";
+
+/// Build the explorer [`Command`] for `args`, injecting a cockpit-held SAS connection string via
+/// the environment when present (kept off argv). The secret is never persisted host-side; it
+/// rides per invocation only.
+fn explorer_command(program: &str, args: &[String], connection_string: Option<&str>) -> Command {
+    let mut command = Command::new(program);
+    command.args(args);
+    if let Some(cs) = connection_string.filter(|value| !value.trim().is_empty()) {
+        command.env(SB_CONNECTION_ENV, cs);
+    }
+    command
+}
+
+/// Append the auth flags for an explorer invocation. With a cockpit-held SAS connection string
+/// the secret travels via the environment (see [`explorer_command`]), so nothing auth-related is
+/// added to argv; without one, pass `--namespace <fqdn>` for the Azure AD path. The dual-auth
+/// posture for HoneyHub Service Bus connections (ADR-0094 D5).
 fn push_auth(args: &mut Vec<String>, fqdn: &str, connection_string: Option<&str>) {
-    match connection_string.filter(|value| !value.trim().is_empty()) {
-        Some(cs) => {
-            args.push("--connection-string".to_string());
-            args.push(cs.to_string());
-        }
-        None => {
-            args.push("--namespace".to_string());
-            args.push(fqdn.to_string());
-        }
+    if connection_string
+        .filter(|value| !value.trim().is_empty())
+        .is_none()
+    {
+        args.push("--namespace".to_string());
+        args.push(fqdn.to_string());
     }
 }
 
@@ -516,7 +533,7 @@ pub fn resubmit_dead_letter(
         args.push(sub.to_string());
     }
 
-    let output = match Command::new(&program).args(&args).output() {
+    let output = match explorer_command(&program, &args, connection_string).output() {
         Ok(output) => output,
         Err(_) => return failed("could not run the Service Bus explorer helper".to_string()),
     };
@@ -612,7 +629,7 @@ pub fn purge(
         args.push("--dlq".to_string());
     }
 
-    let output = match Command::new(&program).args(&args).output() {
+    let output = match explorer_command(&program, &args, connection_string).output() {
         Ok(output) => output,
         Err(_) => return failed("could not run the Service Bus explorer helper".to_string()),
     };
@@ -705,7 +722,7 @@ pub fn send(
         args.push(content_type.to_string());
     }
 
-    let output = match Command::new(&program).args(&args).output() {
+    let output = match explorer_command(&program, &args, connection_string).output() {
         Ok(output) => output,
         Err(_) => return failed("could not run the Service Bus explorer helper".to_string()),
     };
@@ -795,7 +812,7 @@ pub fn receive_one(
         args.push("--dlq".to_string());
     }
 
-    let output = match Command::new(&program).args(&args).output() {
+    let output = match explorer_command(&program, &args, connection_string).output() {
         Ok(output) => output,
         Err(_) => return failed("could not run the Service Bus explorer helper".to_string()),
     };
@@ -933,7 +950,7 @@ pub fn list_entities(namespace: &str, connection_string: Option<&str>) -> Servic
     let mut args: Vec<String> = vec!["entities".to_string()];
     push_auth(&mut args, &fqdn, connection_string);
 
-    let output = match Command::new(&program).args(&args).output() {
+    let output = match explorer_command(&program, &args, connection_string).output() {
         Ok(output) => output,
         Err(_) => return unavailable("could not run the Service Bus explorer helper".to_string()),
     };
@@ -1012,7 +1029,7 @@ pub fn manage(
         push_props(&mut args, props);
     }
 
-    let output = match Command::new(&program).args(&args).output() {
+    let output = match explorer_command(&program, &args, connection_string).output() {
         Ok(output) => output,
         Err(_) => return failed("could not run the Service Bus explorer helper".to_string()),
     };

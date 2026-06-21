@@ -158,21 +158,23 @@ impl BridgeRuntime {
             self.ensure_workspace_allowed(&request.workspace_root)?;
             self.ensure_request_workspace_matches(&request)?;
         }
-        if request.requested_run_id.is_none() {
-            request.requested_run_id = Some(Uuid::new_v4().to_string());
-        }
-        if let Some(requested_run_id) = &request.requested_run_id {
-            self.ensure_run_id_available(requested_run_id)?;
-        }
+        // Resolve the run id once (caller-provided or freshly minted) and reuse it for both the
+        // availability check and attachment materialization, so there is no expect/panic path
+        // when a caller omits `requested_run_id`.
+        let run_id = match request.requested_run_id.clone() {
+            Some(id) => id,
+            None => {
+                let id = Uuid::new_v4().to_string();
+                request.requested_run_id = Some(id.clone());
+                id
+            }
+        };
+        self.ensure_run_id_available(&run_id)?;
         // Materialize any attachments to a per-run temp dir and append their paths to the
         // task, so the agent (whatever the backend) can read them. Backend-agnostic by
-        // design — no per-CLI multimodal plumbing (HoneyHub attachments v1). Done before
+        // design (no per-CLI multimodal plumbing, HoneyHub attachments v1). Done before
         // dispatch so the adapter seeds the augmented task as the first turn.
         if !request.attachments.is_empty() {
-            let run_id = request
-                .requested_run_id
-                .clone()
-                .expect("requested_run_id is set above");
             let paths = crate::attachments::write_attachments(&run_id, &request.attachments)?;
             request.task = crate::attachments::append_attachment_refs(&request.task, &paths);
         }

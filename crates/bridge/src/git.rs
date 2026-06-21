@@ -3,9 +3,10 @@
 //! The cockpit can't touch the repo, so the bridge shells out to `git`. Reads (status,
 //! diff, branches, repo discovery, the multi-repo overview) are unconditional. **Writes**
 //! (stage/unstage/commit/push/pull/checkout/discard) cross the bridge's normally read-only
-//! boundary (ADR-0090 D2); they are a scoped, confirmation-gated exception driven from the
-//! Git screen, the same posture the Service Bus explorer uses for its destructive ops
-//! (ADR-0094 D5). The host gates every `root` against the workspace allowlist first.
+//! boundary (ADR-0090 D9, the artifact/write-boundary decision); they are a scoped,
+//! confirmation-gated exception driven from the Git screen, the same posture the Service Bus
+//! explorer uses for its destructive ops (ADR-0094 D5). The host gates every `root` against the
+//! workspace allowlist first.
 //!
 //! Repo discovery makes the screen "smart": people add a *folder* of repos as a workspace
 //! root, which has no `.git` of its own, so [`discover_repos`] returns the folder itself

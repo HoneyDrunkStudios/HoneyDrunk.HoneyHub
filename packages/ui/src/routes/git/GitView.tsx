@@ -33,7 +33,7 @@ interface PendingConfirm {
  * repo's branch, ahead/behind, and change count. Expand a repo to stage/unstage, commit,
  * push, pull, switch/create branches, discard changes, and read diffs. Reads are free;
  * every write is confirmation-gated (a scoped exception to the bridge's read-only posture,
- * ADR-0090 D2 / ADR-0094 D5 precedent).
+ * ADR-0090 D9 / ADR-0094 D5 precedent).
  */
 export function GitView({
   client,
