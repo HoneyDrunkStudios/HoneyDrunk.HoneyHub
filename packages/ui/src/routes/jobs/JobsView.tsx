@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import type { FormEvent, ReactElement } from "react";
+import type { ReactElement, SyntheticEvent } from "react";
 import type { JobProbe, JobSnapshot } from "@honeydrunk/honeyhub-types";
 import type { WireClient } from "../../wire/client";
 import { filterProcesses, formatMemoryKb, runningCount } from "./jobsModel";
@@ -225,7 +225,7 @@ function JobsHelp({ userProbes, onAdd, onRemove }: Readonly<JobsHelpProps>): Rea
   const [label, setLabel] = useState("");
   const [patterns, setPatterns] = useState("");
 
-  const submit = (event: FormEvent<HTMLFormElement>): void => {
+  const submit = (event: SyntheticEvent<HTMLFormElement>): void => {
     event.preventDefault();
     if (label.trim() === "" || patterns.trim() === "") {
       return;

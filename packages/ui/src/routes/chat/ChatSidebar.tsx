@@ -14,6 +14,15 @@ import { RunScreen, type RunScreenProps } from "../run/RunScreen";
     the two surfaces keep separate live runs even though they share local history. */
 export const SIDEBAR_SESSION_ID = "sidebar-session";
 
+/** The sidebar's layout-state class: hidden (off the Chat tab) wins, then expanded vs the
+    slim collapsed rail. Extracted so the JSX carries no nested ternary. */
+function sidebarStateClass(hidden: boolean, open: boolean): string {
+  if (hidden) {
+    return "is-hidden";
+  }
+  return open ? "is-open" : "is-collapsed";
+}
+
 export interface ChatSidebarProps {
   /** Hidden on the full Chat tab, where this would just double the chat. The component
       stays mounted (so its conversation persists); CSS removes it from the layout. */
@@ -33,7 +42,7 @@ export function ChatSidebar({
   onToggle,
   run
 }: Readonly<ChatSidebarProps>): ReactElement {
-  const stateClass = hidden ? "is-hidden" : open ? "is-open" : "is-collapsed";
+  const stateClass = sidebarStateClass(hidden, open);
   return (
     <aside className={`chat-sidebar ${stateClass}`} aria-hidden={hidden} aria-label="Chat">
       {/* The panel stays mounted while collapsed (hidden via the attribute) so the chat

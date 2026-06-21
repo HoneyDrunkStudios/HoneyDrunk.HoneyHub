@@ -64,11 +64,11 @@ export function NumberField({
         className="number-input"
         value={value}
         onChange={(event) => onChange(event.target.value)}
-        {...(min !== undefined ? { min } : {})}
-        {...(max !== undefined ? { max } : {})}
-        {...(step !== undefined ? { step } : {})}
-        {...(placeholder !== undefined ? { placeholder } : {})}
-        {...(ariaLabel !== undefined ? { "aria-label": ariaLabel } : {})}
+        {...(min === undefined ? {} : { min })}
+        {...(max === undefined ? {} : { max })}
+        {...(step === undefined ? {} : { step })}
+        {...(placeholder === undefined ? {} : { placeholder })}
+        {...(ariaLabel === undefined ? {} : { "aria-label": ariaLabel })}
       />
       <button
         type="button"

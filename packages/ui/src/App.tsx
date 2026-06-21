@@ -383,7 +383,8 @@ export function App({ client }: AppProps = {}) {
   // The chat sidebar shows on every page except the dedicated Chat tab (where it would
   // double the chat). The shell grid grows a third column for it when shown.
   const chatHidden = view === "run";
-  const shellClass = chatHidden ? "app-shell" : `app-shell ${chatOpen ? "chat-open" : "chat-collapsed"}`;
+  const chatColumnClass = chatOpen ? "chat-open" : "chat-collapsed";
+  const shellClass = chatHidden ? "app-shell" : `app-shell ${chatColumnClass}`;
 
   return (
     <div className={shellClass}>

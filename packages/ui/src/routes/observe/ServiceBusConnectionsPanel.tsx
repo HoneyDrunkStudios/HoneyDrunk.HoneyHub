@@ -1,11 +1,13 @@
 import { useEffect, useState } from "react";
 import type { ReactElement } from "react";
 import type {
+  BridgeEventPayload,
   SbEntityProps,
   SbQueue,
   SbSubscription,
   SbTopic,
   ServiceBusEntities,
+  ServiceBusManage,
   ServiceBusPeek,
   ServiceBusPurge,
   ServiceBusReceive,
@@ -171,6 +173,75 @@ function fqdnOf(namespace: string): string {
   return trimmed.includes(".") ? trimmed : `${trimmed}.servicebus.windows.net`;
 }
 
+/** The feedback line for a manage result. Built in steps to avoid nested template literals. */
+function manageFeedbackText(result: ServiceBusManage): string {
+  if (result.ok) {
+    const fallback = `${result.op} ${result.kind} ${result.entity}`;
+    return `✓ ${result.message ?? fallback}`;
+  }
+  return `✗ ${result.error ?? "operation failed"}`;
+}
+
+/** The callbacks a connection's event stream drives. One per side effect the panel performs in
+    response to a host-pushed event for its namespace. */
+interface ConnectionEventHandlers {
+  onEntities: (entities: ServiceBusEntities) => void;
+  onManage: (result: ServiceBusManage) => void;
+  onPeek: (peek: ServiceBusPeek) => void;
+  onResubmit: (result: ServiceBusResubmit) => void;
+  onPurge: (result: ServiceBusPurge) => void;
+  onSend: (result: ServiceBusSend) => void;
+  onReceive: (result: ServiceBusReceive) => void;
+}
+
+/** Route one bridge event to the matching connection handler, filtered to this connection's FQDN.
+    Each branch is a flat delegation, keeping the cognitive complexity low. */
+function applyConnectionEvent(
+  payload: BridgeEventPayload,
+  fqdn: string,
+  handlers: ConnectionEventHandlers
+): void {
+  switch (payload.kind) {
+    case "service_bus_entities":
+      if (payload.entities.namespace === fqdn) {
+        handlers.onEntities(payload.entities);
+      }
+      return;
+    case "service_bus_manage":
+      if (payload.result.namespace === fqdn) {
+        handlers.onManage(payload.result);
+      }
+      return;
+    case "service_bus_peek":
+      if (payload.peek.namespace === fqdn) {
+        handlers.onPeek(payload.peek);
+      }
+      return;
+    case "service_bus_resubmit":
+      if (payload.result.namespace === fqdn) {
+        handlers.onResubmit(payload.result);
+      }
+      return;
+    case "service_bus_purge":
+      if (payload.result.namespace === fqdn) {
+        handlers.onPurge(payload.result);
+      }
+      return;
+    case "service_bus_send":
+      if (payload.result.namespace === fqdn) {
+        handlers.onSend(payload.result);
+      }
+      return;
+    case "service_bus_receive":
+      if (payload.result.namespace === fqdn) {
+        handlers.onReceive(payload.result);
+      }
+      return;
+    default:
+      return;
+  }
+}
+
 interface ConnectionPanelProps {
   client: WireClient;
   active: boolean;
@@ -215,63 +286,52 @@ function ConnectionPanel({
 
   // Subscribe to this connection's events (filtered by its namespace).
   useEffect(() => {
-    const unsubscribe = client.subscribe((event) => {
-      const { payload } = event;
-      if (payload.kind === "service_bus_entities") {
-        if (payload.entities.namespace === fqdn) {
-          setEntities(payload.entities);
-          setLoading(false);
+    const handlers: ConnectionEventHandlers = {
+      onEntities: (next) => {
+        setEntities(next);
+        setLoading(false);
+      },
+      onManage: (result) => {
+        setFeedback(manageFeedbackText(result));
+        if (result.ok) {
+          listEntities();
         }
-      } else if (payload.kind === "service_bus_manage") {
-        if (payload.result.namespace === fqdn) {
-          const { result } = payload;
-          setFeedback(
-            result.ok
-              ? `✓ ${result.message ?? `${result.op} ${result.kind} ${result.entity}`}`
-              : `✗ ${result.error ?? "operation failed"}`
-          );
-          if (result.ok) {
-            listEntities();
-          }
+      },
+      onPeek: (next) => {
+        setPeek(next);
+        setPeeking(false);
+      },
+      onResubmit: (result) => {
+        setResubmitResult(result);
+        setResubmitting(false);
+        if (result.ok) {
+          reflect(result.entity, result.subscription, true);
         }
-      } else if (payload.kind === "service_bus_peek") {
-        if (payload.peek.namespace === fqdn) {
-          setPeek(payload.peek);
-          setPeeking(false);
+      },
+      onPurge: (result) => {
+        setPurgeResult(result);
+        setPurging(false);
+        if (result.ok) {
+          reflect(result.entity, result.subscription, result.deadLetter);
         }
-      } else if (payload.kind === "service_bus_resubmit") {
-        if (payload.result.namespace === fqdn) {
-          setResubmitResult(payload.result);
-          setResubmitting(false);
-          if (payload.result.ok) {
-            reflect(payload.result.entity, payload.result.subscription, true);
-          }
+      },
+      onSend: (result) => {
+        setSendResult(result);
+        setSending(false);
+        if (result.ok) {
+          listEntities();
         }
-      } else if (payload.kind === "service_bus_purge") {
-        if (payload.result.namespace === fqdn) {
-          setPurgeResult(payload.result);
-          setPurging(false);
-          if (payload.result.ok) {
-            reflect(payload.result.entity, payload.result.subscription, payload.result.deadLetter);
-          }
-        }
-      } else if (payload.kind === "service_bus_send") {
-        if (payload.result.namespace === fqdn) {
-          setSendResult(payload.result);
-          setSending(false);
-          if (payload.result.ok) {
-            listEntities();
-          }
-        }
-      } else if (payload.kind === "service_bus_receive") {
-        if (payload.result.namespace === fqdn) {
-          setReceiveResult(payload.result);
-          setReceiving(false);
-          if (payload.result.ok) {
-            reflect(payload.result.entity, payload.result.subscription, payload.result.deadLetter);
-          }
+      },
+      onReceive: (result) => {
+        setReceiveResult(result);
+        setReceiving(false);
+        if (result.ok) {
+          reflect(result.entity, result.subscription, result.deadLetter);
         }
       }
+    };
+    const unsubscribe = client.subscribe((event) => {
+      applyConnectionEvent(event.payload, fqdn, handlers);
     });
     return unsubscribe;
     // eslint-disable-next-line react-hooks/exhaustive-deps

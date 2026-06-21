@@ -163,7 +163,7 @@ export function BrowseView({
         }
       } else if (payload.kind === "git_diff") {
         const want = pendingDiff.current;
-        if (want !== undefined && payload.diff.root === want.root && payload.diff.path === want.path) {
+        if (payload.diff.root === want?.root && payload.diff.path === want?.path) {
           setDiff(payload.diff);
         }
       }
@@ -371,63 +371,12 @@ export function BrowseView({
           )}
         </div>
 
-        {(() => {
-          const changed = overview?.repos.filter((repo) => !repo.clean) ?? [];
-          if (changed.length === 0) {
-            return null;
-          }
-          const total = changed.reduce((sum, repo) => sum + repo.files.length, 0);
-          return (
-            <div className="browse-changes">
-              <button
-                type="button"
-                className="browse-changes-head"
-                aria-expanded={showChanges}
-                onClick={() => setShowChanges((value) => !value)}
-              >
-                <span className="browse-changes-caret" aria-hidden="true">
-                  {showChanges ? "▾" : "▸"}
-                </span>
-                Changes <span className="browse-changes-count">{total}</span>
-              </button>
-              {showChanges && (
-                <ul className="browse-changes-list" aria-label="Changed files">
-                  {changed.map((repo) => (
-                    <li key={repo.root} className="browse-changes-repo">
-                      <p className="browse-changes-repo-name">
-                        {basename(repo.root)}
-                        {repo.branch !== undefined && (
-                          <span className="browse-changes-branch">{repo.branch}</span>
-                        )}
-                      </p>
-                      <ul>
-                        {repo.files.map((entry) => {
-                          const codeKind = entry.untracked
-                            ? "untracked"
-                            : entry.staged
-                              ? "staged"
-                              : "dirty";
-                          return (
-                            <li key={entry.path}>
-                              <button
-                                type="button"
-                                className="entry file"
-                                onClick={() => openChangedDiff(repo.root, entry.path)}
-                              >
-                                <span className={`git-code code-${codeKind}`}>{entry.status}</span>
-                                <span className="entry-name">{entry.path}</span>
-                              </button>
-                            </li>
-                          );
-                        })}
-                      </ul>
-                    </li>
-                  ))}
-                </ul>
-              )}
-            </div>
-          );
-        })()}
+        <BrowseChangesPanel
+          overview={overview}
+          showChanges={showChanges}
+          onToggle={() => setShowChanges((value) => !value)}
+          onOpenDiff={openChangedDiff}
+        />
 
         <input
           className="browse-search"
@@ -460,6 +409,88 @@ export function BrowseView({
         )}
       </div>
     </section>
+  );
+}
+
+/** The CSS code-kind for a changed file: untracked, staged, or otherwise a dirty
+    working-tree change. */
+function changeCodeKind(entry: { untracked: boolean; staged: boolean }): string {
+  if (entry.untracked) {
+    return "untracked";
+  }
+  if (entry.staged) {
+    return "staged";
+  }
+  return "dirty";
+}
+
+interface BrowseChangesPanelProps {
+  overview: GitOverview | undefined;
+  showChanges: boolean;
+  onToggle: () => void;
+  onOpenDiff: (repoRoot: string, path: string) => void;
+}
+
+/** The collapsible changed-files panel: the repos under the current scope that have
+    working-tree changes, each file jumping straight to its diff. */
+function BrowseChangesPanel({
+  overview,
+  showChanges,
+  onToggle,
+  onOpenDiff
+}: Readonly<BrowseChangesPanelProps>): ReactNode {
+  const changed = overview?.repos.filter((repo) => !repo.clean) ?? [];
+  if (changed.length === 0) {
+    return null;
+  }
+  const total = changed.reduce((sum, repo) => sum + repo.files.length, 0);
+  return (
+    <div className="browse-changes">
+      <button
+        type="button"
+        className="browse-changes-head"
+        aria-expanded={showChanges}
+        onClick={onToggle}
+      >
+        <span className="browse-changes-caret" aria-hidden="true">
+          {showChanges ? "▾" : "▸"}
+        </span>
+        <span>
+          Changes <span className="browse-changes-count">{total}</span>
+        </span>
+      </button>
+      {showChanges && (
+        <ul className="browse-changes-list" aria-label="Changed files">
+          {changed.map((repo) => (
+            <li key={repo.root} className="browse-changes-repo">
+              <p className="browse-changes-repo-name">
+                {basename(repo.root)}
+                {repo.branch !== undefined && (
+                  <span className="browse-changes-branch">{repo.branch}</span>
+                )}
+              </p>
+              <ul>
+                {repo.files.map((entry) => {
+                  const codeKind = changeCodeKind(entry);
+                  return (
+                    <li key={entry.path}>
+                      <button
+                        type="button"
+                        className="entry file"
+                        onClick={() => onOpenDiff(repo.root, entry.path)}
+                      >
+                        <span className={`git-code code-${codeKind}`}>{entry.status}</span>
+                        <span className="entry-name">{entry.path}</span>
+                      </button>
+                    </li>
+                  );
+                })}
+              </ul>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
   );
 }
 

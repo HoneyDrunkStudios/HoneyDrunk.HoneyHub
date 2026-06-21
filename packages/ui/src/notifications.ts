@@ -59,7 +59,7 @@ export function loadNotificationPrefs(): NotificationPrefs {
     }
     const record = parsed as Record<string, unknown>;
     const bool = (key: keyof NotificationPrefs): boolean =>
-      typeof record[key] === "boolean" ? (record[key] as boolean) : defaultNotificationPrefs[key];
+      typeof record[key] === "boolean" ? record[key] : defaultNotificationPrefs[key];
     return {
       desktop: bool("desktop"),
       chatFinished: bool("chatFinished"),
@@ -217,7 +217,7 @@ export function deadLetterNotifications(
     for (const entity of ns.entities) {
       const key = deadLetterKey(entity.namespace, entity.topic, entity.name);
       counts[key] = entity.deadLetter;
-      const known = Object.prototype.hasOwnProperty.call(prev, key);
+      const known = Object.hasOwn(prev, key);
       const before = prev[key] ?? 0;
       if (isKindEnabled(prefs, "dead_letter") && known && entity.deadLetter > before) {
         const label = entity.topic === undefined ? entity.name : `${entity.topic}/${entity.name}`;

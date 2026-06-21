@@ -706,6 +706,13 @@ export function RunScreen({
     }
   };
 
+  // Request a synced session's detail; the subscription reopens it read-only when it
+  // arrives. Bound to `client` here so the SyncedHistory list stays a flat presentational
+  // component with no nested callbacks.
+  const openSyncedSession = (id: string): void => {
+    void client.sessionDetail(id).catch(() => undefined);
+  };
+
   // Composer keyboard handling, extracted from the textarea so the main render stays
   // flat. Slash menu open: arrows move, Enter selects, Escape dismisses; otherwise Enter
   // sends and Shift+Enter inserts a newline.
@@ -1031,52 +1038,9 @@ export function RunScreen({
             )}
           </p>
 
-          {(() => {
-            const recents = loadChatSummaries().slice(0, 8);
-            return recents.length === 0 ? null : (
-              <div className="recent-chats">
-                <p className="eyebrow">Recent chats</p>
-                <ul aria-label="Recent chats">
-                  {recents.map((chat) => (
-                    <li key={chat.id}>
-                      <button
-                        type="button"
-                        className="recent-chat"
-                        onClick={() => setOpenedChat(getChat(chat.id))}
-                      >
-                        <span className="recent-task">{chat.task}</span>
-                        <span className="recent-meta">
-                          {chat.backend === undefined ? "-" : backendLabel(chat.backend)}
-                          {chat.model === undefined ? "" : ` · ${chat.model}`}
-                          {` · $${chat.totalUsd.toFixed(4)}`}
-                        </span>
-                      </button>
-                    </li>
-                  ))}
-                </ul>
-              </div>
-            );
-          })()}
+          <RecentChats onOpen={setOpenedChat} />
 
-          {syncedSessions.length > 0 && (
-            <div className="recent-chats synced-history">
-              <p className="eyebrow">Synced history</p>
-              <ul aria-label="Synced history">
-                {syncedSessions.map((session) => (
-                  <li key={session.id}>
-                    <button
-                      type="button"
-                      className="recent-chat"
-                      onClick={() => void client.sessionDetail(session.id).catch(() => undefined)}
-                    >
-                      <span className="recent-task">{session.title}</span>
-                      <span className="recent-meta">{backendLabel(session.backend)}</span>
-                    </button>
-                  </li>
-                ))}
-              </ul>
-            </div>
-          )}
+          <SyncedHistory sessions={syncedSessions} onOpen={openSyncedSession} />
     </div>
   );
 
@@ -1227,6 +1191,74 @@ function IconPaperclip(): ReactElement {
     >
       <path d="M21 11.5l-8.5 8.5a5 5 0 0 1-7-7l8.5-8.5a3.5 3.5 0 0 1 5 5l-8.5 8.5a2 2 0 0 1-3-3l7.8-7.8" />
     </svg>
+  );
+}
+
+interface RecentChatsProps {
+  /** Open a past chat read-only. The id is resolved to its full record here. */
+  onOpen: (chat: ChatRecord | undefined) => void;
+}
+
+/** Locally-saved recent chats (top 8). A flat module-scope component so the click
+    handler is not a deeply nested callback inside the composer render. Renders nothing
+    when there is no local history. */
+function RecentChats({ onOpen }: Readonly<RecentChatsProps>): ReactElement | null {
+  const recents = loadChatSummaries().slice(0, 8);
+  if (recents.length === 0) {
+    return null;
+  }
+  return (
+    <div className="recent-chats">
+      <p className="eyebrow">Recent chats</p>
+      <ul aria-label="Recent chats">
+        {recents.map((chat) => (
+          <li key={chat.id}>
+            <button
+              type="button"
+              className="recent-chat"
+              onClick={() => onOpen(getChat(chat.id))}
+            >
+              <span className="recent-task">{chat.task}</span>
+              <span className="recent-meta">
+                {chat.backend === undefined ? "-" : backendLabel(chat.backend)}
+                {chat.model === undefined ? "" : ` · ${chat.model}`}
+                {` · $${chat.totalUsd.toFixed(4)}`}
+              </span>
+            </button>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+interface SyncedHistoryProps {
+  /** Durable, bridge-backed past sessions. */
+  sessions: DispatchSession[];
+  /** Request a session's detail by id (reopened read-only when it arrives). */
+  onOpen: (id: string) => void;
+}
+
+/** Durable synced history list. A flat module-scope component so its click handler is not
+    a deeply nested callback inside the composer render. Renders nothing when empty. */
+function SyncedHistory({ sessions, onOpen }: Readonly<SyncedHistoryProps>): ReactElement | null {
+  if (sessions.length === 0) {
+    return null;
+  }
+  return (
+    <div className="recent-chats synced-history">
+      <p className="eyebrow">Synced history</p>
+      <ul aria-label="Synced history">
+        {sessions.map((session) => (
+          <li key={session.id}>
+            <button type="button" className="recent-chat" onClick={() => onOpen(session.id)}>
+              <span className="recent-task">{session.title}</span>
+              <span className="recent-meta">{backendLabel(session.backend)}</span>
+            </button>
+          </li>
+        ))}
+      </ul>
+    </div>
   );
 }
 

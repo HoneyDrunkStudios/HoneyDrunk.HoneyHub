@@ -16,7 +16,9 @@ export function loadSeenModels(): SeenModels {
     if (typeof parsed !== "object" || parsed === null) {
       return {};
     }
-    return parsed;
+    // The runtime guard only proves it's a non-null object; trust the persisted shape (this
+    // store wrote it) and cast back to SeenModels. A wrong shape just re-baselines harmlessly.
+    return parsed as SeenModels;
   } catch {
     return {};
   }

@@ -17,6 +17,20 @@ interface ToggleRow {
   hint: string;
 }
 
+/** The desktop-permission help text for each permission state. */
+function permissionNoteFor(permission: NotifyPermission): string {
+  switch (permission) {
+    case "unsupported":
+      return "This environment has no desktop notifications; the in-app Alerts feed still works.";
+    case "denied":
+      return "Desktop notifications are blocked in your browser/OS settings; the Alerts feed still works.";
+    case "granted":
+      return "Desktop notifications are allowed.";
+    default:
+      return "Desktop notifications need permission.";
+  }
+}
+
 const TRIGGER_ROWS: ToggleRow[] = [
   { key: "chatFinished", label: "Chat finished", hint: "A chat response completes while you are not on that thread." },
   { key: "workAssigned", label: "Work assigned to me", hint: "A new issue or work item is assigned to you (GitHub + Azure DevOps)." },
@@ -45,22 +59,16 @@ export function NotificationsSettings({
     }
   };
 
-  const permissionNote =
-    permission === "unsupported"
-      ? "This environment has no desktop notifications; the in-app Alerts feed still works."
-      : permission === "denied"
-        ? "Desktop notifications are blocked in your browser/OS settings; the Alerts feed still works."
-        : permission === "granted"
-          ? "Desktop notifications are allowed."
-          : "Desktop notifications need permission.";
+  const permissionNote = permissionNoteFor(permission);
 
   return (
     <section className="notif-settings" aria-label="Notifications settings">
       <h3>Notifications</h3>
 
       <div className="notif-desktop">
-        <label className="notif-toggle">
+        <label className="notif-toggle" htmlFor="notif-toggle-desktop">
           <input
+            id="notif-toggle-desktop"
             type="checkbox"
             checked={prefs.desktop}
             disabled={permission === "unsupported" || permission === "denied"}
@@ -82,8 +90,13 @@ export function NotificationsSettings({
       <ul className="notif-toggles" aria-label="Notification types">
         {TRIGGER_ROWS.map((row) => (
           <li key={row.key}>
-            <label className="notif-toggle">
-              <input type="checkbox" checked={prefs[row.key]} onChange={() => toggle(row.key)} />
+            <label className="notif-toggle" htmlFor={`notif-toggle-${row.key}`}>
+              <input
+                id={`notif-toggle-${row.key}`}
+                type="checkbox"
+                checked={prefs[row.key]}
+                onChange={() => toggle(row.key)}
+              />
               <span>
                 <span className="notif-toggle-label">{row.label}</span>
                 <span className="notif-toggle-hint">{row.hint}</span>

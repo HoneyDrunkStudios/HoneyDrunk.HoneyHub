@@ -14,6 +14,12 @@
 
 use crate::adapter::{BridgeError, ChatAttachment};
 use std::path::PathBuf;
+use std::time::Duration;
+
+/// Retention for per-run attachment dirs. The agent reads the files at run start, so a day is
+/// plenty; older dirs are purged opportunistically when new attachments are written, so temp
+/// disk does not grow without bound across sessions.
+const ATTACHMENT_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 
 /// Max attachments per chat turn. A generous cap that still bounds a single request.
 const MAX_ATTACHMENTS: usize = 20;
@@ -28,10 +34,32 @@ const MAX_TOTAL_ENCODED_BYTES: usize = MAX_TOTAL_ATTACHMENT_BYTES / 3 * 4 + 4096
 /// The per-run directory attachments are written to:
 /// `<temp>/honeyhub/attachments/<run_id>`.
 pub fn attachment_dir(run_id: &str) -> PathBuf {
-    std::env::temp_dir()
-        .join("honeyhub")
-        .join("attachments")
-        .join(sanitize_name(run_id))
+    attachments_root().join(sanitize_name(run_id))
+}
+
+/// The shared root holding every run's attachment dir: `<temp>/honeyhub/attachments`.
+fn attachments_root() -> PathBuf {
+    std::env::temp_dir().join("honeyhub").join("attachments")
+}
+
+/// Best-effort retention: remove per-run attachment dirs older than `ttl` so temp disk does not
+/// grow without bound across sessions. Errors are ignored (cleanup must never fail a run).
+fn purge_stale_attachment_dirs(ttl: Duration) {
+    let Ok(entries) = std::fs::read_dir(attachments_root()) else {
+        return;
+    };
+    let now = std::time::SystemTime::now();
+    for entry in entries.flatten() {
+        let stale = entry
+            .metadata()
+            .and_then(|meta| meta.modified())
+            .ok()
+            .and_then(|modified| now.duration_since(modified).ok())
+            .is_some_and(|age| age > ttl);
+        if stale {
+            let _ = std::fs::remove_dir_all(entry.path());
+        }
+    }
 }
 
 /// Decode standard base64 into bytes. Whitespace and `=` padding are skipped, so the
@@ -112,6 +140,9 @@ pub fn write_attachments(
             ),
         ));
     }
+    // Opportunistic retention: drop dirs from earlier runs past their TTL so temp disk does not
+    // grow without bound. Best-effort; never fails the write.
+    purge_stale_attachment_dirs(ATTACHMENT_TTL);
     let dir = attachment_dir(run_id);
     std::fs::create_dir_all(&dir).map_err(|error| {
         BridgeError::new(

@@ -542,7 +542,7 @@ function peekTitle(peek: ServiceBusPeek | undefined): string {
   if (peek === undefined) {
     return "Peeking…";
   }
-  const sub = peek.subscription !== undefined ? `/${peek.subscription}` : "";
+  const sub = peek.subscription === undefined ? "" : `/${peek.subscription}`;
   const dlq = peek.deadLetter ? " · dead-letter" : "";
   return `Peek · ${peek.entity}${sub}${dlq}`;
 }

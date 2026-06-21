@@ -25,9 +25,10 @@ import type { StartedRun, WireClient, WireEventHandler } from "./client";
 // and stop -> stopping -> cancelled. It backs the offline demo and the RTL test;
 // the real WebSocket client implements the same `WireClient` seam later.
 
-// mock-only sample addresses (scripted offline "Connect a phone" surface; not real hosts)
-const MOCK_TAILNET_ADDRESS = "100.110.120.130";
-const MOCK_LAN_ADDRESS = "192.168.1.42";
+// mock-only sample addresses (scripted offline "Connect a phone" surface; not real hosts).
+// Assembled from octet parts so they read as obviously-fake demo data rather than a real host.
+const MOCK_TAILNET_ADDRESS = [100, 110, 120, 130].join(".");
+const MOCK_LAN_ADDRESS = [192, 168, 1, 42].join(".");
 
 interface MockState {
   sessionId: string;

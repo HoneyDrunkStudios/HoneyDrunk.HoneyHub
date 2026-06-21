@@ -90,43 +90,56 @@ export function GitView({
   const pendingDiff = useRef<{ root: string; path?: string } | undefined>(undefined);
 
   useEffect(() => {
+    // A file changed on disk under this folder, so refresh the overview (silently; the
+    // git_overview event just replaces the data).
+    const onFsChanged = (paths: string[]): void => {
+      if (
+        activeRef.current &&
+        folderRef.current !== "" &&
+        paths.some((path) => isWithin(path, folderRef.current))
+      ) {
+        refreshRef.current();
+      }
+    };
+    // Both Git and Browse subscribe to this device-wide event; only take the overview
+    // for the folder this view is showing.
+    const onGitOverview = (next: GitOverview): void => {
+      if (next.root === folderRef.current) {
+        setOverview(next);
+        setLoading(false);
+      }
+    };
+    // Only accept the diff we asked for (the event bus is shared with Browse).
+    const onGitDiff = (next: GitDiff): void => {
+      const want = pendingDiff.current;
+      if (next.root === want?.root && next.path === want?.path) {
+        setDiff(next);
+      }
+    };
+    const onGitOp = (result: GitOpResult): void => {
+      setFeedback(result);
+      setBusy(false);
+      // A successful commit clears the message box.
+      if (result.ok && result.op === "commit") {
+        setCommitMessage("");
+      }
+    };
+
     const unsubscribe = client.subscribe((event) => {
       const payload = event.payload;
       if (payload.kind === "fs_changed") {
-        // A file changed on disk under this folder — refresh the overview (silently; the
-        // git_overview event just replaces the data).
-        if (
-          activeRef.current &&
-          folderRef.current !== "" &&
-          payload.paths.some((path) => isWithin(path, folderRef.current))
-        ) {
-          refreshRef.current();
-        }
+        onFsChanged(payload.paths);
       } else if (payload.kind === "git_overview") {
-        // Both Git and Browse subscribe to this device-wide event; only take the overview
-        // for the folder this view is showing.
-        if (payload.overview.root === folderRef.current) {
-          setOverview(payload.overview);
-          setLoading(false);
-        }
+        onGitOverview(payload.overview);
       } else if (payload.kind === "git_status") {
-        // A write re-emits one repo's fresh status — merge it into the overview.
+        // A write re-emits one repo's fresh status, so merge it into the overview.
         setOverview((prev) => (prev === undefined ? prev : replaceRepoStatus(prev, payload.status)));
       } else if (payload.kind === "git_branches") {
         setBranches(payload.branches);
       } else if (payload.kind === "git_diff") {
-        // Only accept the diff we asked for (the event bus is shared with Browse).
-        const want = pendingDiff.current;
-        if (want !== undefined && payload.diff.root === want.root && payload.diff.path === want.path) {
-          setDiff(payload.diff);
-        }
+        onGitDiff(payload.diff);
       } else if (payload.kind === "git_op") {
-        setFeedback(payload.result);
-        setBusy(false);
-        // A successful commit clears the message box.
-        if (payload.result.ok && payload.result.op === "commit") {
-          setCommitMessage("");
-        }
+        onGitOp(payload.result);
       }
     });
     return unsubscribe;
@@ -168,10 +181,10 @@ export function GitView({
       setFeedback(undefined);
       op().catch(() => setBusy(false));
     };
-    if (confirmMessage !== undefined) {
-      setConfirm({ message: confirmMessage, action: fire });
-    } else {
+    if (confirmMessage === undefined) {
       fire();
+    } else {
+      setConfirm({ message: confirmMessage, action: fire });
     }
   };
 
@@ -219,7 +232,7 @@ export function GitView({
         </p>
       )}
 
-      {overview !== undefined && overview.repos.length === 0 && (
+      {overview?.repos.length === 0 && (
         <p className="git-empty">No git repositories found in this folder.</p>
       )}
 
@@ -281,7 +294,7 @@ export function GitView({
       </ul>
 
       {confirm !== undefined && (
-        <div className="git-confirm-backdrop" role="dialog" aria-label="Confirm action">
+        <dialog className="git-confirm-backdrop" aria-label="Confirm action" open>
           <div className="git-confirm">
             <p className="git-confirm-message">{confirm.message}</p>
             <div className="git-confirm-actions">
@@ -300,7 +313,7 @@ export function GitView({
               </button>
             </div>
           </div>
-        </div>
+        </dialog>
       )}
     </section>
   );
@@ -466,9 +479,9 @@ function RepoDetail({
       </div>
 
       {feedback !== undefined && (
-        <p className={`git-feedback ${feedback.ok ? "is-ok" : "is-error"}`} role="status">
+        <output className={`git-feedback ${feedback.ok ? "is-ok" : "is-error"}`}>
           {feedback.message ?? (feedback.ok ? `${feedback.op} ok` : `${feedback.op} failed`)}
-        </p>
+        </output>
       )}
 
       {repo.clean ? (
@@ -514,9 +527,17 @@ function RepoDetail({
         </div>
       )}
 
-      {diff !== undefined && diff.root === repo.root && <DiffViewer diff={diff} />}
+      {diff?.root === repo.root && <DiffViewer diff={diff} />}
     </div>
   );
+}
+
+/** The CSS modifier for a file's status badge: untracked, staged, or otherwise dirty. */
+function fileCodeKind(file: GitFileStatus): "untracked" | "staged" | "dirty" {
+  if (file.untracked) {
+    return "untracked";
+  }
+  return file.staged ? "staged" : "dirty";
 }
 
 interface FileGroupProps {
@@ -557,7 +578,7 @@ function FileGroup({
       </div>
       <ul className="git-files">
         {files.map((file) => {
-          const codeKind = file.untracked ? "untracked" : file.staged ? "staged" : "dirty";
+          const codeKind = fileCodeKind(file);
           return (
             <li key={file.path} className="git-file-row">
               <button type="button" className="git-file" onClick={() => onOpenDiff(file.path)}>

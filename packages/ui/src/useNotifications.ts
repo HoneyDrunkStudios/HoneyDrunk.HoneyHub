@@ -1,5 +1,11 @@
 import { useCallback, useEffect, useRef } from "react";
 import { backendLabel } from "./backends";
+import type {
+  BridgeEvent,
+  BridgeStatusEvent,
+  ServiceBusSnapshot,
+  WorkSnapshot
+} from "@honeydrunk/honeyhub-types";
 import type { WireClient } from "./wire/client";
 import { osNotify } from "./osNotify";
 import {
@@ -69,58 +75,69 @@ export function useNotifications(options: Readonly<UseNotificationsOptions>): vo
   }, []);
 
   useEffect(() => {
+    const handleStatus = (event: BridgeEvent, status: BridgeStatusEvent): void => {
+      if (
+        status.state === "completed" &&
+        chatSessionsRef.current.includes(event.sessionId) &&
+        !firedChatRuns.current.has(event.runId) &&
+        isKindEnabled(prefsRef.current, "chat_finished") &&
+        !isThreadActiveRef.current(event.sessionId)
+      ) {
+        firedChatRuns.current.add(event.runId);
+        fire([
+          chatFinishedNotification(
+            event.runId,
+            `${backendLabel(status.backend)} finished responding.`,
+            new Date().toISOString()
+          )
+        ]);
+      }
+    };
+
+    const handleWorkSnapshot = (snapshot: WorkSnapshot): void => {
+      // Seed any source seen available for the first time so its pre-existing items don't
+      // fire as "new" (covers a connector that wasn't signed in on the first snapshot).
+      for (const source of snapshot.sources) {
+        if (source.available && !seededSources.current.has(source.source)) {
+          for (const item of source.items ?? []) {
+            seenWork.current.add(item.id);
+          }
+          seededSources.current.add(source.source);
+        }
+      }
+      const { notifications, ids } = workNotifications(
+        snapshot,
+        prefsRef.current,
+        seenWork.current,
+        new Date().toISOString()
+      );
+      // Accumulate (rather than reset to the current ids) so a fired item, or one preserved
+      // across a transient source outage, does not re-fire on the next poll.
+      for (const id of ids) {
+        seenWork.current.add(id);
+      }
+      fire(notifications);
+    };
+
+    const handleServiceBusSnapshot = (snapshot: ServiceBusSnapshot): void => {
+      const { notifications, counts } = deadLetterNotifications(
+        snapshot,
+        prefsRef.current,
+        deadLetterCounts.current,
+        new Date().toISOString()
+      );
+      deadLetterCounts.current = counts;
+      fire(notifications);
+    };
+
     const unsubscribe = client.subscribe((event) => {
       const payload = event.payload;
       if (payload.kind === "status") {
-        if (
-          payload.status.state === "completed" &&
-          chatSessionsRef.current.includes(event.sessionId) &&
-          !firedChatRuns.current.has(event.runId) &&
-          isKindEnabled(prefsRef.current, "chat_finished") &&
-          !isThreadActiveRef.current(event.sessionId)
-        ) {
-          firedChatRuns.current.add(event.runId);
-          fire([
-            chatFinishedNotification(
-              event.runId,
-              `${backendLabel(payload.status.backend)} finished responding.`,
-              new Date().toISOString()
-            )
-          ]);
-        }
+        handleStatus(event, payload.status);
       } else if (payload.kind === "work_snapshot") {
-        const snapshot = payload.snapshot;
-        // Seed any source seen available for the first time so its pre-existing items don't
-        // fire as "new" (covers a connector that wasn't signed in on the first snapshot).
-        for (const source of snapshot.sources) {
-          if (source.available && !seededSources.current.has(source.source)) {
-            for (const item of source.items ?? []) {
-              seenWork.current.add(item.id);
-            }
-            seededSources.current.add(source.source);
-          }
-        }
-        const { notifications, ids } = workNotifications(
-          snapshot,
-          prefsRef.current,
-          seenWork.current,
-          new Date().toISOString()
-        );
-        // Accumulate (rather than reset to the current ids) so a fired item — or one preserved
-        // across a transient source outage — does not re-fire on the next poll.
-        for (const id of ids) {
-          seenWork.current.add(id);
-        }
-        fire(notifications);
+        handleWorkSnapshot(payload.snapshot);
       } else if (payload.kind === "service_bus_snapshot") {
-        const { notifications, counts } = deadLetterNotifications(
-          payload.snapshot,
-          prefsRef.current,
-          deadLetterCounts.current,
-          new Date().toISOString()
-        );
-        deadLetterCounts.current = counts;
-        fire(notifications);
+        handleServiceBusSnapshot(payload.snapshot);
       }
     });
     return unsubscribe;

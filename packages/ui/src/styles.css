@@ -2537,6 +2537,7 @@ h2 {
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
   background: var(--panel-2);
+  position: relative;
 }
 
 .notifications-actions {
@@ -2546,9 +2547,6 @@ h2 {
   margin-left: auto;
 }
 
-.notification {
-  position: relative;
-}
 .notification.is-unread {
   border-color: var(--neon-blue-line);
   box-shadow: inset 2px 0 0 var(--neon-blue);
@@ -5821,11 +5819,7 @@ button:focus-visible,
   box-shadow: 0 0 0 1px rgba(255, 42, 109, 0.25), 0 0 12px rgba(255, 42, 109, 0.3);
 }
 
-/* "Send a message" (write) leans cyan — already correct, just keep on base. */
-.sb-send-btn {
-  border-color: var(--neon-blue-line);
-  color: var(--neon-blue);
-}
+/* "Send a message" (write) leans cyan: already styled on base (.sb-send-btn above). */
 
 /* Ghost remove buttons (plan item remove, picked-root remove): transparent,
    bordered, pink-leaning on hover to signal removal. */
