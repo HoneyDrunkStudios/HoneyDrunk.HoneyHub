@@ -574,6 +574,9 @@ export interface KeyVaultList {
   /** Echoes the requested subscription ids, so the UI can ignore a stale response that no
       longer matches the current selection (out-of-order responses). */
   subscriptionIds?: string[];
+  /** Selected subscriptions that could not be read (best-effort partial success), so the UI can
+      warn instead of silently showing "no vaults". */
+  unreadable?: string[];
   vaults: KeyVault[];
 }
 

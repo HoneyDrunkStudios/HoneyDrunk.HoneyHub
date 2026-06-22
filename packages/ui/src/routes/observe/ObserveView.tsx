@@ -221,6 +221,8 @@ function KeyVaultPanel({
 
   const subscriptionsUnavailable = subscriptions !== undefined && !subscriptions.available;
   const vaultsUnavailable = vaultList !== undefined && !vaultList.available;
+  // Subscriptions we asked for but couldn't read (partial success): warn rather than imply none.
+  const unreadable = vaultList?.available ? vaultList.unreadable ?? [] : [];
   const vaultEmptyMessage =
     query.trim() === "" ? "No Key Vaults in the selected subscriptions." : `No vaults match “${query}”.`;
 
@@ -269,6 +271,12 @@ function KeyVaultPanel({
           />
           {vaultsUnavailable && (
             <p className="sb-unavailable">Key Vault: {vaultList?.error ?? "not available"}</p>
+          )}
+          {unreadable.length > 0 && (
+            <p className="sb-unavailable">
+              Could not read {unreadable.length} subscription
+              {unreadable.length === 1 ? "" : "s"}: {unreadable.map(subscriptionName).join(", ")}
+            </p>
           )}
           {vaultList?.available &&
             (vaults.length === 0 ? (

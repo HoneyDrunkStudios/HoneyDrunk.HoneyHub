@@ -2865,6 +2865,7 @@ mod tests {
                     available: true,
                     error: None,
                     subscription_ids: Vec::new(),
+                    unreadable: Vec::new(),
                     vaults: Vec::new(),
                 },
             }),

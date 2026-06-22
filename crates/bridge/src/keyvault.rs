@@ -70,6 +70,10 @@ pub struct KeyVaultList {
     pub error: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub subscription_ids: Vec<String>,
+    /// Selected subscriptions that could not be read (best-effort partial success): the cockpit
+    /// surfaces these so a per-subscription access failure does not masquerade as "no vaults".
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unreadable: Vec<String>,
     pub vaults: Vec<KeyVault>,
 }
 
@@ -79,15 +83,17 @@ impl KeyVaultList {
             available: false,
             error: Some(error.to_string()),
             subscription_ids: requested.to_vec(),
+            unreadable: Vec::new(),
             vaults: Vec::new(),
         }
     }
 
-    fn ok(requested: &[String], vaults: Vec<KeyVault>) -> Self {
+    fn ok(requested: &[String], unreadable: Vec<String>, vaults: Vec<KeyVault>) -> Self {
         Self {
             available: true,
             error: None,
             subscription_ids: requested.to_vec(),
+            unreadable,
             vaults,
         }
     }
@@ -118,15 +124,17 @@ pub fn subscriptions() -> AzureSubscriptionList {
 pub fn list_vaults(subscription_ids: &[String]) -> KeyVaultList {
     if subscription_ids.is_empty() {
         // Nothing selected = nothing to query; an available, empty list (needs no `az`).
-        return KeyVaultList::ok(subscription_ids, Vec::new());
+        return KeyVaultList::ok(subscription_ids, Vec::new(), Vec::new());
     }
     if !program_on_path("az") {
         return KeyVaultList::unavailable(subscription_ids, "Azure CLI (az) not found on PATH");
     }
 
-    // Bound the fan-out: dedupe + cap the requested ids before spawning a thread + an `az` process
-    // per one. The cockpit only ever sends its (small, unique) selection, but the paired client is
-    // not fully trusted, so a malformed or huge/duplicated list must not exhaust the host.
+    // Bound the fan-out: dedupe, drop obviously-invalid ids, and cap before spawning a thread + an
+    // `az` process per one. The cockpit only ever sends its (small, valid, unique) selection, but
+    // the paired client is not fully trusted, so a malformed or huge/duplicated list must not
+    // exhaust the host. (A per-process timeout is the broader, cross-connector spawn_blocking work,
+    // deferred here to stay consistent with the existing `az`/git/work connectors.)
     let to_query = bounded_unique(subscription_ids);
 
     let outcomes: Vec<Result<Vec<KeyVault>, String>> = std::thread::scope(|scope| {
@@ -144,9 +152,13 @@ pub fn list_vaults(subscription_ids: &[String]) -> KeyVaultList {
             .collect()
     });
 
-    // Echo the ORIGINAL requested ids (not the deduped/capped set) so the UI's stale-response
-    // guard still correlates a response with the exact selection it asked for.
-    merge_vault_outcomes(subscription_ids, outcomes)
+    // Pair each outcome with the subscription it came from (positional, same order as `to_query`)
+    // so partial failures can be reported. Echo the ORIGINAL requested ids (not the deduped/capped
+    // set) so the UI's stale-response guard still correlates a response with the selection it asked
+    // for.
+    let paired: Vec<(String, Result<Vec<KeyVault>, String>)> =
+        to_query.into_iter().zip(outcomes).collect();
+    merge_vault_outcomes(subscription_ids, paired)
 }
 
 /// Cap on how many subscriptions one request fans out to. A real operator account has a handful;
@@ -154,34 +166,54 @@ pub fn list_vaults(subscription_ids: &[String]) -> KeyVaultList {
 /// paired client sending a huge or duplicated list.
 const MAX_SUBSCRIPTIONS: usize = 64;
 
-/// Dedupe (preserving first-seen order) and cap the requested subscription ids before fan-out.
+/// Dedupe (preserving first-seen order), drop obviously-invalid ids, and cap the requested
+/// subscription ids before fan-out.
 fn bounded_unique(subscription_ids: &[String]) -> Vec<String> {
     let mut seen = std::collections::HashSet::new();
     subscription_ids
         .iter()
+        .filter(|id| is_subscription_id_shaped(id))
         .filter(|id| seen.insert((*id).clone()))
         .take(MAX_SUBSCRIPTIONS)
         .cloned()
         .collect()
 }
 
+/// An Azure subscription id is a GUID. Cheap shape check (length, hyphen positions, hex digits) to
+/// drop obvious garbage before shelling `az` for it; not a strict GUID validator.
+fn is_subscription_id_shaped(id: &str) -> bool {
+    if id.len() != 36 {
+        return false;
+    }
+    id.bytes().enumerate().all(|(index, byte)| {
+        if matches!(index, 8 | 13 | 18 | 23) {
+            byte == b'-'
+        } else {
+            byte.is_ascii_hexdigit()
+        }
+    })
+}
+
 /// Fold the per-subscription read outcomes into one list. Best-effort: keep every subscription
-/// that succeeded; if *none* did, surface the first error so the cockpit shows "not signed in"
-/// rather than a false "no vaults". Pure (no `az`), so the aggregation behavior is unit-tested.
+/// that succeeded and record the ones that failed (so the UI can warn); if *none* succeeded,
+/// surface the first error so the cockpit shows "not signed in" rather than a false "no vaults".
+/// Pure (no `az`), so the aggregation behavior is unit-tested.
 fn merge_vault_outcomes(
     subscription_ids: &[String],
-    outcomes: Vec<Result<Vec<KeyVault>, String>>,
+    outcomes: Vec<(String, Result<Vec<KeyVault>, String>)>,
 ) -> KeyVaultList {
     let mut vaults = Vec::new();
+    let mut unreadable = Vec::new();
     let mut first_error: Option<String> = None;
     let mut any_ok = false;
-    for outcome in outcomes {
+    for (subscription_id, outcome) in outcomes {
         match outcome {
             Ok(found) => {
                 any_ok = true;
                 vaults.extend(found);
             }
             Err(error) => {
+                unreadable.push(subscription_id);
                 if first_error.is_none() {
                     first_error = Some(error);
                 }
@@ -195,7 +227,7 @@ fn merge_vault_outcomes(
             &first_error.unwrap_or_else(|| "could not read Key Vaults".to_string()),
         );
     }
-    KeyVaultList::ok(subscription_ids, vaults)
+    KeyVaultList::ok(subscription_ids, unreadable, vaults)
 }
 
 /// Read one subscription's vaults. `Err` means that subscription could not be read (skipped
@@ -370,30 +402,39 @@ mod tests {
         let requested = vec!["a".to_string(), "b".to_string()];
         let merged = merge_vault_outcomes(
             &requested,
-            vec![Ok(vec![vault("kv1", "a")]), Ok(vec![vault("kv2", "b")])],
+            vec![
+                ("a".to_string(), Ok(vec![vault("kv1", "a")])),
+                ("b".to_string(), Ok(vec![vault("kv2", "b")])),
+            ],
         );
         assert!(merged.available);
         assert_eq!(merged.error, None);
         assert_eq!(merged.vaults.len(), 2);
+        assert!(merged.unreadable.is_empty());
         // The requested set is echoed for the UI's stale-response guard.
         assert_eq!(merged.subscription_ids, requested);
     }
 
     #[test]
-    fn merge_outcomes_keeps_partial_success_and_does_not_error() {
+    fn merge_outcomes_keeps_partial_success_and_records_unreadable() {
         let requested = vec!["a".to_string(), "b".to_string()];
         let merged = merge_vault_outcomes(
             &requested,
             vec![
-                Ok(vec![vault("kv1", "a")]),
-                Err("no access to subscription b".to_string()),
+                ("a".to_string(), Ok(vec![vault("kv1", "a")])),
+                (
+                    "b".to_string(),
+                    Err("no access to subscription b".to_string()),
+                ),
             ],
         );
-        // One subscription failed, one succeeded: best-effort keeps the vaults we could read.
+        // One subscription failed, one succeeded: best-effort keeps the vaults we could read and
+        // reports the unreadable subscription so the UI can warn (not a silent "no vaults").
         assert!(merged.available);
         assert_eq!(merged.error, None);
         assert_eq!(merged.vaults.len(), 1);
         assert_eq!(merged.vaults[0].name, "kv1");
+        assert_eq!(merged.unreadable, vec!["b".to_string()]);
     }
 
     #[test]
@@ -402,8 +443,11 @@ mod tests {
         let merged = merge_vault_outcomes(
             &requested,
             vec![
-                Err("Azure CLI is not signed in (run `az login`)".to_string()),
-                Err("second error".to_string()),
+                (
+                    "a".to_string(),
+                    Err("Azure CLI is not signed in (run `az login`)".to_string()),
+                ),
+                ("b".to_string(), Err("second error".to_string())),
             ],
         );
         // Every subscription failed: unavailable, surfacing the FIRST error (not "no vaults").
@@ -417,25 +461,42 @@ mod tests {
     }
 
     #[test]
-    fn bounded_unique_dedupes_preserving_order_and_caps() {
+    fn bounded_unique_dedupes_preserving_order_caps_and_drops_garbage() {
+        // A GUID-shaped subscription id for the given low value.
+        let guid = |n: u32| format!("00000000-0000-0000-0000-{n:012x}");
+
         // Duplicates collapse to first-seen; order preserved.
-        let ids = vec![
-            "b".to_string(),
-            "a".to_string(),
-            "b".to_string(),
-            "c".to_string(),
-            "a".to_string(),
-        ];
-        assert_eq!(
-            bounded_unique(&ids),
-            vec!["b".to_string(), "a".to_string(), "c".to_string()]
-        );
+        let ids = vec![guid(0xb), guid(0xa), guid(0xb), guid(0xc), guid(0xa)];
+        assert_eq!(bounded_unique(&ids), vec![guid(0xb), guid(0xa), guid(0xc)]);
+
+        // Obvious garbage (not GUID-shaped) is dropped before any `az` fan-out.
+        let mixed = vec!["not-a-guid".to_string(), guid(0xa)];
+        assert_eq!(bounded_unique(&mixed), vec![guid(0xa)]);
 
         // A pathological huge list is capped to MAX_SUBSCRIPTIONS.
-        let many: Vec<String> = (0..1000).map(|n| n.to_string()).collect();
+        let many: Vec<String> = (0..1000).map(guid).collect();
         let bounded = bounded_unique(&many);
         assert_eq!(bounded.len(), MAX_SUBSCRIPTIONS);
-        assert_eq!(bounded[0], "0");
+        assert_eq!(bounded[0], guid(0));
+    }
+
+    #[test]
+    fn subscription_id_shape_check_accepts_guids_and_rejects_garbage() {
+        assert!(is_subscription_id_shaped(
+            "00000000-0000-0000-0000-000000000001"
+        ));
+        assert!(is_subscription_id_shaped(
+            "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+        ));
+        assert!(!is_subscription_id_shaped("not-a-guid"));
+        assert!(!is_subscription_id_shaped("")); // wrong length
+        assert!(!is_subscription_id_shaped(
+            "00000000-0000-0000-0000-00000000000g" // non-hex digit
+        ));
+        // 36 chars but no hyphens at positions 8/13/18/23 (all hex) → wrong shape.
+        assert!(!is_subscription_id_shaped(
+            "000000000000000000000000000000000000"
+        ));
     }
 
     #[test]
