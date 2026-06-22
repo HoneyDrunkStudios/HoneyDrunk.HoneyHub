@@ -87,6 +87,12 @@ export interface WireClient {
   /** Snapshot the Key Vaults across the given subscription ids. The answer arrives as a
       `key_vaults` event via `subscribe`. */
   listKeyVaults(subscriptionIds: string[]): Promise<void>;
+  /** List one vault's secrets/keys/certificates (metadata only, never values). The answer arrives
+      as a `vault_objects` event via `subscribe`. */
+  listVaultObjects(vault: string, subscriptionId: string): Promise<void>;
+  /** Reveal a single secret's value (the gated "view it" action). The answer arrives as a
+      `secret_reveal` event via `subscribe`; the value is sensitive (never logged/persisted). */
+  revealSecret(vault: string, subscriptionId: string, name: string): Promise<void>;
   /** Non-destructively peek messages from a Service Bus queue (or topic subscription). The
       answer arrives as a `service_bus_peek` event via `subscribe`. */
   peekServiceBus(request: {

@@ -484,6 +484,23 @@ async fn handle_command(
                     honeyhub_bridge::key_vaults(&subscription_ids),
                 )]))
             }
+            ClientCommand::ListVaultObjects {
+                vault,
+                subscription_id,
+            } => Ok(Some(vec![BridgeEvent::vault_objects(
+                new_id(),
+                now_rfc3339(),
+                honeyhub_bridge::vault_objects(&vault, &subscription_id),
+            )])),
+            ClientCommand::RevealSecret {
+                vault,
+                subscription_id,
+                name,
+            } => Ok(Some(vec![BridgeEvent::secret_reveal(
+                new_id(),
+                now_rfc3339(),
+                honeyhub_bridge::reveal_secret(&vault, &subscription_id, &name),
+            )])),
             ClientCommand::PeekServiceBus {
                 namespace,
                 connection_string,

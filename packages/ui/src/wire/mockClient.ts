@@ -10,8 +10,10 @@ import type {
   JobProbe,
   KeyVault,
   PolicyHint,
+  SecretReveal,
   StartRunRequest,
   UsageSignal,
+  VaultObject,
   WorkSource
 } from "@honeydrunk/honeyhub-types";
 import {
@@ -45,6 +47,10 @@ interface MockState {
 export class MockWireClient implements WireClient {
   private readonly handlers = new Set<WireEventHandler>();
   private sequence = 0;
+  // Test hook: when set, `revealSecret` queues responses instead of emitting them, so a test can
+  // simulate a slow/out-of-order reveal and release it later via `flushReveals()`.
+  public deferReveals = false;
+  private deferredReveals: SecretReveal[] = [];
   private readonly runs = new Map<string, MockState>();
   private readonly createdAt = "2026-06-07T12:00:00.000Z";
   // Accumulate the usage the demo emits so `requestUsageSummary` can roll it up the
@@ -988,6 +994,52 @@ export class MockWireClient implements WireClient {
       kind: "key_vaults",
       vaults: { available: true, subscriptionIds, unreadable, vaults }
     });
+  }
+
+  async listVaultObjects(vault: string, subscriptionId: string): Promise<void> {
+    // The real host shells `az keyvault {secret,key,certificate} list`; the mock scripts a mix of
+    // objects (one expired, one far-future, one disabled, plus a key and a certificate) so the
+    // surface, expiry badges, and reveal are exercisable offline.
+    const byVault: Record<string, VaultObject[]> = {
+      "kv-honeydrunk-dev": [
+        { name: "db-password", kind: "secret", enabled: true, expires: "2026-01-15T00:00:00+00:00", contentType: "password" },
+        { name: "api-key", kind: "secret", enabled: true, expires: "2030-01-01T00:00:00+00:00" },
+        { name: "legacy-token", kind: "secret", enabled: false },
+        { name: "signing-key", kind: "key", enabled: true, expires: "2030-06-01T00:00:00+00:00" },
+        { name: "tls-cert", kind: "certificate", enabled: true, expires: "2026-02-01T00:00:00+00:00" }
+      ],
+      "kv-automation-dev": [
+        { name: "webhook-secret", kind: "secret", enabled: true }
+      ],
+      "kv-honeydrunk-prod": [
+        { name: "prod-db-password", kind: "secret", enabled: true, expires: "2027-12-31T00:00:00+00:00", contentType: "password" }
+      ]
+    };
+    const objects = byVault[vault] ?? [];
+    this.emitDevice({
+      kind: "vault_objects",
+      objects: { available: true, vault, subscriptionId, objects }
+    });
+  }
+
+  async revealSecret(vault: string, subscriptionId: string, name: string): Promise<void> {
+    // The real host shells `az keyvault secret show`; the mock synthesizes an obviously-fake value
+    // from the name (no hard-coded credential literals).
+    const reveal: SecretReveal = { ok: true, vault, subscriptionId, name, value: `demo-value-for-${name}` };
+    if (this.deferReveals) {
+      this.deferredReveals.push(reveal);
+      return;
+    }
+    this.emitDevice({ kind: "secret_reveal", reveal });
+  }
+
+  /** Test hook: release any reveal responses queued while `deferReveals` was set. */
+  flushReveals(): void {
+    const queued = this.deferredReveals;
+    this.deferredReveals = [];
+    for (const reveal of queued) {
+      this.emitDevice({ kind: "secret_reveal", reveal });
+    }
   }
 
   async grafanaSummary(baseUrl: string, token: string): Promise<void> {

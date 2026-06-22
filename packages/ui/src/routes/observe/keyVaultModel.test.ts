@@ -1,9 +1,13 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { AzureSubscription, KeyVault } from "@honeydrunk/honeyhub-types";
+import type { AzureSubscription, KeyVault, VaultObject } from "@honeydrunk/honeyhub-types";
 import {
+  EXPIRY_SOON_DAYS,
+  expiryState,
+  filterVaultObjects,
   filterVaults,
   initialSelection,
   loadSelectedSubscriptions,
+  parseInstantMs,
   saveSelectedSubscriptions,
   subscriptionKey
 } from "./keyVaultModel";
@@ -103,6 +107,46 @@ describe("keyVaultModel", () => {
       expect(loadSelectedSubscriptions()).toBeUndefined();
       store["honeyhub.keyvault.subscriptions.v1"] = '["ok", 7, null]';
       expect(loadSelectedSubscriptions()).toEqual(["ok"]);
+    });
+  });
+
+  describe("parseInstantMs", () => {
+    it("parses ISO strings and numeric (unix-seconds) strings, tolerating garbage", () => {
+      expect(parseInstantMs("2026-07-01T00:00:00+00:00")).toBe(Date.parse("2026-07-01T00:00:00+00:00"));
+      // A pure-integer string is unix seconds → milliseconds.
+      expect(parseInstantMs("1751328000")).toBe(1751328000 * 1000);
+      expect(parseInstantMs(undefined)).toBeUndefined();
+      expect(parseInstantMs("")).toBeUndefined();
+      expect(parseInstantMs("not a date")).toBeUndefined();
+    });
+  });
+
+  describe("expiryState", () => {
+    const now = Date.parse("2026-06-22T00:00:00Z");
+    const inDays = (days: number): string =>
+      new Date(now + days * 24 * 60 * 60 * 1000).toISOString();
+
+    it("classifies none / ok / soon / expired relative to now", () => {
+      expect(expiryState(undefined, now)).toBe("none");
+      expect(expiryState(inDays(365), now)).toBe("ok");
+      expect(expiryState(inDays(EXPIRY_SOON_DAYS - 1), now)).toBe("soon");
+      expect(expiryState(inDays(-1), now)).toBe("expired");
+    });
+  });
+
+  describe("filterVaultObjects", () => {
+    const objects: VaultObject[] = [
+      { name: "db-password", kind: "secret", enabled: true },
+      { name: "signing-key", kind: "key", enabled: true },
+      { name: "tls-cert", kind: "certificate", enabled: true }
+    ];
+
+    it("matches on name or kind, case-insensitively; empty query returns all", () => {
+      expect(filterVaultObjects(objects, "")).toHaveLength(3);
+      expect(filterVaultObjects(objects, "DB").map((o) => o.name)).toEqual(["db-password"]);
+      // Match by kind.
+      expect(filterVaultObjects(objects, "certificate").map((o) => o.name)).toEqual(["tls-cert"]);
+      expect(filterVaultObjects(objects, "nope")).toHaveLength(0);
     });
   });
 });

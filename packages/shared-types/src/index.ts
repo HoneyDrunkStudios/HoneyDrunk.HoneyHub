@@ -580,6 +580,44 @@ export interface KeyVaultList {
   vaults: KeyVault[];
 }
 
+/** The kind of object inside a vault (each has its own data-plane list call). */
+export type VaultObjectKind = "secret" | "key" | "certificate";
+
+/** One secret / key / certificate's metadata (never its value). `expires` drives the expiry
+    badges; it is the `attributes.expires` instant (ISO-8601, or a numeric unix-seconds string). */
+export interface VaultObject {
+  name: string;
+  kind: VaultObjectKind;
+  enabled: boolean;
+  expires?: string;
+  created?: string;
+  updated?: string;
+  /** The secret's content type (secrets only), when set. */
+  contentType?: string;
+}
+
+/** The objects inside one vault. `vault` + `subscriptionId` are echoed so the cockpit can
+    correlate the response with the row it expanded. */
+export interface VaultObjects {
+  available: boolean;
+  /** A short, non-leaking hint when unavailable (no access / not signed in). */
+  error?: string;
+  vault: string;
+  subscriptionId: string;
+  objects: VaultObject[];
+}
+
+/** The result of revealing one secret's value (the gated "view it" action). The `value` is
+    sensitive: it rides the local bridge on demand only and is never persisted or logged. */
+export interface SecretReveal {
+  ok: boolean;
+  error?: string;
+  vault: string;
+  subscriptionId: string;
+  name: string;
+  value?: string;
+}
+
 // Non-destructive message peek (ADR-0094 D5), via the optional `honeyhub-sb-explorer` helper.
 export interface PeekMessage {
   messageId?: string;
@@ -835,6 +873,8 @@ export type ClientCommand =
   | { kind: "list_service_bus" }
   | { kind: "list_azure_subscriptions" }
   | { kind: "list_key_vaults"; subscriptionIds?: string[] }
+  | { kind: "list_vault_objects"; vault: string; subscriptionId: string }
+  | { kind: "reveal_secret"; vault: string; subscriptionId: string; name: string }
   | {
       kind: "peek_service_bus";
       namespace: string;
@@ -962,6 +1002,8 @@ export type BridgeEventPayload =
   | { kind: "service_bus_snapshot"; snapshot: ServiceBusSnapshot }
   | { kind: "azure_subscriptions"; subscriptions: AzureSubscriptionList }
   | { kind: "key_vaults"; vaults: KeyVaultList }
+  | { kind: "vault_objects"; objects: VaultObjects }
+  | { kind: "secret_reveal"; reveal: SecretReveal }
   | { kind: "service_bus_peek"; peek: ServiceBusPeek }
   | { kind: "service_bus_resubmit"; result: ServiceBusResubmit }
   | { kind: "service_bus_purge"; result: ServiceBusPurge }

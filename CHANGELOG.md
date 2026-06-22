@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.20.0] - 2026-06-22
+
+The **Azure Key Vault** connector's second slice: expand a vault to browse its contents and view a
+secret. Read-only, still riding your host `az` sign-in. (Versions: npm + this changelog at 0.20.0;
+the Rust crate workspace at 0.26.0.)
+
+- **Browse a vault**: expand any vault to see its **secrets, keys, and certificates** (metadata
+  only, never values), with a name/kind filter. Each row shows whether it is enabled and an
+  **expiry badge** (amber within 30 days, red once expired). Per-kind best-effort: a kind you cannot
+  read is skipped rather than failing the whole vault.
+- **Reveal a secret**: a gated **Reveal** action fetches one secret's value on demand via
+  `az keyvault secret show`. The value lives only in the open session (never logged or persisted)
+  and clears on Hide. Vault and secret names are shape-validated before they ride the `az` command
+  line.
+- Internal: the Key Vault panel moved into its own `KeyVaultPanel` component; the connector adds
+  `ListVaultObjects` / `RevealSecret` wire calls (additive).
+
 ## [0.19.0] - 2026-06-22
 
 A new opt-in **Azure Key Vault** observability connector (read-only, first slice). Like the other

@@ -5100,13 +5100,30 @@ button:focus-visible,
   gap: 4px;
 }
 .kv-vault {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+}
+.kv-vault-row {
   display: flex;
   align-items: baseline;
   gap: 10px;
   flex-wrap: wrap;
+  width: 100%;
   padding: 6px 8px;
-  border: 1px solid var(--border);
-  border-radius: 8px;
+  background: none;
+  border: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.kv-vault-row:hover {
+  background: var(--hover);
+}
+.kv-caret {
+  color: var(--text-muted);
+  font-size: 0.7rem;
 }
 .kv-vault-name {
   font-weight: 600;
@@ -5119,6 +5136,114 @@ button:focus-visible,
 }
 .kv-vault-sub {
   margin-left: auto;
+}
+
+/* Expanded vault: its secrets / keys / certificates. */
+.kv-objects {
+  border-top: 1px solid var(--border);
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.kv-objects-search {
+  align-self: flex-start;
+}
+.kv-objects-status {
+  padding: 4px 0;
+}
+.kv-object-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.kv-object {
+  padding: 4px 6px;
+  border-radius: 6px;
+}
+.kv-object:hover {
+  background: var(--hover);
+}
+.kv-object-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.kv-object-kind {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 5px;
+  font-size: 0.66rem;
+  font-weight: 700;
+  border: 1px solid var(--border);
+  color: var(--text-muted);
+}
+.kv-object-name {
+  font-family: var(--font-mono, monospace);
+  font-size: 0.84rem;
+}
+.kv-object-disabled {
+  font-size: 0.68rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-muted);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0 5px;
+}
+.kv-object-actions {
+  margin-left: auto;
+}
+.kv-expiry {
+  font-size: 0.7rem;
+  border-radius: 6px;
+  padding: 0 6px;
+  border: 1px solid var(--border);
+  color: var(--text-muted);
+}
+.kv-expiry-soon {
+  color: var(--warn, #e0a500);
+  border-color: var(--warn, #e0a500);
+}
+.kv-expiry-expired {
+  color: var(--danger, #ff5d5d);
+  border-color: var(--danger, #ff5d5d);
+}
+.kv-reveal-btn {
+  font-size: 0.76rem;
+  padding: 2px 8px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text);
+  cursor: pointer;
+}
+.kv-reveal-error {
+  padding: 2px 0 0;
+}
+.kv-secret-value {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 4px;
+}
+.kv-secret-text {
+  flex: 1;
+  overflow-x: auto;
+  white-space: pre;
+  padding: 4px 8px;
+  border-radius: 6px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  font-family: var(--font-mono, monospace);
+  font-size: 0.82rem;
 }
 .sb-totals {
   display: flex;

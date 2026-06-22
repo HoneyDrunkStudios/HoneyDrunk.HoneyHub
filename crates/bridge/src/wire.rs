@@ -8,7 +8,7 @@ use crate::fsbrowse::{DirListing, FileContents, SearchResults, WorkspaceFolders}
 use crate::git::{GitBranches, GitDiff, GitOpResult, GitOverview, GitStatus};
 use crate::grafana::GrafanaSummary;
 use crate::jobs::{JobProbe, JobSnapshot};
-use crate::keyvault::{AzureSubscriptionList, KeyVaultList};
+use crate::keyvault::{AzureSubscriptionList, KeyVaultList, SecretReveal, VaultObjects};
 use crate::network::NetworkInfo;
 use crate::roadmap::RoadmapSnapshot;
 use crate::sentry::SentrySummary;
@@ -341,6 +341,21 @@ pub enum ClientCommand {
     ListKeyVaults {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         subscription_ids: Vec<String>,
+    },
+    /// List one vault's secrets / keys / certificates (metadata only, never values) for the
+    /// **Key Vault** connector, when the cockpit expands that vault. Read-only data plane; the host
+    /// answers with a single [`BridgeEventPayload::VaultObjects`].
+    ListVaultObjects {
+        vault: String,
+        subscription_id: String,
+    },
+    /// Reveal a single secret's value (the gated "view it" action). Read-only data plane; the host
+    /// answers with a single [`BridgeEventPayload::SecretReveal`]. The value is sensitive and rides
+    /// the local bridge on demand only, never persisted host-side.
+    RevealSecret {
+        vault: String,
+        subscription_id: String,
+        name: String,
     },
     /// Summarize a Grafana instance (opt-in observability connector): health + dashboards.
     /// The config (`base_url` + optional `token`) is held in the cockpit and passed per
@@ -890,6 +905,40 @@ impl BridgeEvent {
         }
     }
 
+    /// A device-wide vault-objects listing (one vault's secrets/keys/certificates). Not scoped to a
+    /// run or session, so `session_id`/`run_id` are empty and `sequence` is `0`.
+    pub fn vault_objects(
+        id: impl Into<String>,
+        created_at: impl Into<String>,
+        objects: VaultObjects,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            session_id: String::new(),
+            run_id: String::new(),
+            sequence: 0,
+            created_at: created_at.into(),
+            payload: BridgeEventPayload::VaultObjects { objects },
+        }
+    }
+
+    /// A device-wide secret reveal (one secret's value). Not scoped to a run or session, so
+    /// `session_id`/`run_id` are empty and `sequence` is `0`.
+    pub fn secret_reveal(
+        id: impl Into<String>,
+        created_at: impl Into<String>,
+        reveal: SecretReveal,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            session_id: String::new(),
+            run_id: String::new(),
+            sequence: 0,
+            created_at: created_at.into(),
+            payload: BridgeEventPayload::SecretReveal { reveal },
+        }
+    }
+
     /// A device-wide Service Bus message peek. Not scoped to a run or session, so
     /// `session_id`/`run_id` are empty and `sequence` is `0`.
     pub fn service_bus_peek(
@@ -1264,6 +1313,12 @@ pub enum BridgeEventPayload {
     },
     KeyVaults {
         vaults: KeyVaultList,
+    },
+    VaultObjects {
+        objects: VaultObjects,
+    },
+    SecretReveal {
+        reveal: SecretReveal,
     },
     ServiceBusPeek {
         peek: ServiceBusPeek,
@@ -2103,6 +2158,33 @@ mod tests {
                 }),
             ),
             BridgeEventPayload::KeyVaults { .. }
+        );
+        check!(
+            BridgeEvent::vault_objects(
+                "e",
+                at,
+                from_json!(VaultObjects, {
+                    "available": true,
+                    "vault": "kv",
+                    "subscriptionId": "sub",
+                    "objects": []
+                }),
+            ),
+            BridgeEventPayload::VaultObjects { .. }
+        );
+        check!(
+            BridgeEvent::secret_reveal(
+                "e",
+                at,
+                from_json!(SecretReveal, {
+                    "ok": true,
+                    "vault": "kv",
+                    "subscriptionId": "sub",
+                    "name": "db-password",
+                    "value": "s3cr3t"
+                }),
+            ),
+            BridgeEventPayload::SecretReveal { .. }
         );
         check!(
             BridgeEvent::service_bus_peek(

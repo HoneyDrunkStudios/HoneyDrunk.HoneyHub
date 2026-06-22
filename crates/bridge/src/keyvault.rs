@@ -1,9 +1,10 @@
 //! **Azure Key Vault** connector (opt-in, read-only). Rides the operator's existing `az` sign-in
 //! on the bridge host (like the Service Bus connector), so the cockpit, desktop or paired phone,
-//! never holds an Azure credential. This first slice is management-plane only: list the operator's
-//! subscriptions ([`subscriptions`]) for the picker, then list the Key Vaults across the selected
-//! subscriptions ([`list_vaults`]). Browsing secret/key/certificate metadata + values, and the
-//! expiry alerts, ride the same `az` path in later slices.
+//! never holds an Azure credential. Management plane: list the operator's subscriptions
+//! ([`subscriptions`]) and the Key Vaults across the selected ones ([`list_vaults`]). Data plane:
+//! list a vault's secrets / keys / certificates metadata ([`list_vault_objects`]) and reveal a
+//! single secret's value ([`reveal_secret`]). The expiry alerts ride the same listings in a later
+//! slice.
 
 use crate::azcli::{resource_group_from_id, run_az};
 use crate::backend_catalog::program_on_path;
@@ -315,6 +316,336 @@ fn opt_string(row: &serde_json::Value, key: &str) -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
+// --- Data-plane object listing + secret reveal (a vault's secrets / keys / certificates) ------
+
+/// The kind of object inside a vault. Each has its own `az keyvault <kind> list` data-plane call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VaultObjectKind {
+    Secret,
+    Key,
+    Certificate,
+}
+
+/// One secret / key / certificate's metadata (never its value). `expires` drives the cockpit's
+/// expiry badges and the later expiry notifications; it is the `attributes.expires` instant
+/// (ISO-8601 from the data-plane CLI, kept as a string so the UI can format / diff it).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VaultObject {
+    pub name: String,
+    pub kind: VaultObjectKind,
+    pub enabled: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expires: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub created: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub updated: Option<String>,
+    /// The secret's content type (secrets only), when set.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content_type: Option<String>,
+}
+
+/// The objects inside one vault, with an honest unavailable state. `vault` + `subscription_id`
+/// are echoed so the cockpit can correlate the response with the row it expanded.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VaultObjects {
+    pub available: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    pub vault: String,
+    pub subscription_id: String,
+    pub objects: Vec<VaultObject>,
+}
+
+impl VaultObjects {
+    fn unavailable(vault: &str, subscription_id: &str, error: &str) -> Self {
+        Self {
+            available: false,
+            error: Some(error.to_string()),
+            vault: vault.to_string(),
+            subscription_id: subscription_id.to_string(),
+            objects: Vec::new(),
+        }
+    }
+}
+
+/// The result of revealing a single secret's value (the gated "view it" action). The `value` is
+/// sensitive: it rides the local bridge on demand only, is never persisted host-side, and the
+/// cockpit keeps it out of logs and storage.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SecretReveal {
+    pub ok: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    pub vault: String,
+    pub subscription_id: String,
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub value: Option<String>,
+}
+
+// `Debug` is hand-written (not derived) so the plaintext secret `value` can never leak through a
+// `{:?}` of this struct (or of any `BridgeEvent` that embeds it) into a log line; only its presence
+// is shown.
+impl std::fmt::Debug for SecretReveal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SecretReveal")
+            .field("ok", &self.ok)
+            .field("error", &self.error)
+            .field("vault", &self.vault)
+            .field("subscription_id", &self.subscription_id)
+            .field("name", &self.name)
+            .field("value", &self.value.as_ref().map(|_| "<redacted>"))
+            .finish()
+    }
+}
+
+impl SecretReveal {
+    fn failed(vault: &str, subscription_id: &str, name: &str, error: &str) -> Self {
+        Self {
+            ok: false,
+            error: Some(error.to_string()),
+            vault: vault.to_string(),
+            subscription_id: subscription_id.to_string(),
+            name: name.to_string(),
+            value: None,
+        }
+    }
+}
+
+/// List a vault's secrets, keys, and certificates (metadata only, never values), via the three
+/// `az keyvault {secret,key,certificate} list` data-plane calls. Read-only. The three reads are
+/// independent (and a vault may grant access to only some kinds), so they run on threads and fold
+/// best-effort: include whatever kinds we can read; only when *all three* fail is the result
+/// unavailable (surfacing the first error, e.g. not signed in / no access).
+pub fn list_vault_objects(vault: &str, subscription_id: &str) -> VaultObjects {
+    if !is_vault_name_shaped(vault) {
+        return VaultObjects::unavailable(vault, subscription_id, "invalid vault name");
+    }
+    if !is_subscription_id_shaped(subscription_id) {
+        return VaultObjects::unavailable(vault, subscription_id, "invalid subscription id");
+    }
+    if !program_on_path("az") {
+        return VaultObjects::unavailable(
+            vault,
+            subscription_id,
+            "Azure CLI (az) not found on PATH",
+        );
+    }
+
+    let kinds = [
+        VaultObjectKind::Secret,
+        VaultObjectKind::Key,
+        VaultObjectKind::Certificate,
+    ];
+    let outcomes: Vec<Result<Vec<VaultObject>, String>> = std::thread::scope(|scope| {
+        let handles: Vec<_> = kinds
+            .iter()
+            .map(|kind| scope.spawn(move || objects_of_kind(vault, subscription_id, *kind)))
+            .collect();
+        handles
+            .into_iter()
+            .map(|handle| {
+                handle
+                    .join()
+                    .unwrap_or_else(|_| Err("the Key Vault read thread panicked".to_string()))
+            })
+            .collect()
+    });
+
+    let mut objects = Vec::new();
+    let mut first_error: Option<String> = None;
+    let mut any_ok = false;
+    for outcome in outcomes {
+        match outcome {
+            Ok(found) => {
+                any_ok = true;
+                objects.extend(found);
+            }
+            Err(error) => {
+                if first_error.is_none() {
+                    first_error = Some(error);
+                }
+            }
+        }
+    }
+
+    if !any_ok {
+        return VaultObjects::unavailable(
+            vault,
+            subscription_id,
+            &first_error.unwrap_or_else(|| "could not read the vault".to_string()),
+        );
+    }
+    VaultObjects {
+        available: true,
+        error: None,
+        vault: vault.to_string(),
+        subscription_id: subscription_id.to_string(),
+        objects,
+    }
+}
+
+/// Read one object kind from a vault. `Err` means that kind could not be listed (skipped
+/// best-effort by the caller unless all kinds fail).
+fn objects_of_kind(
+    vault: &str,
+    subscription_id: &str,
+    kind: VaultObjectKind,
+) -> Result<Vec<VaultObject>, String> {
+    let subcommand = match kind {
+        VaultObjectKind::Secret => "secret",
+        VaultObjectKind::Key => "key",
+        VaultObjectKind::Certificate => "certificate",
+    };
+    let json = run_az(&[
+        "keyvault",
+        subcommand,
+        "list",
+        "--vault-name",
+        vault,
+        "--subscription",
+        subscription_id,
+        "-o",
+        "json",
+    ])?;
+    Ok(parse_vault_objects(&json, kind))
+}
+
+/// Reveal a single secret's value via `az keyvault secret show` (the gated "view it" action).
+/// Read-only. The value is read from the JSON `value` field so any content (newlines, tabs)
+/// round-trips intact; honest failed states for not-found / no-access.
+pub fn reveal_secret(vault: &str, subscription_id: &str, name: &str) -> SecretReveal {
+    if !is_vault_name_shaped(vault) {
+        return SecretReveal::failed(vault, subscription_id, name, "invalid vault name");
+    }
+    if !is_subscription_id_shaped(subscription_id) {
+        return SecretReveal::failed(vault, subscription_id, name, "invalid subscription id");
+    }
+    // Validate the secret name shape too: it rides argv as `--name <name>`, so a leading `-`
+    // could otherwise be parsed by `az` as a flag.
+    if !is_object_name_shaped(name) {
+        return SecretReveal::failed(vault, subscription_id, name, "invalid secret name");
+    }
+    if !program_on_path("az") {
+        return SecretReveal::failed(
+            vault,
+            subscription_id,
+            name,
+            "Azure CLI (az) not found on PATH",
+        );
+    }
+    match run_az(&[
+        "keyvault",
+        "secret",
+        "show",
+        "--vault-name",
+        vault,
+        "--name",
+        name,
+        "--subscription",
+        subscription_id,
+        "-o",
+        "json",
+    ]) {
+        Ok(json) => match parse_secret_value(&json) {
+            Some(value) => SecretReveal {
+                ok: true,
+                error: None,
+                vault: vault.to_string(),
+                subscription_id: subscription_id.to_string(),
+                name: name.to_string(),
+                value: Some(value),
+            },
+            None => SecretReveal::failed(vault, subscription_id, name, "the secret has no value"),
+        },
+        Err(error) => SecretReveal::failed(vault, subscription_id, name, &error),
+    }
+}
+
+/// Parse `az keyvault <kind> list -o json` into objects. The name is the last path segment of the
+/// object's `id` (secrets / certificates) or `kid` (keys); rows without one are dropped.
+pub fn parse_vault_objects(json: &str, kind: VaultObjectKind) -> Vec<VaultObject> {
+    let Ok(serde_json::Value::Array(rows)) = serde_json::from_str::<serde_json::Value>(json) else {
+        return Vec::new();
+    };
+    rows.into_iter()
+        .filter_map(|row| {
+            let id = row
+                .get("id")
+                .or_else(|| row.get("kid"))
+                .and_then(|v| v.as_str())?;
+            let name = id.rsplit('/').next().unwrap_or("").to_string();
+            if name.is_empty() {
+                return None;
+            }
+            let attributes = row.get("attributes");
+            // `enabled` defaults to true to match Key Vault's own default for the attribute when it
+            // is absent from a row.
+            let enabled = attributes
+                .and_then(|a| a.get("enabled"))
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(true);
+            Some(VaultObject {
+                name,
+                kind,
+                enabled,
+                expires: attr_instant(attributes, "expires"),
+                created: attr_instant(attributes, "created"),
+                updated: attr_instant(attributes, "updated"),
+                // `contentType` is a secret-only attribute; ignore any stray value on keys/certs.
+                content_type: match kind {
+                    VaultObjectKind::Secret => opt_string(&row, "contentType"),
+                    _ => None,
+                },
+            })
+        })
+        .collect()
+}
+
+/// Parse the `value` out of `az keyvault secret show -o json`.
+pub fn parse_secret_value(json: &str) -> Option<String> {
+    serde_json::from_str::<serde_json::Value>(json)
+        .ok()?
+        .get("value")?
+        .as_str()
+        .map(str::to_string)
+}
+
+/// Read an `attributes.<key>` instant. The data-plane CLI renders these as ISO-8601 strings; this
+/// also tolerates a raw numeric (unix-seconds) form, surfaced as its digits so the UI can detect
+/// and convert it. `null` / absent → `None`.
+fn attr_instant(attributes: Option<&serde_json::Value>, key: &str) -> Option<String> {
+    let value = attributes?.get(key)?;
+    if let Some(text) = value.as_str() {
+        return (!text.is_empty()).then(|| text.to_string());
+    }
+    value.as_i64().map(|seconds| seconds.to_string())
+}
+
+/// A Key Vault name (3-24 chars, starts with a letter, alphanumeric + hyphens). A light shape
+/// check to drop obvious garbage before it rides argv as `--vault-name`.
+fn is_vault_name_shaped(vault: &str) -> bool {
+    let bytes = vault.as_bytes();
+    (3..=24).contains(&vault.len())
+        && bytes[0].is_ascii_alphabetic()
+        && bytes
+            .iter()
+            .all(|b| b.is_ascii_alphanumeric() || *b == b'-')
+}
+
+/// A secret/key/certificate name shape (1-127 chars, alphanumeric + hyphens, no leading hyphen),
+/// so a name can ride argv as `--name` without being mistaken for a flag.
+fn is_object_name_shaped(name: &str) -> bool {
+    (1..=127).contains(&name.len())
+        && !name.starts_with('-')
+        && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -505,5 +836,143 @@ mod tests {
         let merged = merge_vault_outcomes(&["a".to_string()], Vec::new());
         assert!(!merged.available);
         assert_eq!(merged.error.as_deref(), Some("could not read Key Vaults"));
+    }
+
+    #[test]
+    fn parses_secret_objects_with_name_from_id_and_iso_expiry() {
+        let json = r#"[
+            {"id":"https://kv.vault.azure.net/secrets/db-password",
+             "attributes":{"enabled":true,"expires":"2026-07-01T00:00:00+00:00",
+                           "created":"2026-01-01T00:00:00+00:00","updated":"2026-02-01T00:00:00+00:00"},
+             "contentType":"password"},
+            {"id":"https://kv.vault.azure.net/secrets/disabled-one",
+             "attributes":{"enabled":false}}
+        ]"#;
+        let objects = parse_vault_objects(json, VaultObjectKind::Secret);
+        assert_eq!(objects.len(), 2);
+        assert_eq!(objects[0].name, "db-password");
+        assert_eq!(objects[0].kind, VaultObjectKind::Secret);
+        assert!(objects[0].enabled);
+        assert_eq!(
+            objects[0].expires.as_deref(),
+            Some("2026-07-01T00:00:00+00:00")
+        );
+        assert_eq!(objects[0].content_type.as_deref(), Some("password"));
+        // Missing attributes default cleanly; disabled is honored.
+        assert!(!objects[1].enabled);
+        assert_eq!(objects[1].expires, None);
+        assert_eq!(objects[1].content_type, None);
+    }
+
+    #[test]
+    fn parses_key_objects_from_kid_and_numeric_expiry() {
+        // Keys carry `kid` (not `id`); a numeric (unix-seconds) expiry is surfaced as its digits.
+        let json = r#"[{"kid":"https://kv.vault.azure.net/keys/signing-key",
+                        "attributes":{"enabled":true,"expires":1751328000}}]"#;
+        let objects = parse_vault_objects(json, VaultObjectKind::Key);
+        assert_eq!(objects.len(), 1);
+        assert_eq!(objects[0].name, "signing-key");
+        assert_eq!(objects[0].kind, VaultObjectKind::Key);
+        assert_eq!(objects[0].expires.as_deref(), Some("1751328000"));
+    }
+
+    #[test]
+    fn parses_certificate_objects_and_tolerates_garbage() {
+        let json = r#"[{"id":"https://kv.vault.azure.net/certificates/tls-cert",
+                        "attributes":{"enabled":true}}]"#;
+        let objects = parse_vault_objects(json, VaultObjectKind::Certificate);
+        assert_eq!(objects.len(), 1);
+        assert_eq!(objects[0].name, "tls-cert");
+        assert_eq!(objects[0].kind, VaultObjectKind::Certificate);
+        // Garbage / missing id rows are dropped.
+        assert!(parse_vault_objects("not json", VaultObjectKind::Secret).is_empty());
+        assert!(parse_vault_objects(r#"[{"noId":1}]"#, VaultObjectKind::Secret).is_empty());
+    }
+
+    #[test]
+    fn secret_reveal_debug_redacts_the_plaintext_value() {
+        let revealed = SecretReveal {
+            ok: true,
+            error: None,
+            vault: "kv".to_string(),
+            subscription_id: "sub".to_string(),
+            name: "db-password".to_string(),
+            value: Some("super-secret-value".to_string()),
+        };
+        let debug = format!("{revealed:?}");
+        // The plaintext never appears via `{:?}`; only its presence is shown.
+        assert!(!debug.contains("super-secret-value"));
+        assert!(debug.contains("<redacted>"));
+        // Non-sensitive fields stay visible for diagnostics.
+        assert!(debug.contains("db-password"));
+    }
+
+    #[test]
+    fn content_type_is_kept_for_secrets_and_dropped_for_keys() {
+        let json = r#"[{"id":"https://kv.vault.azure.net/keys/k","attributes":{"enabled":true},
+                        "contentType":"stray"}]"#;
+        // A stray contentType on a key is ignored (it is a secret-only attribute).
+        let keys = parse_vault_objects(json, VaultObjectKind::Key);
+        assert_eq!(keys[0].content_type, None);
+    }
+
+    #[test]
+    fn parses_secret_value_or_none() {
+        assert_eq!(
+            parse_secret_value(r#"{"id":"x","value":"s3cr3t","attributes":{}}"#).as_deref(),
+            Some("s3cr3t")
+        );
+        // A value with newlines round-trips intact (JSON, not tsv).
+        assert_eq!(
+            parse_secret_value(r#"{"value":"line1\nline2"}"#).as_deref(),
+            Some("line1\nline2")
+        );
+        assert_eq!(parse_secret_value("{}"), None);
+        assert_eq!(parse_secret_value("not json"), None);
+    }
+
+    #[test]
+    fn name_shape_checks_reject_argv_injection_and_garbage() {
+        assert!(is_vault_name_shaped("kv-honeydrunk-dev"));
+        assert!(!is_vault_name_shaped("-kv")); // can't start with a hyphen
+        assert!(!is_vault_name_shaped("ab")); // too short
+        assert!(!is_vault_name_shaped("kv name")); // space
+
+        assert!(is_object_name_shaped("db-password"));
+        assert!(!is_object_name_shaped("--query")); // leading hyphen (flag injection)
+        assert!(!is_object_name_shaped("")); // empty
+        assert!(!is_object_name_shaped("name with space"));
+    }
+
+    #[test]
+    fn reveal_secret_rejects_invalid_input_without_shelling_az() {
+        // Deterministic (no `az` call): bad vault / subscription / secret names fail fast, and the
+        // result echoes the requested vault + subscription + name back for UI correlation.
+        let sub = "00000000-0000-0000-0000-000000000001";
+        let bad_vault = reveal_secret("-bad", sub, "name");
+        assert!(!bad_vault.ok);
+        assert_eq!(bad_vault.error.as_deref(), Some("invalid vault name"));
+        assert_eq!(bad_vault.subscription_id, sub);
+
+        let bad_sub = reveal_secret("kv-honeydrunk-dev", "not-a-guid", "name");
+        assert_eq!(bad_sub.error.as_deref(), Some("invalid subscription id"));
+
+        // A valid subscription id reaches the secret-name check; a leading-hyphen name is rejected.
+        let bad_name = reveal_secret("kv-honeydrunk-dev", sub, "--query");
+        assert!(!bad_name.ok);
+        assert_eq!(bad_name.error.as_deref(), Some("invalid secret name"));
+    }
+
+    #[test]
+    fn list_vault_objects_rejects_invalid_input_without_shelling_az() {
+        let bad_vault = list_vault_objects("-bad", "00000000-0000-0000-0000-000000000001");
+        assert!(!bad_vault.available);
+        assert_eq!(bad_vault.error.as_deref(), Some("invalid vault name"));
+        assert_eq!(bad_vault.vault, "-bad");
+
+        let bad_sub = list_vault_objects("kv-honeydrunk-dev", "not-a-guid");
+        assert!(!bad_sub.available);
+        assert_eq!(bad_sub.error.as_deref(), Some("invalid subscription id"));
+        assert_eq!(bad_sub.subscription_id, "not-a-guid");
     }
 }
