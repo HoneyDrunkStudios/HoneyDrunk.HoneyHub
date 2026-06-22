@@ -702,19 +702,36 @@ pub fn scan_expiring(subscription_ids: &[String]) -> ExpiringObjects {
         );
     }
 
+    let had_vaults = !vaults.vaults.is_empty();
+    let listings: Vec<VaultObjects> = vaults
+        .vaults
+        .iter()
+        .take(MAX_SCAN_VAULTS)
+        .map(|vault| list_vault_objects(&vault.name, &vault.subscription_id))
+        .collect();
+    aggregate_expiring(had_vaults, listings)
+}
+
+/// Fold per-vault listings into the expiring set: keep every object that carries an `expires`,
+/// tagged with the vault + subscription its listing echoed. If the account `had_vaults` but none
+/// of their listings were readable (e.g. a transient data-plane access loss), report unavailable
+/// rather than a false "nothing expiring", so the cockpit keeps its prior alerted-set instead of
+/// resetting it and re-firing on restore. Pure (no `az`), so the aggregation is unit-tested.
+fn aggregate_expiring(had_vaults: bool, listings: Vec<VaultObjects>) -> ExpiringObjects {
     let mut objects = Vec::new();
     let mut any_vault_read = false;
-    for vault in vaults.vaults.iter().take(MAX_SCAN_VAULTS) {
-        let listing = list_vault_objects(&vault.name, &vault.subscription_id);
+    for listing in listings {
         if !listing.available {
             continue;
         }
         any_vault_read = true;
+        let vault = listing.vault;
+        let subscription_id = listing.subscription_id;
         for object in listing.objects {
             if let Some(expires) = object.expires {
                 objects.push(ExpiringObject {
-                    vault: vault.name.clone(),
-                    subscription_id: vault.subscription_id.clone(),
+                    vault: vault.clone(),
+                    subscription_id: subscription_id.clone(),
                     kind: object.kind,
                     name: object.name,
                     expires,
@@ -723,10 +740,7 @@ pub fn scan_expiring(subscription_ids: &[String]) -> ExpiringObjects {
         }
     }
 
-    // If the account has vaults but we could read none of their contents (e.g. a transient
-    // data-plane access loss), report unavailable rather than a false "nothing expiring", so the
-    // cockpit keeps its prior alerted-set instead of resetting it and re-firing on restore.
-    if !vaults.vaults.is_empty() && !any_vault_read {
+    if had_vaults && !any_vault_read {
         return ExpiringObjects::unavailable("could not read any vault's contents");
     }
     ExpiringObjects {
@@ -1074,5 +1088,100 @@ mod tests {
         assert!(scan.available);
         assert!(scan.objects.is_empty());
         assert_eq!(scan.error, None);
+    }
+
+    fn object_with_expiry(name: &str, expires: Option<&str>) -> VaultObject {
+        VaultObject {
+            name: name.to_string(),
+            kind: VaultObjectKind::Secret,
+            enabled: true,
+            expires: expires.map(str::to_string),
+            created: None,
+            updated: None,
+            content_type: None,
+        }
+    }
+
+    fn listing(vault: &str, sub: &str, available: bool, objects: Vec<VaultObject>) -> VaultObjects {
+        VaultObjects {
+            available,
+            error: if available {
+                None
+            } else {
+                Some("no access".to_string())
+            },
+            vault: vault.to_string(),
+            subscription_id: sub.to_string(),
+            objects,
+        }
+    }
+
+    #[test]
+    fn aggregate_expiring_keeps_objects_with_expiry_tagged_by_vault() {
+        let listings = vec![
+            listing(
+                "kv-a",
+                "sub-1",
+                true,
+                vec![
+                    object_with_expiry("with-exp", Some("2026-07-01T00:00:00+00:00")),
+                    object_with_expiry("no-exp", None),
+                ],
+            ),
+            listing(
+                "kv-b",
+                "sub-1",
+                true,
+                vec![object_with_expiry("k", Some("2026-08-01T00:00:00+00:00"))],
+            ),
+        ];
+        let result = aggregate_expiring(true, listings);
+        assert!(result.available);
+        // Only objects WITH an expiry are kept, tagged with their vault + subscription.
+        assert_eq!(result.objects.len(), 2);
+        assert_eq!(result.objects[0].name, "with-exp");
+        assert_eq!(result.objects[0].vault, "kv-a");
+        assert_eq!(result.objects[0].subscription_id, "sub-1");
+        assert_eq!(result.objects[1].vault, "kv-b");
+    }
+
+    #[test]
+    fn aggregate_expiring_partial_keeps_readable_and_stays_available() {
+        // One vault readable, one not: best-effort keeps what we could read, still available.
+        let listings = vec![
+            listing(
+                "kv-a",
+                "sub-1",
+                true,
+                vec![object_with_expiry("x", Some("2026-07-01T00:00:00+00:00"))],
+            ),
+            listing("kv-b", "sub-1", false, Vec::new()),
+        ];
+        let result = aggregate_expiring(true, listings);
+        assert!(result.available);
+        assert_eq!(result.objects.len(), 1);
+    }
+
+    #[test]
+    fn aggregate_expiring_is_unavailable_when_no_vault_is_readable() {
+        // Had vaults, but none readable: unavailable, so the UI keeps its prior alerted-set.
+        let listings = vec![
+            listing("kv-a", "sub-1", false, Vec::new()),
+            listing("kv-b", "sub-1", false, Vec::new()),
+        ];
+        let result = aggregate_expiring(true, listings);
+        assert!(!result.available);
+        assert_eq!(
+            result.error.as_deref(),
+            Some("could not read any vault's contents")
+        );
+    }
+
+    #[test]
+    fn aggregate_expiring_with_no_vaults_is_available_and_empty() {
+        let result = aggregate_expiring(false, Vec::new());
+        assert!(result.available);
+        assert!(result.objects.is_empty());
+        assert_eq!(result.error, None);
     }
 }

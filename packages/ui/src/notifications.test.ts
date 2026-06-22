@@ -11,6 +11,7 @@ import {
   deadLetterNotifications,
   defaultNotificationPrefs,
   expiringNotifications,
+  expiryKey,
   kindForCategory,
   loadExpirySeen,
   mergeFeed,
@@ -230,6 +231,32 @@ describe("notifications model", () => {
       expect(notifications.find((n) => n.body.includes("expired"))).toBeTruthy();
       // `keys` is the full in-window set (soon + expired); `far` is excluded.
       expect(keys).toHaveLength(2);
+    });
+
+    it("uses an opaque key + body that never carry the object name", () => {
+      const obj = {
+        vault: "kv-prod",
+        subscriptionId: "sub-1",
+        kind: "secret" as const,
+        name: "stripe-prod-signing-key",
+        expires: inDays(5)
+      };
+      const key = expiryKey(obj);
+      expect(key).not.toContain("stripe-prod-signing-key");
+      // Stable, and a renewed expiry hashes differently (so it can alert again).
+      expect(expiryKey(obj)).toBe(key);
+      expect(expiryKey({ ...obj, expires: inDays(400) })).not.toBe(key);
+
+      const { notifications } = expiringNotifications(
+        { available: true, objects: [obj] },
+        defaultNotificationPrefs,
+        new Set(),
+        NOW
+      );
+      // The persisted feed entry (id + body) carries the vault + kind + date, never the name.
+      expect(notifications[0]?.id).not.toContain("stripe-prod-signing-key");
+      expect(notifications[0]?.body).not.toContain("stripe-prod-signing-key");
+      expect(notifications[0]?.body).toContain("kv-prod");
     });
 
     it("does not re-fire an item already in seen", () => {

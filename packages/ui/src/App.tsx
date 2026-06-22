@@ -32,7 +32,10 @@ import { GoalsView } from "./routes/goals/GoalsView";
 import { GoalOrchestrator } from "./routes/goals/goalOrchestrator";
 import { orderGoals, type GoalsState } from "./routes/goals/goalsModel";
 import { enabledIds, loadConnectorPrefs } from "./connectors";
-import { loadSelectedSubscriptions } from "./routes/observe/keyVaultModel";
+import {
+  KV_SUBSCRIPTIONS_CHANGED_EVENT,
+  loadSelectedSubscriptions
+} from "./routes/observe/keyVaultModel";
 import { ChatSidebar, SIDEBAR_SESSION_ID } from "./routes/chat/ChatSidebar";
 import { HubView } from "./routes/hub/HubView";
 import { PlanView } from "./routes/plan/PlanView";
@@ -274,6 +277,14 @@ export function App({ client }: AppProps = {}) {
     setConnectorPrefs(loadConnectorPrefs());
     setKeyVaultSubscriptions(loadSelectedSubscriptions() ?? []);
   }, [view]);
+
+  // Also react the moment the Key Vault selection changes (in the Observe panel), so the expiry
+  // scan re-points without needing a view change. Pairs with the view-change re-read above.
+  useEffect(() => {
+    const onChange = (): void => setKeyVaultSubscriptions(loadSelectedSubscriptions() ?? []);
+    globalThis.addEventListener?.(KV_SUBSCRIPTIONS_CHANGED_EVENT, onChange);
+    return () => globalThis.removeEventListener?.(KV_SUBSCRIPTIONS_CHANGED_EVENT, onChange);
+  }, []);
 
   // Whether the user is actively looking at a chat thread (so a finish there is silent). A
   // thread is "active" only when its surface is visible AND the window is focused.

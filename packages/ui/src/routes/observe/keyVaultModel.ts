@@ -26,9 +26,15 @@ export function loadSelectedSubscriptions(): string[] | undefined {
   }
 }
 
+/** Broadcast on the global event target whenever the saved selection changes, so listeners (the
+    background expiry-scan engine) can re-read it immediately, without waiting for an unrelated
+    re-render or a view change. */
+export const KV_SUBSCRIPTIONS_CHANGED_EVENT = "honeyhub:keyvault-subscriptions-changed";
+
 export function saveSelectedSubscriptions(ids: string[]): void {
   try {
     globalThis.localStorage?.setItem(SUBS_STORAGE_KEY, JSON.stringify(ids));
+    globalThis.dispatchEvent?.(new Event(KV_SUBSCRIPTIONS_CHANGED_EVENT));
   } catch {
     // Storage unavailable; keep the in-memory selection for this session only.
   }

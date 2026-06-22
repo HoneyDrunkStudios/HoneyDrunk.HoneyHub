@@ -299,10 +299,24 @@ export function saveExpirySeen(seen: ReadonlySet<string>): void {
   }
 }
 
-/** A stable key for an expiring object. Includes `expires`, so renewing a secret (a new expiry)
-    counts as a fresh item and can alert again. */
+/** A small deterministic FNV-1a hash to hex. */
+function hashString(input: string): string {
+  let hash = 0x811c9dc5;
+  for (let i = 0; i < input.length; i += 1) {
+    hash ^= input.charCodeAt(i);
+    hash = Math.imul(hash, 0x0100_0193);
+  }
+  return (hash >>> 0).toString(16).padStart(8, "0");
+}
+
+/** A stable, OPAQUE key for an expiring object (a hash, not the identifiers). It both de-dupes
+    alerts and is what lands in the persisted seen-set + notification id, so the operationally
+    revealing object name never reaches local storage. Includes `expires`, so renewing an object
+    (a new expiry) hashes differently and can alert again. */
 export function expiryKey(object: ExpiringObject): string {
-  return `${object.subscriptionId}/${object.vault}/${object.kind}/${object.name}/${object.expires}`;
+  return hashString(
+    `${object.subscriptionId}/${object.vault}/${object.kind}/${object.name}/${object.expires}`
+  );
 }
 
 /**
