@@ -1209,6 +1209,20 @@ fn validate_stream_payload(
                 "a backend stream must not emit device-wide service bus management results",
             ));
         }
+        BridgeEventPayload::AzureSubscriptions { .. } => {
+            // Device-wide, host-synthesized Azure subscription list; never streamed.
+            return Err(BridgeError::new(
+                "event_unexpected_azure_subscriptions",
+                "a backend stream must not emit device-wide azure subscriptions",
+            ));
+        }
+        BridgeEventPayload::KeyVaults { .. } => {
+            // Device-wide, host-synthesized Key Vault list; never streamed.
+            return Err(BridgeError::new(
+                "event_unexpected_key_vaults",
+                "a backend stream must not emit device-wide key vault lists",
+            ));
+        }
         BridgeEventPayload::GrafanaSummary { .. } => {
             // Device-wide, host-synthesized Grafana summary — never streamed.
             return Err(BridgeError::new(
@@ -2834,6 +2848,28 @@ mod tests {
                 },
             }),
             "event_unexpected_agent_written"
+        );
+        assert_eq!(
+            err_code(BridgeEventPayload::AzureSubscriptions {
+                subscriptions: crate::keyvault::AzureSubscriptionList {
+                    available: true,
+                    error: None,
+                    subscriptions: Vec::new(),
+                },
+            }),
+            "event_unexpected_azure_subscriptions"
+        );
+        assert_eq!(
+            err_code(BridgeEventPayload::KeyVaults {
+                vaults: crate::keyvault::KeyVaultList {
+                    available: true,
+                    error: None,
+                    subscription_ids: Vec::new(),
+                    unreadable: Vec::new(),
+                    vaults: Vec::new(),
+                },
+            }),
+            "event_unexpected_key_vaults"
         );
         assert_eq!(
             err_code(BridgeEventPayload::JobSnapshot {

@@ -313,6 +313,17 @@ export class WebSocketWireClient implements WireClient {
     await this.dispatch({ kind: "list_service_bus" });
   }
 
+  async listAzureSubscriptions(): Promise<void> {
+    await this.dispatch({ kind: "list_azure_subscriptions" });
+  }
+
+  async listKeyVaults(subscriptionIds: string[]): Promise<void> {
+    await this.dispatch({
+      kind: "list_key_vaults",
+      ...(subscriptionIds.length > 0 ? { subscriptionIds } : {})
+    });
+  }
+
   async peekServiceBus(request: {
     namespace: string;
     connectionString?: string;

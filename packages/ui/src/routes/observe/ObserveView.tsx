@@ -1,7 +1,11 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactElement } from "react";
 import type {
+  AzureSubscription,
+  AzureSubscriptionList,
   GrafanaSummary,
+  KeyVault,
+  KeyVaultList,
   SentrySummary,
   ServiceBusEntity,
   ServiceBusPeek,
@@ -17,6 +21,13 @@ import { formatRelative, useRelativeNow } from "../../relativeTime";
 import type { ServiceBusTotals } from "./serviceBusModel";
 import { byAttention, filterEntities, serviceBusTotals } from "./serviceBusModel";
 import { ServiceBusConnectionsPanel } from "./ServiceBusConnectionsPanel";
+import {
+  filterVaults,
+  initialSelection,
+  loadSelectedSubscriptions,
+  saveSelectedSubscriptions,
+  subscriptionKey
+} from "./keyVaultModel";
 
 export interface ObserveViewProps {
   client: WireClient;
@@ -92,9 +103,243 @@ export function ObserveView({ client, active }: Readonly<ObserveViewProps>): Rea
           {sources.includes("sentry") && (
             <SentryPanel client={client} active={active} config={sentryConfig} />
           )}
+          {sources.includes("keyvault") && <KeyVaultPanel client={client} active={active} />}
         </>
       )}
     </section>
+  );
+}
+
+/**
+ * The Azure Key Vault panel: pick the subscriptions to look at, then see their vaults. Read-only,
+ * management-plane only (this first slice). Rides the operator's `az` sign-in on the host, with
+ * honest not-signed-in / no-vaults states like the other connectors.
+ */
+function KeyVaultPanel({
+  client,
+  active
+}: Readonly<{ client: WireClient; active: boolean }>): ReactElement {
+  const [subscriptions, setSubscriptions] = useState<AzureSubscriptionList | undefined>(undefined);
+  const [selected, setSelected] = useState<string[]>([]);
+  const [vaultList, setVaultList] = useState<KeyVaultList | undefined>(undefined);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | undefined>(undefined);
+  const [query, setQuery] = useState("");
+  const [updatedAt, setUpdatedAt] = useState<number | undefined>(undefined);
+  const now = useRelativeNow(active);
+  // The key of the most-recently-requested subscription set, so a stale/out-of-order `key_vaults`
+  // response for a previous selection is ignored rather than clobbering the current list.
+  const requestedKey = useRef<string>("");
+
+  const loadVaults = useCallback(
+    (ids: string[]) => {
+      requestedKey.current = subscriptionKey(ids);
+      setLoading(true);
+      client.listKeyVaults(ids).catch(() => {
+        setError("could not read Key Vaults");
+        setLoading(false);
+      });
+    },
+    [client]
+  );
+
+  // Apply a new subscription selection: remember it, then re-list the vaults for it.
+  const applySelection = useCallback(
+    (ids: string[]) => {
+      setSelected(ids);
+      saveSelectedSubscriptions(ids);
+      loadVaults(ids);
+    },
+    [loadVaults]
+  );
+
+  useEffect(() => {
+    const unsubscribe = client.subscribe((event) => {
+      const { payload } = event;
+      if (payload.kind === "azure_subscriptions") {
+        setSubscriptions(payload.subscriptions);
+        if (payload.subscriptions.available) {
+          // Seed the selection from what's remembered (or the default subscription), then list.
+          const ids = initialSelection(
+            payload.subscriptions.subscriptions,
+            loadSelectedSubscriptions()
+          );
+          setSelected(ids);
+          loadVaults(ids);
+        } else {
+          setLoading(false);
+        }
+      } else if (payload.kind === "key_vaults") {
+        // Ignore a response whose echoed subscription set no longer matches the current request
+        // (a stale, out-of-order answer for a previous selection).
+        if (subscriptionKey(payload.vaults.subscriptionIds ?? []) !== requestedKey.current) {
+          return;
+        }
+        setVaultList(payload.vaults);
+        setUpdatedAt(Date.now());
+        setLoading(false);
+        setError(undefined);
+      }
+    });
+    return unsubscribe;
+  }, [client, loadVaults]);
+
+  // On activation, (re)read the subscription list; the handler above then lists vaults for the
+  // remembered selection. Subscriptions change rarely, so there's no background poll here.
+  const refresh = useCallback(() => {
+    setLoading(true);
+    setError(undefined);
+    client.listAzureSubscriptions().catch(() => {
+      setError("could not read subscriptions");
+      setLoading(false);
+    });
+  }, [client]);
+
+  useEffect(() => {
+    if (active) {
+      refresh();
+    }
+  }, [active, refresh]);
+
+  const toggleSubscription = (id: string): void => {
+    const next = selected.includes(id)
+      ? selected.filter((value) => value !== id)
+      : [...selected, id];
+    applySelection(next);
+  };
+
+  const subscriptionName = useCallback(
+    (id: string): string =>
+      subscriptions?.subscriptions.find((subscription) => subscription.id === id)?.name ?? id,
+    [subscriptions]
+  );
+
+  const vaults = useMemo(
+    () => (vaultList === undefined ? [] : filterVaults(vaultList.vaults, query)),
+    [vaultList, query]
+  );
+
+  const subscriptionsUnavailable = subscriptions !== undefined && !subscriptions.available;
+  const vaultsUnavailable = vaultList !== undefined && !vaultList.available;
+  // Subscriptions we asked for but couldn't read (partial success): warn rather than imply none.
+  const unreadable = vaultList?.available ? vaultList.unreadable ?? [] : [];
+  const vaultEmptyMessage =
+    query.trim() === "" ? "No Key Vaults in the selected subscriptions." : `No vaults match “${query}”.`;
+
+  return (
+    <div className="kv-panel sb-panel">
+      <div className="sb-head">
+        <h3>Azure Key Vault</h3>
+        <div className="sb-actions">
+          {updatedAt !== undefined && (
+            <span className="updated-stamp">updated {formatRelative(now, updatedAt)}</span>
+          )}
+          <input
+            className="sb-search"
+            type="search"
+            aria-label="Filter Key Vaults"
+            value={query}
+            onChange={(event) => setQuery(event.target.value)}
+            placeholder="Filter by name / group / location…"
+          />
+          <button type="button" onClick={refresh} disabled={loading}>
+            {loading ? "Reading…" : "Refresh"}
+          </button>
+        </div>
+      </div>
+
+      {error !== undefined && (
+        <p role="alert" className="sb-error">
+          {error}
+        </p>
+      )}
+
+      {subscriptionsUnavailable && (
+        <p className="sb-unavailable">Key Vault: {subscriptions?.error ?? "not available"}</p>
+      )}
+
+      {subscriptions === undefined && !subscriptionsUnavailable && (
+        <p className="sb-empty">{loading ? "Reading subscriptions…" : "No subscriptions yet."}</p>
+      )}
+
+      {subscriptions?.available && (
+        <>
+          <KeyVaultSubscriptions
+            subscriptions={subscriptions.subscriptions}
+            selected={selected}
+            onToggle={toggleSubscription}
+          />
+          {vaultsUnavailable && (
+            <p className="sb-unavailable">Key Vault: {vaultList?.error ?? "not available"}</p>
+          )}
+          {unreadable.length > 0 && (
+            <p className="sb-unavailable">
+              Could not read {unreadable.length} subscription
+              {unreadable.length === 1 ? "" : "s"}: {unreadable.map(subscriptionName).join(", ")}
+            </p>
+          )}
+          {vaultList?.available &&
+            (vaults.length === 0 ? (
+              <p className="sb-empty">{vaultEmptyMessage}</p>
+            ) : (
+              <KeyVaultRows vaults={vaults} subscriptionName={subscriptionName} />
+            ))}
+        </>
+      )}
+    </div>
+  );
+}
+
+/** The subscription multi-select: one checkbox per subscription (default-tagged). */
+function KeyVaultSubscriptions({
+  subscriptions,
+  selected,
+  onToggle
+}: Readonly<{
+  subscriptions: AzureSubscription[];
+  selected: string[];
+  onToggle: (id: string) => void;
+}>): ReactElement {
+  if (subscriptions.length === 0) {
+    return <p className="sb-empty">No subscriptions found.</p>;
+  }
+  return (
+    <fieldset className="kv-subs">
+      <legend>Subscriptions</legend>
+      {subscriptions.map((subscription) => (
+        <label key={subscription.id} className="kv-sub">
+          <input
+            type="checkbox"
+            checked={selected.includes(subscription.id)}
+            onChange={() => onToggle(subscription.id)}
+          />
+          <span className="kv-sub-name">{subscription.name}</span>
+          {subscription.isDefault && <span className="kv-sub-default">default</span>}
+        </label>
+      ))}
+    </fieldset>
+  );
+}
+
+/** The vault list: one row per vault with its resource group, location, and subscription. */
+function KeyVaultRows({
+  vaults,
+  subscriptionName
+}: Readonly<{
+  vaults: KeyVault[];
+  subscriptionName: (id: string) => string;
+}>): ReactElement {
+  return (
+    <ul className="kv-vaults">
+      {vaults.map((vault) => (
+        <li key={`${vault.subscriptionId}/${vault.name}`} className="kv-vault">
+          <span className="kv-vault-name">{vault.name}</span>
+          <span className="kv-vault-rg">{vault.resourceGroup}</span>
+          {vault.location !== undefined && <span className="kv-vault-loc">{vault.location}</span>}
+          <span className="kv-vault-sub">{subscriptionName(vault.subscriptionId)}</span>
+        </li>
+      ))}
+    </ul>
   );
 }
 

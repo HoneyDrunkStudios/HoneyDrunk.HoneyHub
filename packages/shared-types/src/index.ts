@@ -538,6 +538,48 @@ export interface ServiceBusSnapshot {
   namespaces: ServiceBusNamespace[];
 }
 
+// --- Observability connector: Azure Key Vault (opt-in, read-only, via `az` on the host) ---
+
+/** One Azure subscription the signed-in account can see (`az account list`). */
+export interface AzureSubscription {
+  id: string;
+  name: string;
+  /** The CLI's current default subscription; the cockpit pre-selects it. */
+  isDefault: boolean;
+  tenantId?: string;
+  state?: string;
+}
+
+export interface AzureSubscriptionList {
+  available: boolean;
+  /** A short, non-leaking hint when unavailable (no `az` / not signed in). */
+  error?: string;
+  subscriptions: AzureSubscription[];
+}
+
+/** One Key Vault (`az keyvault list`), tagged with the subscription it came from. */
+export interface KeyVault {
+  name: string;
+  resourceGroup: string;
+  location?: string;
+  subscriptionId: string;
+  /** The vault's data-plane URI (`https://<name>.vault.azure.net/`), when reported. */
+  uri?: string;
+}
+
+export interface KeyVaultList {
+  available: boolean;
+  /** A short, non-leaking hint when unavailable (no `az` / not signed in). */
+  error?: string;
+  /** Echoes the requested subscription ids, so the UI can ignore a stale response that no
+      longer matches the current selection (out-of-order responses). */
+  subscriptionIds?: string[];
+  /** Selected subscriptions that could not be read (best-effort partial success), so the UI can
+      warn instead of silently showing "no vaults". */
+  unreadable?: string[];
+  vaults: KeyVault[];
+}
+
 // Non-destructive message peek (ADR-0094 D5), via the optional `honeyhub-sb-explorer` helper.
 export interface PeekMessage {
   messageId?: string;
@@ -791,6 +833,8 @@ export type ClientCommand =
   | { kind: "list_network" }
   | { kind: "list_work"; sources?: string[] }
   | { kind: "list_service_bus" }
+  | { kind: "list_azure_subscriptions" }
+  | { kind: "list_key_vaults"; subscriptionIds?: string[] }
   | {
       kind: "peek_service_bus";
       namespace: string;
@@ -916,6 +960,8 @@ export type BridgeEventPayload =
   | { kind: "network_info"; network: NetworkInfo }
   | { kind: "work_snapshot"; snapshot: WorkSnapshot }
   | { kind: "service_bus_snapshot"; snapshot: ServiceBusSnapshot }
+  | { kind: "azure_subscriptions"; subscriptions: AzureSubscriptionList }
+  | { kind: "key_vaults"; vaults: KeyVaultList }
   | { kind: "service_bus_peek"; peek: ServiceBusPeek }
   | { kind: "service_bus_resubmit"; result: ServiceBusResubmit }
   | { kind: "service_bus_purge"; result: ServiceBusPurge }

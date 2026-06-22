@@ -8,6 +8,7 @@ use crate::fsbrowse::{DirListing, FileContents, SearchResults, WorkspaceFolders}
 use crate::git::{GitBranches, GitDiff, GitOpResult, GitOverview, GitStatus};
 use crate::grafana::GrafanaSummary;
 use crate::jobs::{JobProbe, JobSnapshot};
+use crate::keyvault::{AzureSubscriptionList, KeyVaultList};
 use crate::network::NetworkInfo;
 use crate::roadmap::RoadmapSnapshot;
 use crate::sentry::SentrySummary;
@@ -329,6 +330,17 @@ pub enum ClientCommand {
         subscription: Option<String>,
         #[serde(default)]
         props: SbEntityProps,
+    },
+    /// List the operator's Azure subscriptions (`az account list`) for the **Key Vault**
+    /// connector's subscription picker. Read-only; the host answers with a single
+    /// [`BridgeEventPayload::AzureSubscriptions`].
+    ListAzureSubscriptions,
+    /// Snapshot the Key Vaults across the selected `subscription_ids` (`az keyvault list`), for
+    /// the opt-in **Key Vault** connector. Read-only (management plane only); the host answers
+    /// with a single [`BridgeEventPayload::KeyVaults`]. Empty `subscription_ids` = query nothing.
+    ListKeyVaults {
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        subscription_ids: Vec<String>,
     },
     /// Summarize a Grafana instance (opt-in observability connector): health + dashboards.
     /// The config (`base_url` + optional `token`) is held in the cockpit and passed per
@@ -844,6 +856,40 @@ impl BridgeEvent {
         }
     }
 
+    /// A device-wide Azure subscription list (Key Vault connector picker). Not scoped to a run or
+    /// session, so `session_id`/`run_id` are empty and `sequence` is `0`.
+    pub fn azure_subscriptions(
+        id: impl Into<String>,
+        created_at: impl Into<String>,
+        subscriptions: AzureSubscriptionList,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            session_id: String::new(),
+            run_id: String::new(),
+            sequence: 0,
+            created_at: created_at.into(),
+            payload: BridgeEventPayload::AzureSubscriptions { subscriptions },
+        }
+    }
+
+    /// A device-wide Key Vault list. Not scoped to a run or session, so `session_id`/`run_id` are
+    /// empty and `sequence` is `0`.
+    pub fn key_vaults(
+        id: impl Into<String>,
+        created_at: impl Into<String>,
+        vaults: KeyVaultList,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            session_id: String::new(),
+            run_id: String::new(),
+            sequence: 0,
+            created_at: created_at.into(),
+            payload: BridgeEventPayload::KeyVaults { vaults },
+        }
+    }
+
     /// A device-wide Service Bus message peek. Not scoped to a run or session, so
     /// `session_id`/`run_id` are empty and `sequence` is `0`.
     pub fn service_bus_peek(
@@ -1212,6 +1258,12 @@ pub enum BridgeEventPayload {
     },
     ServiceBusSnapshot {
         snapshot: ServiceBusSnapshot,
+    },
+    AzureSubscriptions {
+        subscriptions: AzureSubscriptionList,
+    },
+    KeyVaults {
+        vaults: KeyVaultList,
     },
     ServiceBusPeek {
         peek: ServiceBusPeek,
@@ -2029,6 +2081,28 @@ mod tests {
                 }),
             ),
             BridgeEventPayload::ServiceBusSnapshot { .. }
+        );
+        check!(
+            BridgeEvent::azure_subscriptions(
+                "e",
+                at,
+                from_json!(AzureSubscriptionList, {
+                    "available": true,
+                    "subscriptions": []
+                }),
+            ),
+            BridgeEventPayload::AzureSubscriptions { .. }
+        );
+        check!(
+            BridgeEvent::key_vaults(
+                "e",
+                at,
+                from_json!(KeyVaultList, {
+                    "available": true,
+                    "vaults": []
+                }),
+            ),
+            BridgeEventPayload::KeyVaults { .. }
         );
         check!(
             BridgeEvent::service_bus_peek(

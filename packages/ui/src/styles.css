@@ -5059,6 +5059,67 @@ button:focus-visible,
   padding: 8px 12px;
   font-size: 0.84rem;
 }
+
+/* --- Key Vault panel --- */
+.kv-subs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 16px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px 12px;
+  margin: 8px 0 12px;
+}
+.kv-subs legend {
+  font-size: 0.78rem;
+  color: var(--text-muted);
+  padding: 0 4px;
+}
+.kv-sub {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.86rem;
+  cursor: pointer;
+}
+.kv-sub-default {
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-muted);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0 5px;
+}
+.kv-vaults {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.kv-vault {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+.kv-vault-name {
+  font-weight: 600;
+}
+.kv-vault-rg,
+.kv-vault-loc,
+.kv-vault-sub {
+  font-size: 0.8rem;
+  color: var(--text-muted);
+}
+.kv-vault-sub {
+  margin-left: auto;
+}
 .sb-totals {
   display: flex;
   flex-wrap: wrap;

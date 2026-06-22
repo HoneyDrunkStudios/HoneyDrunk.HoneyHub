@@ -470,6 +470,20 @@ async fn handle_command(
                 now_rfc3339(),
                 honeyhub_bridge::service_bus_snapshot(),
             )])),
+            ClientCommand::ListAzureSubscriptions => {
+                Ok(Some(vec![BridgeEvent::azure_subscriptions(
+                    new_id(),
+                    now_rfc3339(),
+                    honeyhub_bridge::azure_subscriptions(),
+                )]))
+            }
+            ClientCommand::ListKeyVaults { subscription_ids } => {
+                Ok(Some(vec![BridgeEvent::key_vaults(
+                    new_id(),
+                    now_rfc3339(),
+                    honeyhub_bridge::key_vaults(&subscription_ids),
+                )]))
+            }
             ClientCommand::PeekServiceBus {
                 namespace,
                 connection_string,

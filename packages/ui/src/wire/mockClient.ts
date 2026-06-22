@@ -8,6 +8,7 @@ import type {
   DispatchRunState,
   FileContents,
   JobProbe,
+  KeyVault,
   PolicyHint,
   StartRunRequest,
   UsageSignal,
@@ -29,6 +30,12 @@ import type { StartedRun, WireClient, WireEventHandler } from "./client";
 // Assembled from octet parts so they read as obviously-fake demo data rather than a real host.
 const MOCK_TAILNET_ADDRESS = [100, 110, 120, 130].join(".");
 const MOCK_LAN_ADDRESS = [192, 168, 1, 42].join(".");
+
+// mock-only sample Azure ids (scripted offline Key Vault surface; obviously-fake demo data).
+const MOCK_SUBSCRIPTION_DEV = "00000000-0000-0000-0000-0000000000de";
+const MOCK_SUBSCRIPTION_PROD = "00000000-0000-0000-0000-0000000000d0";
+const MOCK_SUBSCRIPTION_LOCKED = "00000000-0000-0000-0000-0000000010c0";
+const MOCK_TENANT = "00000000-0000-0000-0000-00000000beef";
 
 interface MockState {
   sessionId: string;
@@ -896,6 +903,90 @@ export class MockWireClient implements WireClient {
           }
         ]
       }
+    });
+  }
+
+  async listAzureSubscriptions(): Promise<void> {
+    // The real host shells `az account list`; the mock scripts two subscriptions (one default)
+    // so the Key Vault subscription picker is exercisable offline.
+    this.emitDevice({
+      kind: "azure_subscriptions",
+      subscriptions: {
+        available: true,
+        subscriptions: [
+          {
+            id: MOCK_SUBSCRIPTION_DEV,
+            name: "HoneyDrunk Dev",
+            isDefault: true,
+            tenantId: MOCK_TENANT,
+            state: "Enabled"
+          },
+          {
+            id: MOCK_SUBSCRIPTION_PROD,
+            name: "HoneyDrunk Prod",
+            isDefault: false,
+            tenantId: MOCK_TENANT,
+            state: "Enabled"
+          },
+          {
+            // A subscription with no scripted vaults: stands in for one the operator can see but
+            // cannot read, so the offline surface can exercise the partial-failure warning.
+            id: MOCK_SUBSCRIPTION_LOCKED,
+            name: "HoneyDrunk Locked",
+            isDefault: false,
+            tenantId: MOCK_TENANT,
+            state: "Enabled"
+          }
+        ]
+      }
+    });
+  }
+
+  async listKeyVaults(subscriptionIds: string[]): Promise<void> {
+    // The real host shells `az keyvault list` per subscription; the mock scripts a couple of
+    // vaults per subscription so the surface is exercisable offline. Only the requested
+    // subscriptions contribute, mirroring the host's per-subscription reads.
+    const bySubscription: Record<string, KeyVault[]> = {
+      [MOCK_SUBSCRIPTION_DEV]: [
+        {
+          name: "kv-honeydrunk-dev",
+          resourceGroup: "rg-honeydrunk",
+          location: "eastus",
+          subscriptionId: MOCK_SUBSCRIPTION_DEV,
+          uri: "https://kv-honeydrunk-dev.vault.azure.net/"
+        },
+        {
+          name: "kv-automation-dev",
+          resourceGroup: "rg-automation",
+          location: "eastus",
+          subscriptionId: MOCK_SUBSCRIPTION_DEV,
+          uri: "https://kv-automation-dev.vault.azure.net/"
+        }
+      ],
+      [MOCK_SUBSCRIPTION_PROD]: [
+        {
+          name: "kv-honeydrunk-prod",
+          resourceGroup: "rg-honeydrunk",
+          location: "eastus",
+          subscriptionId: MOCK_SUBSCRIPTION_PROD,
+          uri: "https://kv-honeydrunk-prod.vault.azure.net/"
+        }
+      ]
+    };
+    const vaults: KeyVault[] = [];
+    const unreadable: string[] = [];
+    for (const id of subscriptionIds) {
+      const found = bySubscription[id];
+      if (found !== undefined) {
+        vaults.push(...found);
+      } else {
+        // A selected subscription with no scripted vaults stands in for one we can't read.
+        unreadable.push(id);
+      }
+    }
+    this.emitDevice({
+      kind: "key_vaults",
+      vaults: { available: true, subscriptionIds, unreadable, vaults }
     });
   }
 
