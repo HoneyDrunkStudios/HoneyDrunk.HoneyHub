@@ -356,13 +356,14 @@ export function expiringNotifications(
     const expired = at <= nowMs;
     const when = new Date(at).toISOString().slice(0, 10);
     // Data minimization: the OS toast + persisted feed are visible outside the app (lock screen,
-    // notification centre), so they carry only the vault, kind, and date, never the object NAME
-    // (which can reveal operational purpose). The in-app Key Vault view shows which object it is.
+    // notification centre), so they carry only the object KIND and date, never the object name OR
+    // the vault name (both can reveal operational inventory or purpose). The in-app Key Vault view
+    // shows exactly which vault + object it is.
     notifications.push({
       id: `kv-expiry:${key}`,
       kind: "secret_expiring",
       title: titleForKind("secret_expiring"),
-      body: `${object.vault}: a ${object.kind} ${expired ? "expired" : "expires"} ${when}`,
+      body: `A ${object.kind} ${expired ? "expired" : "expires"} ${when}`,
       createdAt: now,
       read: false
     });

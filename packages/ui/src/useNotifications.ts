@@ -160,12 +160,16 @@ export function useNotifications(options: Readonly<UseNotificationsOptions>): vo
       if (!sameSubscriptions(expiring.subscriptionIds ?? [], keyVaultSubscriptionsRef.current)) {
         return;
       }
+      // If the CONNECTOR was switched off before this (slow) scan resolved, discard the stale result
+      // entirely WITHOUT consuming any seen / coverage state: the connector is the data source, and
+      // re-enabling it should give a fresh first-alert rather than find these objects already marked
+      // seen. This is distinct from merely muting the alert toggle (suppress-but-track below): the
+      // toggle keeps the connector scanning, so tracking is correct there; a disabled connector is
+      // not scanning at all, so a late result is genuinely stale.
+      if (!keyVaultEnabledRef.current) {
+        return;
+      }
       const now = new Date().toISOString();
-      // Whether the alert may surface a toast/feed entry right now. The PER-OBJECT toggle
-      // (secretExpiring) is handled inside expiringNotifications/coverageWarnings; this gates on the
-      // CONNECTOR being on, so a stale scan that resolves after the connector is switched off does
-      // not toast.
-      const mayFire = keyVaultEnabledRef.current;
 
       const { notifications, keys } = expiringNotifications(
         expiring,
@@ -174,25 +178,21 @@ export function useNotifications(options: Readonly<UseNotificationsOptions>): vo
         now
       );
       // Always TRACK the in-window keys (suppress-but-track, like the dead-letter counts): even when
-      // the alert is disabled, recording them means re-enabling does not backlog objects that came
+      // the alert TOGGLE is off, recording them means re-enabling does not backlog objects that came
       // into window while it was off. Union (never replace) so a PARTIAL scan that could not read
       // some vaults does not forget their previously-alerted objects and re-fire on access return.
+      // Firing itself is gated on the toggle inside expiringNotifications/coverageWarnings.
       for (const key of keys) {
         expirySeen.current.add(key);
       }
       saveExpirySeen(expirySeen.current);
-      if (mayFire) {
-        fire(notifications);
-      }
+      fire(notifications);
 
       // Coverage warnings are separate + transition-based (session memory), so they re-warn if
-      // coverage degrades again rather than being suppressed forever. Track the warned-state
-      // regardless of the connector toggle, for the same no-backlog reason.
+      // coverage degrades again rather than being suppressed forever.
       const coverage = coverageWarnings(expiring, prefsRef.current, coverageWarned.current, now);
       coverageWarned.current = coverage.warned;
-      if (mayFire) {
-        fire(coverage.notifications);
-      }
+      fire(coverage.notifications);
     };
 
     const unsubscribe = client.subscribe((event) => {

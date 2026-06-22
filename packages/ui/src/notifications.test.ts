@@ -249,7 +249,7 @@ describe("notifications model", () => {
       expect(keys).toHaveLength(1);
     });
 
-    it("uses an opaque key + body that never carry the object name", () => {
+    it("uses an opaque key + body that never carry the object OR vault name", () => {
       const obj = {
         vault: "kv-prod",
         subscriptionId: "sub-1",
@@ -269,10 +269,12 @@ describe("notifications model", () => {
         new Set(),
         NOW
       );
-      // The persisted feed entry (id + body) carries the vault + kind + date, never the name.
+      // The lock-screen-visible id + body carry only the kind + date, never the object name and
+      // never the vault name (both are operational inventory); the in-app view has the detail.
       expect(notifications[0]?.id).not.toContain("stripe-prod-signing-key");
       expect(notifications[0]?.body).not.toContain("stripe-prod-signing-key");
-      expect(notifications[0]?.body).toContain("kv-prod");
+      expect(notifications[0]?.body).not.toContain("kv-prod");
+      expect(notifications[0]?.body).toContain("secret");
     });
 
     it("does not re-fire an item already in seen", () => {

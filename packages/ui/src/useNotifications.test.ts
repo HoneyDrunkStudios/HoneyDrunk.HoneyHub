@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { renderHook } from "@testing-library/react";
+import { act, renderHook } from "@testing-library/react";
 import {
   defaultNotificationPrefs,
   loadExpirySeen,
@@ -38,7 +38,8 @@ describe("useNotifications: Key Vault expiry wiring", () => {
   function options(
     client: MockWireClient,
     fired: AppNotification[],
-    secretExpiring: boolean
+    secretExpiring: boolean,
+    keyVaultEnabled = true
   ): UseNotificationsOptions {
     return {
       client,
@@ -46,7 +47,7 @@ describe("useNotifications: Key Vault expiry wiring", () => {
       prefs: { ...defaultNotificationPrefs, desktop: false, secretExpiring },
       workSources: [],
       serviceBusEnabled: false,
-      keyVaultEnabled: true,
+      keyVaultEnabled,
       keyVaultSubscriptions: [MOCK_SUBSCRIPTION_DEV],
       chatSessionIds: [],
       isThreadActive: () => false,
@@ -76,6 +77,22 @@ describe("useNotifications: Key Vault expiry wiring", () => {
     renderHook(() => useNotifications(options(client2, firedEnabled, true)));
 
     expect(expiryAlerts(firedEnabled)).toHaveLength(0);
+  });
+
+  it("discards a stale result that arrives after the connector is disabled, without consuming seen", async () => {
+    // The connector is OFF (so the background poll is not running); a slow in-flight scan resolves
+    // anyway. The result must be dropped whole, leaving the seen-set untouched, so re-enabling the
+    // connector gives a fresh first-alert instead of finding these objects already "seen".
+    const client = new MockWireClient();
+    const fired: AppNotification[] = [];
+    renderHook(() => useNotifications(options(client, fired, true, false)));
+
+    await act(async () => {
+      await client.scanKeyVaultExpiry([MOCK_SUBSCRIPTION_DEV]);
+    });
+
+    expect(loadExpirySeen().size).toBe(0);
+    expect(expiryAlerts(fired)).toHaveLength(0);
   });
 
   it("fires once on a first enabled scan when nothing was tracked yet", () => {
