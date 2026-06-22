@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.21.0] - 2026-06-22
+
+Key Vault **expiry notifications** (the connector's third slice): get alerted when a secret, key, or
+certificate in your selected subscriptions is approaching its expiry. (Versions: npm + this
+changelog at 0.21.0; the Rust crate workspace at 0.27.0.)
+
+- **Expiry alerts**: the notification engine background-scans your enabled Key Vault subscriptions
+  for objects that carry an expiry, and fires an Alerts-feed entry (plus an OS toast) when one is
+  within your window or already expired. Each item alerts once and is remembered across sessions.
+- **Settings**: a new "Key Vault secret expiring" toggle and an "Alert when expiring within N days"
+  field (default 30) under Settings, Notifications.
+- The scan runs on a long cadence (expiry changes slowly, and it is a heavier `az` fan-out) and only
+  while the connector is on with subscriptions selected.
+- Internal: bridge `scan_expiring` aggregates the objects-with-expiry across vaults (the UI owns the
+  clock and the threshold); additive `ScanKeyVaultExpiry` / `KeyVaultExpiry` wire calls.
+
 ## [0.20.0] - 2026-06-22
 
 The **Azure Key Vault** connector's second slice: expand a vault to browse its contents and view a

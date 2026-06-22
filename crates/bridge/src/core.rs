@@ -1237,6 +1237,13 @@ fn validate_stream_payload(
                 "a backend stream must not emit a device-wide secret reveal",
             ));
         }
+        BridgeEventPayload::KeyVaultExpiry { .. } => {
+            // Device-wide, host-synthesized Key Vault expiry scan; never streamed.
+            return Err(BridgeError::new(
+                "event_unexpected_key_vault_expiry",
+                "a backend stream must not emit a device-wide key vault expiry scan",
+            ));
+        }
         BridgeEventPayload::GrafanaSummary { .. } => {
             // Device-wide, host-synthesized Grafana summary — never streamed.
             return Err(BridgeError::new(
@@ -2909,6 +2916,16 @@ mod tests {
                 },
             }),
             "event_unexpected_secret_reveal"
+        );
+        assert_eq!(
+            err_code(BridgeEventPayload::KeyVaultExpiry {
+                expiring: crate::keyvault::ExpiringObjects {
+                    available: true,
+                    error: None,
+                    objects: Vec::new(),
+                },
+            }),
+            "event_unexpected_key_vault_expiry"
         );
         assert_eq!(
             err_code(BridgeEventPayload::JobSnapshot {

@@ -3,6 +3,7 @@ import { backendLabel } from "./backends";
 import type {
   BridgeEvent,
   BridgeStatusEvent,
+  ExpiringObjects,
   ServiceBusSnapshot,
   WorkSnapshot
 } from "@honeydrunk/honeyhub-types";
@@ -11,7 +12,10 @@ import { osNotify } from "./osNotify";
 import {
   chatFinishedNotification,
   deadLetterNotifications,
+  expiringNotifications,
   isKindEnabled,
+  loadExpirySeen,
+  saveExpirySeen,
   workNotifications,
   type AppNotification,
   type NotificationPrefs
@@ -24,6 +28,10 @@ export interface UseNotificationsOptions {
   workSources: string[];
   /** Whether the Service Bus connector is enabled (gates dead-letter polling). */
   serviceBusEnabled: boolean;
+  /** Whether the Key Vault connector is enabled (gates the background expiry scan). */
+  keyVaultEnabled: boolean;
+  /** The selected Key Vault subscription ids to scan for expiring objects. */
+  keyVaultSubscriptions: string[];
   /** Session ids that count as chat threads (the full Chat page + the sidebar). */
   chatSessionIds: string[];
   /** Whether the user is actively looking at a chat thread (so a finish there is silent). */
@@ -52,6 +60,10 @@ export function useNotifications(options: Readonly<UseNotificationsOptions>): vo
   workSourcesRef.current = options.workSources;
   const serviceBusEnabledRef = useRef(options.serviceBusEnabled);
   serviceBusEnabledRef.current = options.serviceBusEnabled;
+  const keyVaultEnabledRef = useRef(options.keyVaultEnabled);
+  keyVaultEnabledRef.current = options.keyVaultEnabled;
+  const keyVaultSubscriptionsRef = useRef(options.keyVaultSubscriptions);
+  keyVaultSubscriptionsRef.current = options.keyVaultSubscriptions;
 
   // Detection state (in-memory; re-seeded on reload, which keeps a fresh start from spamming).
   const seenWork = useRef<Set<string>>(new Set());
@@ -61,6 +73,8 @@ export function useNotifications(options: Readonly<UseNotificationsOptions>): vo
   const seededSources = useRef<Set<string>>(new Set());
   const deadLetterCounts = useRef<Record<string, number>>({});
   const firedChatRuns = useRef<Set<string>>(new Set());
+  // Persisted across sessions so each expiring Key Vault item alerts once, not on every open.
+  const expirySeen = useRef<Set<string>>(loadExpirySeen());
 
   const fire = useCallback((items: AppNotification[]) => {
     if (items.length === 0) {
@@ -130,6 +144,20 @@ export function useNotifications(options: Readonly<UseNotificationsOptions>): vo
       fire(notifications);
     };
 
+    const handleKeyVaultExpiry = (expiring: ExpiringObjects): void => {
+      const { notifications, keys } = expiringNotifications(
+        expiring,
+        prefsRef.current,
+        expirySeen.current,
+        new Date().toISOString()
+      );
+      // The returned keys are the full current in-window set, so a renewed object drops out of
+      // `seen` and a later re-entry (new expiry) can alert again.
+      expirySeen.current = new Set(keys);
+      saveExpirySeen(expirySeen.current);
+      fire(notifications);
+    };
+
     const unsubscribe = client.subscribe((event) => {
       const payload = event.payload;
       if (payload.kind === "status") {
@@ -138,6 +166,8 @@ export function useNotifications(options: Readonly<UseNotificationsOptions>): vo
         handleWorkSnapshot(payload.snapshot);
       } else if (payload.kind === "service_bus_snapshot") {
         handleServiceBusSnapshot(payload.snapshot);
+      } else if (payload.kind === "key_vault_expiry") {
+        handleKeyVaultExpiry(payload.expiring);
       }
     });
     return unsubscribe;
@@ -159,4 +189,19 @@ export function useNotifications(options: Readonly<UseNotificationsOptions>): vo
     const timer = setInterval(poll, 60_000);
     return () => clearInterval(timer);
   }, [client, workKey, options.serviceBusEnabled]);
+
+  // Background Key Vault expiry scan on a long cadence: expiry changes slowly and the scan is a
+  // heavy `az` fan-out (every vault's objects), so it runs far less often than the 60s work poll.
+  // Re-arms when the connector toggles or the selected subscriptions change.
+  const expiryKeyDep = options.keyVaultEnabled ? options.keyVaultSubscriptions.join(",") : "";
+  useEffect(() => {
+    const scan = (): void => {
+      if (keyVaultEnabledRef.current && keyVaultSubscriptionsRef.current.length > 0) {
+        client.scanKeyVaultExpiry(keyVaultSubscriptionsRef.current).catch(() => undefined);
+      }
+    };
+    scan();
+    const timer = setInterval(scan, 6 * 60 * 60 * 1000);
+    return () => clearInterval(timer);
+  }, [client, expiryKeyDep]);
 }

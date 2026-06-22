@@ -28,6 +28,24 @@ describe("NotificationsSettings", () => {
     expect(onChange).toHaveBeenCalledWith({ ...defaultNotificationPrefs, workMentioned: false });
   });
 
+  it("toggles the Key Vault expiring alert", () => {
+    const onChange = vi.fn();
+    render(<NotificationsSettings prefs={defaultNotificationPrefs} onChange={onChange} />);
+    fireEvent.click(screen.getByRole("checkbox", { name: /Key Vault secret expiring/i }));
+    expect(onChange).toHaveBeenCalledWith({ ...defaultNotificationPrefs, secretExpiring: false });
+  });
+
+  it("edits the expiry-window days and clamps out-of-range input", () => {
+    const onChange = vi.fn();
+    render(<NotificationsSettings prefs={defaultNotificationPrefs} onChange={onChange} />);
+    const field = screen.getByLabelText(/Days before expiry to alert/i);
+    fireEvent.change(field, { target: { value: "14" } });
+    expect(onChange).toHaveBeenCalledWith({ ...defaultNotificationPrefs, secretExpiryDays: 14 });
+    // Above the max clamps to 365.
+    fireEvent.change(field, { target: { value: "9999" } });
+    expect(onChange).toHaveBeenLastCalledWith({ ...defaultNotificationPrefs, secretExpiryDays: 365 });
+  });
+
   it("shows the Enable button when permission is default and grants on click", async () => {
     const onChange = vi.fn();
     render(

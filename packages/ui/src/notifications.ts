@@ -1,4 +1,11 @@
-import type { ServiceBusSnapshot, WorkItem, WorkSnapshot } from "@honeydrunk/honeyhub-types";
+import type {
+  ExpiringObject,
+  ExpiringObjects,
+  ServiceBusSnapshot,
+  WorkItem,
+  WorkSnapshot
+} from "@honeydrunk/honeyhub-types";
+import { parseInstantMs } from "./routes/observe/keyVaultModel";
 
 // Client-side notification model + pure detection helpers. The cockpit subscribes to the
 // bridge's existing events (run status, work snapshot, Service Bus snapshot) and polls the
@@ -11,7 +18,8 @@ export type AppNotificationKind =
   | "work_assigned"
   | "work_mentioned"
   | "pr_review"
-  | "dead_letter";
+  | "dead_letter"
+  | "secret_expiring";
 
 export interface AppNotification {
   id: string;
@@ -32,6 +40,9 @@ export interface NotificationPrefs {
   workMentioned: boolean;
   prReview: boolean;
   deadLetter: boolean;
+  secretExpiring: boolean;
+  /** Days ahead within which an upcoming Key Vault expiry triggers an alert. */
+  secretExpiryDays: number;
 }
 
 export const defaultNotificationPrefs: NotificationPrefs = {
@@ -40,8 +51,22 @@ export const defaultNotificationPrefs: NotificationPrefs = {
   workAssigned: true,
   workMentioned: true,
   prReview: true,
-  deadLetter: true
+  deadLetter: true,
+  secretExpiring: true,
+  secretExpiryDays: 30
 };
+
+/** Bounds for the expiry-window setting (days). */
+export const MIN_EXPIRY_DAYS = 1;
+export const MAX_EXPIRY_DAYS = 365;
+
+/** Clamp a (possibly bad) expiry-days value into range, falling back to the default. */
+export function clampExpiryDays(value: number): number {
+  if (!Number.isFinite(value)) {
+    return defaultNotificationPrefs.secretExpiryDays;
+  }
+  return Math.min(MAX_EXPIRY_DAYS, Math.max(MIN_EXPIRY_DAYS, Math.round(value)));
+}
 
 const PREFS_KEY = "honeyhub.notificationPrefs.v1";
 const FEED_KEY = "honeyhub.notificationFeed.v1";
@@ -59,14 +84,21 @@ export function loadNotificationPrefs(): NotificationPrefs {
     }
     const record = parsed as Record<string, unknown>;
     const bool = (key: keyof NotificationPrefs): boolean =>
-      typeof record[key] === "boolean" ? record[key] : defaultNotificationPrefs[key];
+      typeof record[key] === "boolean"
+        ? (record[key] as boolean)
+        : (defaultNotificationPrefs[key] as boolean);
     return {
       desktop: bool("desktop"),
       chatFinished: bool("chatFinished"),
       workAssigned: bool("workAssigned"),
       workMentioned: bool("workMentioned"),
       prReview: bool("prReview"),
-      deadLetter: bool("deadLetter")
+      deadLetter: bool("deadLetter"),
+      secretExpiring: bool("secretExpiring"),
+      secretExpiryDays:
+        typeof record.secretExpiryDays === "number"
+          ? clampExpiryDays(record.secretExpiryDays)
+          : defaultNotificationPrefs.secretExpiryDays
     };
   } catch {
     return defaultNotificationPrefs;
@@ -121,6 +153,8 @@ export function isKindEnabled(prefs: NotificationPrefs, kind: AppNotificationKin
       return prefs.prReview;
     case "dead_letter":
       return prefs.deadLetter;
+    case "secret_expiring":
+      return prefs.secretExpiring;
   }
 }
 
@@ -151,6 +185,8 @@ function titleForKind(kind: AppNotificationKind): string {
       return "PR needs your review";
     case "dead_letter":
       return "New dead-letter message";
+    case "secret_expiring":
+      return "Key Vault secret expiring";
   }
 }
 
@@ -233,6 +269,85 @@ export function deadLetterNotifications(
     }
   }
   return { notifications, counts };
+}
+
+const EXPIRY_SEEN_KEY = "honeyhub.notificationExpirySeen.v1";
+
+/** The persisted set of expiry keys already alerted on, so each expiring item alerts once across
+    sessions (rather than every cockpit open). */
+export function loadExpirySeen(): Set<string> {
+  try {
+    const raw = globalThis.localStorage?.getItem(EXPIRY_SEEN_KEY);
+    if (raw === null || raw === undefined) {
+      return new Set();
+    }
+    const parsed: unknown = JSON.parse(raw);
+    if (!Array.isArray(parsed)) {
+      return new Set();
+    }
+    return new Set(parsed.filter((value): value is string => typeof value === "string"));
+  } catch {
+    return new Set();
+  }
+}
+
+export function saveExpirySeen(seen: ReadonlySet<string>): void {
+  try {
+    globalThis.localStorage?.setItem(EXPIRY_SEEN_KEY, JSON.stringify([...seen]));
+  } catch {
+    // Best-effort.
+  }
+}
+
+/** A stable key for an expiring object. Includes `expires`, so renewing a secret (a new expiry)
+    counts as a fresh item and can alert again. */
+export function expiryKey(object: ExpiringObject): string {
+  return `${object.subscriptionId}/${object.vault}/${object.kind}/${object.name}/${object.expires}`;
+}
+
+/**
+ * New expiry notifications: objects whose expiry is at or within the operator's threshold (already
+ * expired included), not already in `seen`, when the secret-expiring kind is enabled. Returns the
+ * notifications to fire plus the FULL set of currently-in-window keys; the caller persists that as
+ * the new `seen`, so a renewed object drops out and only genuinely new ones fire. An unavailable
+ * scan leaves the prior `seen` untouched (no fire, no reset). `now` is an ISO timestamp.
+ */
+export function expiringNotifications(
+  expiring: ExpiringObjects,
+  prefs: NotificationPrefs,
+  seen: ReadonlySet<string>,
+  now: string
+): { notifications: AppNotification[]; keys: string[] } {
+  const nowMs = Date.parse(now);
+  if (!expiring.available || Number.isNaN(nowMs)) {
+    // Unavailable scan or an unparseable clock: change nothing, keep the prior alerted-set.
+    return { notifications: [], keys: [...seen] };
+  }
+  const windowMs = clampExpiryDays(prefs.secretExpiryDays) * 24 * 60 * 60 * 1000;
+  const keys: string[] = [];
+  const notifications: AppNotification[] = [];
+  for (const object of expiring.objects) {
+    const at = parseInstantMs(object.expires);
+    if (at === undefined || at > nowMs + windowMs) {
+      continue; // no parseable expiry, or not yet within the window
+    }
+    const key = expiryKey(object);
+    keys.push(key);
+    if (seen.has(key) || !isKindEnabled(prefs, "secret_expiring")) {
+      continue;
+    }
+    const expired = at <= nowMs;
+    const when = new Date(at).toISOString().slice(0, 10);
+    notifications.push({
+      id: `kv-expiry:${key}`,
+      kind: "secret_expiring",
+      title: titleForKind("secret_expiring"),
+      body: `${object.vault}: ${object.kind} “${object.name}” ${expired ? "expired" : "expires"} ${when}`,
+      createdAt: now,
+      read: false
+    });
+  }
+  return { notifications, keys };
 }
 
 /** Build the chat-finished notification for a completed run. */

@@ -618,6 +618,24 @@ export interface SecretReveal {
   value?: string;
 }
 
+/** One secret/key/certificate that carries an expiry, with its vault + subscription. `expires` is
+    always present (only objects with an expiry are scanned); the cockpit applies the threshold. */
+export interface ExpiringObject {
+  vault: string;
+  subscriptionId: string;
+  kind: VaultObjectKind;
+  name: string;
+  expires: string;
+}
+
+/** Objects-with-an-expiry across the selected subscriptions' vaults, for the background expiry
+    notifications. */
+export interface ExpiringObjects {
+  available: boolean;
+  error?: string;
+  objects: ExpiringObject[];
+}
+
 // Non-destructive message peek (ADR-0094 D5), via the optional `honeyhub-sb-explorer` helper.
 export interface PeekMessage {
   messageId?: string;
@@ -875,6 +893,7 @@ export type ClientCommand =
   | { kind: "list_key_vaults"; subscriptionIds?: string[] }
   | { kind: "list_vault_objects"; vault: string; subscriptionId: string }
   | { kind: "reveal_secret"; vault: string; subscriptionId: string; name: string }
+  | { kind: "scan_key_vault_expiry"; subscriptionIds?: string[] }
   | {
       kind: "peek_service_bus";
       namespace: string;
@@ -1004,6 +1023,7 @@ export type BridgeEventPayload =
   | { kind: "key_vaults"; vaults: KeyVaultList }
   | { kind: "vault_objects"; objects: VaultObjects }
   | { kind: "secret_reveal"; reveal: SecretReveal }
+  | { kind: "key_vault_expiry"; expiring: ExpiringObjects }
   | { kind: "service_bus_peek"; peek: ServiceBusPeek }
   | { kind: "service_bus_resubmit"; result: ServiceBusResubmit }
   | { kind: "service_bus_purge"; result: ServiceBusPurge }

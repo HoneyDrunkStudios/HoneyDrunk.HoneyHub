@@ -32,6 +32,7 @@ import { GoalsView } from "./routes/goals/GoalsView";
 import { GoalOrchestrator } from "./routes/goals/goalOrchestrator";
 import { orderGoals, type GoalsState } from "./routes/goals/goalsModel";
 import { enabledIds, loadConnectorPrefs } from "./connectors";
+import { loadSelectedSubscriptions } from "./routes/observe/keyVaultModel";
 import { ChatSidebar, SIDEBAR_SESSION_ID } from "./routes/chat/ChatSidebar";
 import { HubView } from "./routes/hub/HubView";
 import { PlanView } from "./routes/plan/PlanView";
@@ -292,6 +293,8 @@ export function App({ client }: AppProps = {}) {
     prefs: notificationPrefs,
     workSources: enabledIds(connectorPrefs, "work"),
     serviceBusEnabled: enabledIds(connectorPrefs, "observability").includes("servicebus"),
+    keyVaultEnabled: enabledIds(connectorPrefs, "observability").includes("keyvault"),
+    keyVaultSubscriptions: loadSelectedSubscriptions() ?? [],
     chatSessionIds: ["session-1", SIDEBAR_SESSION_ID],
     isThreadActive,
     onNotifications: (items) => setNotifications((prev) => mergeFeed(prev, items))

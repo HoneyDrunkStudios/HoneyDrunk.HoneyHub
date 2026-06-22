@@ -1,5 +1,11 @@
 import { useState, type ReactElement } from "react";
-import type { NotificationPrefs } from "./notifications";
+import {
+  clampExpiryDays,
+  MAX_EXPIRY_DAYS,
+  MIN_EXPIRY_DAYS,
+  type NotificationPrefs
+} from "./notifications";
+import { NumberField } from "./components/NumberField";
 import {
   notificationPermission,
   requestNotificationPermission,
@@ -11,8 +17,13 @@ export interface NotificationsSettingsProps {
   onChange: (prefs: NotificationPrefs) => void;
 }
 
+/** Only the boolean-valued prefs are toggle rows (secretExpiryDays is a number, handled below). */
+type BooleanPrefKey = {
+  [K in keyof NotificationPrefs]: NotificationPrefs[K] extends boolean ? K : never;
+}[keyof NotificationPrefs];
+
 interface ToggleRow {
-  key: keyof NotificationPrefs;
+  key: BooleanPrefKey;
   label: string;
   hint: string;
 }
@@ -36,7 +47,8 @@ const TRIGGER_ROWS: ToggleRow[] = [
   { key: "workAssigned", label: "Work assigned to me", hint: "A new issue or work item is assigned to you (GitHub + Azure DevOps)." },
   { key: "workMentioned", label: "Mentioned / tagged", hint: "You are @-mentioned on an issue or PR (GitHub; Azure DevOps has no mentions query)." },
   { key: "prReview", label: "PR needs my review", hint: "A pull request requests your review (GitHub + Azure DevOps)." },
-  { key: "deadLetter", label: "New dead-letter", hint: "A Service Bus entity's dead-letter count rises." }
+  { key: "deadLetter", label: "New dead-letter", hint: "A Service Bus entity's dead-letter count rises." },
+  { key: "secretExpiring", label: "Key Vault secret expiring", hint: "A Key Vault secret, key, or certificate in your selected subscriptions is within the expiry window below." }
 ];
 
 /** Settings panel for the notification engine: a desktop-toast permission control + per-type
@@ -47,7 +59,7 @@ export function NotificationsSettings({
 }: Readonly<NotificationsSettingsProps>): ReactElement {
   const [permission, setPermission] = useState<NotifyPermission>(() => notificationPermission());
 
-  const toggle = (key: keyof NotificationPrefs): void => {
+  const toggle = (key: BooleanPrefKey): void => {
     onChange({ ...prefs, [key]: !prefs[key] });
   };
 
@@ -107,6 +119,24 @@ export function NotificationsSettings({
           </li>
         ))}
       </ul>
+
+      <div className="notif-expiry">
+        <span className="notif-toggle-label">Alert when expiring within</span>
+        <NumberField
+          className="notif-expiry-field"
+          ariaLabel="Days before expiry to alert"
+          value={String(prefs.secretExpiryDays)}
+          min={MIN_EXPIRY_DAYS}
+          max={MAX_EXPIRY_DAYS}
+          onChange={(value) => {
+            const days = Number(value);
+            if (value.trim() !== "" && Number.isFinite(days)) {
+              onChange({ ...prefs, secretExpiryDays: clampExpiryDays(days) });
+            }
+          }}
+        />
+        <span className="notif-expiry-unit">days</span>
+      </div>
     </section>
   );
 }

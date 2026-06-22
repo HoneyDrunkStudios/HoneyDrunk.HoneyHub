@@ -3,8 +3,8 @@
 //! never holds an Azure credential. Management plane: list the operator's subscriptions
 //! ([`subscriptions`]) and the Key Vaults across the selected ones ([`list_vaults`]). Data plane:
 //! list a vault's secrets / keys / certificates metadata ([`list_vault_objects`]) and reveal a
-//! single secret's value ([`reveal_secret`]). The expiry alerts ride the same listings in a later
-//! slice.
+//! single secret's value ([`reveal_secret`]). [`scan_expiring`] aggregates the objects-with-expiry
+//! across the selected vaults for the background expiry notifications.
 
 use crate::azcli::{resource_group_from_id, run_az};
 use crate::backend_catalog::program_on_path;
@@ -646,6 +646,96 @@ fn is_object_name_shaped(name: &str) -> bool {
         && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
 }
 
+// --- Expiry scan (for background expiry notifications) ------------------------------------------
+
+/// One secret / key / certificate that carries an expiry, with the vault + subscription it lives
+/// in. The cockpit's notification engine filters these by its configurable threshold and fires
+/// once per item; `expires` is always present (only objects with an expiry are scanned).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExpiringObject {
+    pub vault: String,
+    pub subscription_id: String,
+    pub kind: VaultObjectKind,
+    pub name: String,
+    pub expires: String,
+}
+
+/// The objects-with-an-expiry across the selected subscriptions' vaults, with an honest
+/// unavailable state. The bridge does no date math; it just aggregates, and the UI applies the
+/// "within N days" threshold (it owns the clock + the operator's setting).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExpiringObjects {
+    pub available: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    pub objects: Vec<ExpiringObject>,
+}
+
+impl ExpiringObjects {
+    fn unavailable(error: &str) -> Self {
+        Self {
+            available: false,
+            error: Some(error.to_string()),
+            objects: Vec::new(),
+        }
+    }
+}
+
+/// Cap on how many vaults one expiry scan walks (each vault is three `az` list calls). Bounds the
+/// background scan's host work against a very large account.
+const MAX_SCAN_VAULTS: usize = 100;
+
+/// Scan every vault across `subscription_ids` for objects that carry an expiry, for the background
+/// expiry notifications. Read-only. Reuses [`list_vaults`] + [`list_vault_objects`] (so it inherits
+/// their validation, bounded fan-out, and best-effort access handling); a vault or kind that can't
+/// be read is simply skipped. Returns only objects with an `expires` set; the UI does the
+/// threshold + clock math. Heavy (many `az` calls), so the caller polls it on a long cadence.
+pub fn scan_expiring(subscription_ids: &[String]) -> ExpiringObjects {
+    let vaults = list_vaults(subscription_ids);
+    if !vaults.available {
+        return ExpiringObjects::unavailable(
+            &vaults
+                .error
+                .unwrap_or_else(|| "could not read Key Vaults".to_string()),
+        );
+    }
+
+    let mut objects = Vec::new();
+    let mut any_vault_read = false;
+    for vault in vaults.vaults.iter().take(MAX_SCAN_VAULTS) {
+        let listing = list_vault_objects(&vault.name, &vault.subscription_id);
+        if !listing.available {
+            continue;
+        }
+        any_vault_read = true;
+        for object in listing.objects {
+            if let Some(expires) = object.expires {
+                objects.push(ExpiringObject {
+                    vault: vault.name.clone(),
+                    subscription_id: vault.subscription_id.clone(),
+                    kind: object.kind,
+                    name: object.name,
+                    expires,
+                });
+            }
+        }
+    }
+
+    // If the account has vaults but we could read none of their contents (e.g. a transient
+    // data-plane access loss), report unavailable rather than a false "nothing expiring", so the
+    // cockpit keeps its prior alerted-set instead of resetting it and re-firing on restore.
+    if !vaults.vaults.is_empty() && !any_vault_read {
+        return ExpiringObjects::unavailable("could not read any vault's contents");
+    }
+    ExpiringObjects {
+        available: true,
+        error: None,
+        objects,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -974,5 +1064,15 @@ mod tests {
         assert!(!bad_sub.available);
         assert_eq!(bad_sub.error.as_deref(), Some("invalid subscription id"));
         assert_eq!(bad_sub.subscription_id, "not-a-guid");
+    }
+
+    #[test]
+    fn scan_expiring_with_no_subscriptions_is_available_and_empty() {
+        // No subscriptions selected: list_vaults short-circuits to an available, empty list (no
+        // `az`), so the scan is deterministically available with nothing to report.
+        let scan = scan_expiring(&[]);
+        assert!(scan.available);
+        assert!(scan.objects.is_empty());
+        assert_eq!(scan.error, None);
     }
 }

@@ -8,7 +8,9 @@ use crate::fsbrowse::{DirListing, FileContents, SearchResults, WorkspaceFolders}
 use crate::git::{GitBranches, GitDiff, GitOpResult, GitOverview, GitStatus};
 use crate::grafana::GrafanaSummary;
 use crate::jobs::{JobProbe, JobSnapshot};
-use crate::keyvault::{AzureSubscriptionList, KeyVaultList, SecretReveal, VaultObjects};
+use crate::keyvault::{
+    AzureSubscriptionList, ExpiringObjects, KeyVaultList, SecretReveal, VaultObjects,
+};
 use crate::network::NetworkInfo;
 use crate::roadmap::RoadmapSnapshot;
 use crate::sentry::SentrySummary;
@@ -356,6 +358,13 @@ pub enum ClientCommand {
         vault: String,
         subscription_id: String,
         name: String,
+    },
+    /// Scan the selected subscriptions' vaults for objects that carry an expiry, for the **Key
+    /// Vault** connector's background expiry notifications. Read-only data plane; the host answers
+    /// with a single [`BridgeEventPayload::KeyVaultExpiry`]. Empty `subscription_ids` = scan nothing.
+    ScanKeyVaultExpiry {
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        subscription_ids: Vec<String>,
     },
     /// Summarize a Grafana instance (opt-in observability connector): health + dashboards.
     /// The config (`base_url` + optional `token`) is held in the cockpit and passed per
@@ -939,6 +948,23 @@ impl BridgeEvent {
         }
     }
 
+    /// A device-wide Key Vault expiry scan. Not scoped to a run or session, so `session_id`/
+    /// `run_id` are empty and `sequence` is `0`.
+    pub fn key_vault_expiry(
+        id: impl Into<String>,
+        created_at: impl Into<String>,
+        expiring: ExpiringObjects,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            session_id: String::new(),
+            run_id: String::new(),
+            sequence: 0,
+            created_at: created_at.into(),
+            payload: BridgeEventPayload::KeyVaultExpiry { expiring },
+        }
+    }
+
     /// A device-wide Service Bus message peek. Not scoped to a run or session, so
     /// `session_id`/`run_id` are empty and `sequence` is `0`.
     pub fn service_bus_peek(
@@ -1319,6 +1345,9 @@ pub enum BridgeEventPayload {
     },
     SecretReveal {
         reveal: SecretReveal,
+    },
+    KeyVaultExpiry {
+        expiring: ExpiringObjects,
     },
     ServiceBusPeek {
         peek: ServiceBusPeek,
@@ -2185,6 +2214,17 @@ mod tests {
                 }),
             ),
             BridgeEventPayload::SecretReveal { .. }
+        );
+        check!(
+            BridgeEvent::key_vault_expiry(
+                "e",
+                at,
+                from_json!(ExpiringObjects, {
+                    "available": true,
+                    "objects": []
+                }),
+            ),
+            BridgeEventPayload::KeyVaultExpiry { .. }
         );
         check!(
             BridgeEvent::service_bus_peek(
