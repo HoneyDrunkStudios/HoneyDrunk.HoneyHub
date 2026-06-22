@@ -229,19 +229,16 @@ export function useNotifications(options: Readonly<UseNotificationsOptions>): vo
 
   // Background Key Vault expiry scan on a long cadence: expiry changes slowly and the scan is a
   // heavy `az` fan-out (every vault's objects), so it runs far less often than the 60s work poll.
-  // Only runs when the connector is on AND the expiry alert is enabled (no point scanning for an
-  // alert the operator turned off). The dep sorts the subscription ids so merely reordering the
-  // selection does not re-arm the timer; it re-arms on a real change, connector toggle, or the
-  // alert toggle.
-  const expiryActive = options.keyVaultEnabled && options.prefs.secretExpiring;
+  // Runs whenever the CONNECTOR is on (not gated on the alert toggle), so the seen-set keeps
+  // tracking objects that come into window while the alert is muted; the handler suppresses the
+  // toast but still records the keys, so re-enabling does not backlog. The dep sorts the
+  // subscription ids so merely reordering the selection does not re-arm the timer; it re-arms on a
+  // real change or the connector toggle.
+  const expiryActive = options.keyVaultEnabled;
   const expiryKeyDep = expiryActive ? [...options.keyVaultSubscriptions].sort().join(",") : "";
   useEffect(() => {
     const scan = (): void => {
-      if (
-        keyVaultEnabledRef.current &&
-        prefsRef.current.secretExpiring &&
-        keyVaultSubscriptionsRef.current.length > 0
-      ) {
+      if (keyVaultEnabledRef.current && keyVaultSubscriptionsRef.current.length > 0) {
         client.scanKeyVaultExpiry(keyVaultSubscriptionsRef.current).catch(() => undefined);
       }
     };
