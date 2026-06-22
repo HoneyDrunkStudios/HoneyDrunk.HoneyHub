@@ -11,13 +11,16 @@ import type { WireClient } from "./wire/client";
 import { osNotify } from "./osNotify";
 import {
   chatFinishedNotification,
+  coverageWarnings,
   deadLetterNotifications,
   expiringNotifications,
   isKindEnabled,
   loadExpirySeen,
+  noCoverageWarned,
   saveExpirySeen,
   workNotifications,
   type AppNotification,
+  type CoverageWarned,
   type NotificationPrefs
 } from "./notifications";
 
@@ -75,6 +78,9 @@ export function useNotifications(options: Readonly<UseNotificationsOptions>): vo
   const firedChatRuns = useRef<Set<string>>(new Set());
   // Persisted across sessions so each expiring Key Vault item alerts once, not on every open.
   const expirySeen = useRef<Set<string>>(loadExpirySeen());
+  // Session-only: last coverage-warning state, so a warning re-fires on a complete -> incomplete
+  // transition rather than being suppressed forever by the persisted object-seen set.
+  const coverageWarned = useRef<CoverageWarned>(noCoverageWarned);
 
   const fire = useCallback((items: AppNotification[]) => {
     if (items.length === 0) {
@@ -145,11 +151,25 @@ export function useNotifications(options: Readonly<UseNotificationsOptions>): vo
     };
 
     const handleKeyVaultExpiry = (expiring: ExpiringObjects): void => {
+      // Drop a stale in-flight scan: if the connector or the alert was turned off while the scan
+      // was running, ignore its late result rather than alerting for a now-disabled feature.
+      if (!keyVaultEnabledRef.current || !prefsRef.current.secretExpiring) {
+        return;
+      }
+      // Filter to the CURRENTLY-selected subscriptions, so a scan that resolves after the selection
+      // changed cannot alert for objects in a since-deselected subscription.
+      const current = new Set(keyVaultSubscriptionsRef.current);
+      const scoped: ExpiringObjects = {
+        ...expiring,
+        objects: expiring.objects.filter((object) => current.has(object.subscriptionId))
+      };
+      const now = new Date().toISOString();
+
       const { notifications, keys } = expiringNotifications(
-        expiring,
+        scoped,
         prefsRef.current,
         expirySeen.current,
-        new Date().toISOString()
+        now
       );
       // Union (never replace) so a PARTIAL scan that could not read some vaults this round does not
       // forget their previously-alerted objects and re-fire them when access returns. A renewed
@@ -159,6 +179,12 @@ export function useNotifications(options: Readonly<UseNotificationsOptions>): vo
       }
       saveExpirySeen(expirySeen.current);
       fire(notifications);
+
+      // Coverage warnings are separate + transition-based (session memory), so they re-warn if
+      // coverage degrades again rather than being suppressed forever.
+      const coverage = coverageWarnings(scoped, prefsRef.current, coverageWarned.current, now);
+      coverageWarned.current = coverage.warned;
+      fire(coverage.notifications);
     };
 
     const unsubscribe = client.subscribe((event) => {

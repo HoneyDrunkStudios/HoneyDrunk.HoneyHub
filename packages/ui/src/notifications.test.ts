@@ -8,6 +8,7 @@ import {
   chatFinishedNotification,
   clampExpiryDays,
   collectWorkItems,
+  coverageWarnings,
   deadLetterNotifications,
   defaultNotificationPrefs,
   expiringNotifications,
@@ -15,6 +16,7 @@ import {
   kindForCategory,
   loadExpirySeen,
   mergeFeed,
+  noCoverageWarned,
   saveExpirySeen,
   unreadCount,
   workNotifications,
@@ -276,27 +278,6 @@ describe("notifications model", () => {
       expect(expiringNotifications(snap, tight, new Set(), NOW).notifications).toHaveLength(0);
     });
 
-    it("warns once when the scan is truncated (incomplete coverage)", () => {
-      const snap: ExpiringObjects = { available: true, truncated: true, objects: [] };
-      const first = expiringNotifications(snap, defaultNotificationPrefs, new Set(), NOW);
-      expect(first.notifications).toHaveLength(1);
-      expect(first.notifications[0]?.body).toMatch(/more Key Vaults/i);
-      expect(first.keys).toContain("kv-expiry-truncated");
-      // Deduped: once the sentinel is in seen, it does not re-warn.
-      const again = expiringNotifications(snap, defaultNotificationPrefs, new Set(first.keys), NOW);
-      expect(again.notifications).toHaveLength(0);
-    });
-
-    it("warns once when some vaults could not be read (partial coverage)", () => {
-      const snap: ExpiringObjects = { available: true, unreadable: ["kv-locked"], objects: [] };
-      const first = expiringNotifications(snap, defaultNotificationPrefs, new Set(), NOW);
-      expect(first.notifications).toHaveLength(1);
-      expect(first.notifications[0]?.body).toMatch(/could not be read/i);
-      expect(first.keys).toContain("kv-expiry-partial");
-      const again = expiringNotifications(snap, defaultNotificationPrefs, new Set(first.keys), NOW);
-      expect(again.notifications).toHaveLength(0);
-    });
-
     it("leaves the prior seen untouched on an unavailable scan or an unparseable clock", () => {
       const seen = new Set(["k1", "k2"]);
       const unavailable = expiringNotifications(
@@ -317,6 +298,60 @@ describe("notifications model", () => {
       );
       expect(badNow.notifications).toHaveLength(0);
       expect(badNow.keys.sort()).toEqual(["k1", "k2"]);
+    });
+  });
+
+  describe("coverage warnings", () => {
+    const truncatedSnap: ExpiringObjects = { available: true, truncated: true, objects: [] };
+    const partialSnap: ExpiringObjects = {
+      available: true,
+      unreadable: ["kv-locked"],
+      objects: []
+    };
+    const completeSnap: ExpiringObjects = { available: true, objects: [] };
+
+    it("warns on a complete to incomplete transition, stays quiet, then re-warns after recovery", () => {
+      const first = coverageWarnings(truncatedSnap, defaultNotificationPrefs, noCoverageWarned, NOW);
+      expect(first.notifications).toHaveLength(1);
+      expect(first.notifications[0]?.body).toMatch(/more Key Vaults/i);
+      expect(first.warned.truncated).toBe(true);
+
+      // Still incomplete: no repeat warning.
+      const again = coverageWarnings(truncatedSnap, defaultNotificationPrefs, first.warned, NOW);
+      expect(again.notifications).toHaveLength(0);
+
+      // Coverage recovers: no warning, and the warned-state resets so a future lapse re-warns.
+      const recovered = coverageWarnings(completeSnap, defaultNotificationPrefs, again.warned, NOW);
+      expect(recovered.notifications).toHaveLength(0);
+      expect(recovered.warned.truncated).toBe(false);
+
+      const degraded = coverageWarnings(truncatedSnap, defaultNotificationPrefs, recovered.warned, NOW);
+      expect(degraded.notifications).toHaveLength(1);
+    });
+
+    it("warns on partial (unreadable) coverage and is gated by the toggle", () => {
+      const on = coverageWarnings(partialSnap, defaultNotificationPrefs, noCoverageWarned, NOW);
+      expect(on.notifications[0]?.body).toMatch(/could not be read/i);
+
+      const off = coverageWarnings(
+        partialSnap,
+        { ...defaultNotificationPrefs, secretExpiring: false },
+        noCoverageWarned,
+        NOW
+      );
+      expect(off.notifications).toHaveLength(0);
+    });
+
+    it("treats an unavailable scan as no coverage info: no warning, no transition", () => {
+      const prev = { truncated: true, partial: false };
+      const out = coverageWarnings(
+        { available: false, objects: [] },
+        defaultNotificationPrefs,
+        prev,
+        NOW
+      );
+      expect(out.notifications).toHaveLength(0);
+      expect(out.warned).toEqual(prev);
     });
   });
 

@@ -340,39 +340,6 @@ export function expiringNotifications(
   const windowMs = clampExpiryDays(prefs.secretExpiryDays) * 24 * 60 * 60 * 1000;
   const keys: string[] = [];
   const notifications: AppNotification[] = [];
-
-  // Incomplete coverage: tell the operator once, so a missing alert is not mistaken for "nothing
-  // expiring". Two distinct causes (too many vaults; some vaults unreadable), each deduped via a
-  // sentinel key in the seen-set so it warns once rather than every scan.
-  const coverageEnabled = isKindEnabled(prefs, "secret_expiring");
-  if (expiring.truncated) {
-    const truncationKey = "kv-expiry-truncated";
-    keys.push(truncationKey);
-    if (!seen.has(truncationKey) && coverageEnabled) {
-      notifications.push({
-        id: "kv-expiry:truncated",
-        kind: "secret_expiring",
-        title: "Key Vault expiry scan incomplete",
-        body: "You have more Key Vaults than the expiry scan checks; some may not be covered.",
-        createdAt: now,
-        read: false
-      });
-    }
-  }
-  if ((expiring.unreadable ?? []).length > 0) {
-    const partialKey = "kv-expiry-partial";
-    keys.push(partialKey);
-    if (!seen.has(partialKey) && coverageEnabled) {
-      notifications.push({
-        id: "kv-expiry:partial",
-        kind: "secret_expiring",
-        title: "Key Vault expiry scan incomplete",
-        body: "Some Key Vaults could not be read for expiry; their objects are not being checked.",
-        createdAt: now,
-        read: false
-      });
-    }
-  }
   for (const object of expiring.objects) {
     const at = parseInstantMs(object.expires);
     if (at === undefined || at > nowMs + windowMs) {
@@ -398,6 +365,59 @@ export function expiringNotifications(
     });
   }
   return { notifications, keys };
+}
+
+/** Whether the operator was last warned about each kind of incomplete expiry coverage. Held in
+    session memory (NOT the persisted per-object seen-set) so a warning fires again when coverage
+    transitions complete -> incomplete, instead of being suppressed forever. */
+export interface CoverageWarned {
+  truncated: boolean;
+  partial: boolean;
+}
+
+export const noCoverageWarned: CoverageWarned = { truncated: false, partial: false };
+
+/**
+ * Coverage warnings for an expiry scan (too many vaults to scan, or some vaults unreadable). These
+ * are separate from the per-object alerts: deduped against `prev` (the last-warned state), they
+ * fire on a complete -> incomplete transition and stay quiet while it remains incomplete, and warn
+ * again if it recovers and degrades. An unavailable scan is treated as no coverage information (no
+ * warning, no transition). Returns the warnings plus the new last-warned state to carry forward.
+ */
+export function coverageWarnings(
+  expiring: ExpiringObjects,
+  prefs: NotificationPrefs,
+  prev: CoverageWarned,
+  now: string
+): { notifications: AppNotification[]; warned: CoverageWarned } {
+  if (!expiring.available) {
+    return { notifications: [], warned: prev };
+  }
+  const truncated = expiring.truncated === true;
+  const partial = (expiring.unreadable ?? []).length > 0;
+  const enabled = isKindEnabled(prefs, "secret_expiring");
+  const notifications: AppNotification[] = [];
+  if (enabled && truncated && !prev.truncated) {
+    notifications.push({
+      id: "kv-expiry:truncated",
+      kind: "secret_expiring",
+      title: "Key Vault expiry scan incomplete",
+      body: "You have more Key Vaults than the expiry scan checks; some may not be covered.",
+      createdAt: now,
+      read: false
+    });
+  }
+  if (enabled && partial && !prev.partial) {
+    notifications.push({
+      id: "kv-expiry:partial",
+      kind: "secret_expiring",
+      title: "Key Vault expiry scan incomplete",
+      body: "Some Key Vaults could not be read for expiry; their objects are not being checked.",
+      createdAt: now,
+      read: false
+    });
+  }
+  return { notifications, warned: { truncated, partial } };
 }
 
 /** Build the chat-finished notification for a completed run. */
