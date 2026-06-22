@@ -636,6 +636,8 @@ export interface ExpiringObjects {
   /** True when the account has more vaults than the scan cap, so coverage is incomplete (the UI
       tells the operator rather than implying "no alert" means "nothing expiring"). */
   truncated?: boolean;
+  /** Vaults whose contents could not be read this scan (partial coverage). */
+  unreadable?: string[];
   objects: ExpiringObject[];
 }
 

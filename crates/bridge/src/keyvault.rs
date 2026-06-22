@@ -675,6 +675,10 @@ pub struct ExpiringObjects {
     /// alert" means "nothing expiring".
     #[serde(default)]
     pub truncated: bool,
+    /// Vaults whose contents could not be read this scan (partial coverage). Surfaced so a missing
+    /// alert for one of these is not mistaken for "nothing expiring".
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unreadable: Vec<String>,
     pub objects: Vec<ExpiringObject>,
 }
 
@@ -684,6 +688,7 @@ impl ExpiringObjects {
             available: false,
             error: Some(error.to_string()),
             truncated: false,
+            unreadable: Vec::new(),
             objects: Vec::new(),
         }
     }
@@ -731,9 +736,12 @@ fn aggregate_expiring(
     listings: Vec<VaultObjects>,
 ) -> ExpiringObjects {
     let mut objects = Vec::new();
+    let mut unreadable = Vec::new();
     let mut any_vault_read = false;
     for listing in listings {
         if !listing.available {
+            // A vault we could not read this scan (partial coverage); record it for the UI.
+            unreadable.push(listing.vault);
             continue;
         }
         any_vault_read = true;
@@ -752,6 +760,8 @@ fn aggregate_expiring(
         }
     }
 
+    // Had vaults but read NONE of their contents: unavailable, so the UI keeps its prior
+    // alerted-set rather than resetting and re-firing on restore.
     if had_vaults && !any_vault_read {
         return ExpiringObjects::unavailable("could not read any vault's contents");
     }
@@ -759,6 +769,7 @@ fn aggregate_expiring(
         available: true,
         error: None,
         truncated,
+        unreadable,
         objects,
     }
 }
@@ -1173,6 +1184,8 @@ mod tests {
         let result = aggregate_expiring(true, false, listings);
         assert!(result.available);
         assert_eq!(result.objects.len(), 1);
+        // The unreadable vault is reported so the UI can flag partial coverage.
+        assert_eq!(result.unreadable, vec!["kv-b".to_string()]);
     }
 
     #[test]

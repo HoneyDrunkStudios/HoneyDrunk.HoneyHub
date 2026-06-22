@@ -2923,6 +2923,7 @@ mod tests {
                     available: true,
                     error: None,
                     truncated: false,
+                    unreadable: Vec::new(),
                     objects: Vec::new(),
                 },
             }),

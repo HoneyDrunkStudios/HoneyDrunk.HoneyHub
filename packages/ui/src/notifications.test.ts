@@ -287,6 +287,16 @@ describe("notifications model", () => {
       expect(again.notifications).toHaveLength(0);
     });
 
+    it("warns once when some vaults could not be read (partial coverage)", () => {
+      const snap: ExpiringObjects = { available: true, unreadable: ["kv-locked"], objects: [] };
+      const first = expiringNotifications(snap, defaultNotificationPrefs, new Set(), NOW);
+      expect(first.notifications).toHaveLength(1);
+      expect(first.notifications[0]?.body).toMatch(/could not be read/i);
+      expect(first.keys).toContain("kv-expiry-partial");
+      const again = expiringNotifications(snap, defaultNotificationPrefs, new Set(first.keys), NOW);
+      expect(again.notifications).toHaveLength(0);
+    });
+
     it("leaves the prior seen untouched on an unavailable scan or an unparseable clock", () => {
       const seen = new Set(["k1", "k2"]);
       const unavailable = expiringNotifications(
