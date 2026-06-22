@@ -2850,6 +2850,26 @@ mod tests {
             "event_unexpected_agent_written"
         );
         assert_eq!(
+            err_code(BridgeEventPayload::AzureSubscriptions {
+                subscriptions: crate::keyvault::AzureSubscriptionList {
+                    available: true,
+                    error: None,
+                    subscriptions: Vec::new(),
+                },
+            }),
+            "event_unexpected_azure_subscriptions"
+        );
+        assert_eq!(
+            err_code(BridgeEventPayload::KeyVaults {
+                vaults: crate::keyvault::KeyVaultList {
+                    available: true,
+                    error: None,
+                    vaults: Vec::new(),
+                },
+            }),
+            "event_unexpected_key_vaults"
+        );
+        assert_eq!(
             err_code(BridgeEventPayload::JobSnapshot {
                 snapshot: crate::jobs::JobSnapshot {
                     known: Vec::new(),
