@@ -3,8 +3,8 @@
 //! never holds an Azure credential. Management plane: list the operator's subscriptions
 //! ([`subscriptions`]) and the Key Vaults across the selected ones ([`list_vaults`]). Data plane:
 //! list a vault's secrets / keys / certificates metadata ([`list_vault_objects`]) and reveal a
-//! single secret's value ([`reveal_secret`]). The expiry alerts ride the same listings in a later
-//! slice.
+//! single secret's value ([`reveal_secret`]). [`scan_expiring`] aggregates the objects-with-expiry
+//! across the selected vaults for the background expiry notifications.
 
 use crate::azcli::{resource_group_from_id, run_az};
 use crate::backend_catalog::program_on_path;
@@ -646,6 +646,150 @@ fn is_object_name_shaped(name: &str) -> bool {
         && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
 }
 
+// --- Expiry scan (for background expiry notifications) ------------------------------------------
+
+/// One secret / key / certificate that carries an expiry, with the vault + subscription it lives
+/// in. The cockpit's notification engine filters these by its configurable threshold and fires
+/// once per item; `expires` is always present (only objects with an expiry are scanned).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExpiringObject {
+    pub vault: String,
+    pub subscription_id: String,
+    pub kind: VaultObjectKind,
+    pub name: String,
+    pub expires: String,
+}
+
+/// The objects-with-an-expiry across the selected subscriptions' vaults, with an honest
+/// unavailable state. The bridge does no date math; it just aggregates, and the UI applies the
+/// "within N days" threshold (it owns the clock + the operator's setting).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExpiringObjects {
+    pub available: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    /// The subscriptions this scan covered (echoed from the request). The cockpit compares these
+    /// against the currently-selected subscriptions and discards a stale result whose selection
+    /// has since changed, so neither objects nor coverage warnings leak from a prior selection.
+    #[serde(default)]
+    pub subscription_ids: Vec<String>,
+    /// True when the account has more vaults than the scan cap, so coverage is incomplete. The
+    /// cockpit surfaces this so an operator with many vaults is not misled into thinking "no
+    /// alert" means "nothing expiring".
+    #[serde(default)]
+    pub truncated: bool,
+    /// Vaults whose contents could not be read this scan (partial coverage). Surfaced so a missing
+    /// alert for one of these is not mistaken for "nothing expiring".
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unreadable: Vec<String>,
+    pub objects: Vec<ExpiringObject>,
+}
+
+impl ExpiringObjects {
+    fn unavailable(error: &str) -> Self {
+        Self {
+            available: false,
+            error: Some(error.to_string()),
+            subscription_ids: Vec::new(),
+            truncated: false,
+            unreadable: Vec::new(),
+            objects: Vec::new(),
+        }
+    }
+}
+
+/// Cap on how many vaults one expiry scan walks (each vault is three `az` list calls). Bounds the
+/// background scan's host work against a very large account.
+const MAX_SCAN_VAULTS: usize = 100;
+
+/// Scan every vault across `subscription_ids` for objects that carry an expiry, for the background
+/// expiry notifications. Read-only. Reuses [`list_vaults`] + [`list_vault_objects`] (so it inherits
+/// their validation, bounded fan-out, and best-effort access handling); a vault or kind that can't
+/// be read is simply skipped. Returns only objects with an `expires` set; the UI does the
+/// threshold + clock math. Heavy (many `az` calls), so the caller polls it on a long cadence.
+pub fn scan_expiring(subscription_ids: &[String]) -> ExpiringObjects {
+    // Echo the scanned subscriptions on every return path, so the cockpit can discard a result
+    // whose selection has since changed (the scan is slow; the selection can move under it).
+    let mut result = scan_expiring_inner(subscription_ids);
+    result.subscription_ids = subscription_ids.to_vec();
+    result
+}
+
+fn scan_expiring_inner(subscription_ids: &[String]) -> ExpiringObjects {
+    let vaults = list_vaults(subscription_ids);
+    if !vaults.available {
+        return ExpiringObjects::unavailable(
+            &vaults
+                .error
+                .unwrap_or_else(|| "could not read Key Vaults".to_string()),
+        );
+    }
+
+    let had_vaults = !vaults.vaults.is_empty();
+    // The account has more vaults than we will walk this scan: coverage is incomplete.
+    let truncated = vaults.vaults.len() > MAX_SCAN_VAULTS;
+    let listings: Vec<VaultObjects> = vaults
+        .vaults
+        .iter()
+        .take(MAX_SCAN_VAULTS)
+        .map(|vault| list_vault_objects(&vault.name, &vault.subscription_id))
+        .collect();
+    aggregate_expiring(had_vaults, truncated, listings)
+}
+
+/// Fold per-vault listings into the expiring set: keep every object that carries an `expires`,
+/// tagged with the vault + subscription its listing echoed. If the account `had_vaults` but none
+/// of their listings were readable (e.g. a transient data-plane access loss), report unavailable
+/// rather than a false "nothing expiring", so the cockpit keeps its prior alerted-set instead of
+/// resetting it and re-firing on restore. Pure (no `az`), so the aggregation is unit-tested.
+fn aggregate_expiring(
+    had_vaults: bool,
+    truncated: bool,
+    listings: Vec<VaultObjects>,
+) -> ExpiringObjects {
+    let mut objects = Vec::new();
+    let mut unreadable = Vec::new();
+    let mut any_vault_read = false;
+    for listing in listings {
+        if !listing.available {
+            // A vault we could not read this scan (partial coverage); record it for the UI.
+            unreadable.push(listing.vault);
+            continue;
+        }
+        any_vault_read = true;
+        let vault = listing.vault;
+        let subscription_id = listing.subscription_id;
+        for object in listing.objects {
+            if let Some(expires) = object.expires {
+                objects.push(ExpiringObject {
+                    vault: vault.clone(),
+                    subscription_id: subscription_id.clone(),
+                    kind: object.kind,
+                    name: object.name,
+                    expires,
+                });
+            }
+        }
+    }
+
+    // Had vaults but read NONE of their contents: unavailable, so the UI keeps its prior
+    // alerted-set rather than resetting and re-firing on restore.
+    if had_vaults && !any_vault_read {
+        return ExpiringObjects::unavailable("could not read any vault's contents");
+    }
+    ExpiringObjects {
+        available: true,
+        error: None,
+        // The public `scan_expiring` fills this in from the request on every path.
+        subscription_ids: Vec::new(),
+        truncated,
+        unreadable,
+        objects,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -974,5 +1118,137 @@ mod tests {
         assert!(!bad_sub.available);
         assert_eq!(bad_sub.error.as_deref(), Some("invalid subscription id"));
         assert_eq!(bad_sub.subscription_id, "not-a-guid");
+    }
+
+    #[test]
+    fn scan_expiring_with_no_subscriptions_is_available_and_empty() {
+        // No subscriptions selected: list_vaults short-circuits to an available, empty list (no
+        // `az`), so the scan is deterministically available with nothing to report.
+        let scan = scan_expiring(&[]);
+        assert!(scan.available);
+        assert!(scan.objects.is_empty());
+        assert_eq!(scan.error, None);
+        assert!(scan.subscription_ids.is_empty());
+    }
+
+    #[test]
+    fn scan_expiring_echoes_the_requested_subscriptions() {
+        // A malformed subscription id is rejected before any `az` call (so this is offline). The
+        // scan still echoes the requested set on every path, so the UI can detect a since-changed
+        // selection regardless of the scan's availability.
+        let scan = scan_expiring(&["not-a-guid".to_string()]);
+        assert_eq!(scan.subscription_ids, vec!["not-a-guid".to_string()]);
+    }
+
+    fn object_with_expiry(name: &str, expires: Option<&str>) -> VaultObject {
+        VaultObject {
+            name: name.to_string(),
+            kind: VaultObjectKind::Secret,
+            enabled: true,
+            expires: expires.map(str::to_string),
+            created: None,
+            updated: None,
+            content_type: None,
+        }
+    }
+
+    fn listing(vault: &str, sub: &str, available: bool, objects: Vec<VaultObject>) -> VaultObjects {
+        VaultObjects {
+            available,
+            error: if available {
+                None
+            } else {
+                Some("no access".to_string())
+            },
+            vault: vault.to_string(),
+            subscription_id: sub.to_string(),
+            objects,
+        }
+    }
+
+    #[test]
+    fn aggregate_expiring_keeps_objects_with_expiry_tagged_by_vault() {
+        let listings = vec![
+            listing(
+                "kv-a",
+                "sub-1",
+                true,
+                vec![
+                    object_with_expiry("with-exp", Some("2026-07-01T00:00:00+00:00")),
+                    object_with_expiry("no-exp", None),
+                ],
+            ),
+            listing(
+                "kv-b",
+                "sub-1",
+                true,
+                vec![object_with_expiry("k", Some("2026-08-01T00:00:00+00:00"))],
+            ),
+        ];
+        let result = aggregate_expiring(true, false, listings);
+        assert!(result.available);
+        // Only objects WITH an expiry are kept, tagged with their vault + subscription.
+        assert_eq!(result.objects.len(), 2);
+        assert_eq!(result.objects[0].name, "with-exp");
+        assert_eq!(result.objects[0].vault, "kv-a");
+        assert_eq!(result.objects[0].subscription_id, "sub-1");
+        assert_eq!(result.objects[1].vault, "kv-b");
+    }
+
+    #[test]
+    fn aggregate_expiring_partial_keeps_readable_and_stays_available() {
+        // One vault readable, one not: best-effort keeps what we could read, still available.
+        let listings = vec![
+            listing(
+                "kv-a",
+                "sub-1",
+                true,
+                vec![object_with_expiry("x", Some("2026-07-01T00:00:00+00:00"))],
+            ),
+            listing("kv-b", "sub-1", false, Vec::new()),
+        ];
+        let result = aggregate_expiring(true, false, listings);
+        assert!(result.available);
+        assert_eq!(result.objects.len(), 1);
+        // The unreadable vault is reported so the UI can flag partial coverage.
+        assert_eq!(result.unreadable, vec!["kv-b".to_string()]);
+    }
+
+    #[test]
+    fn aggregate_expiring_is_unavailable_when_no_vault_is_readable() {
+        // Had vaults, but none readable: unavailable, so the UI keeps its prior alerted-set.
+        let listings = vec![
+            listing("kv-a", "sub-1", false, Vec::new()),
+            listing("kv-b", "sub-1", false, Vec::new()),
+        ];
+        let result = aggregate_expiring(true, false, listings);
+        assert!(!result.available);
+        assert_eq!(
+            result.error.as_deref(),
+            Some("could not read any vault's contents")
+        );
+    }
+
+    #[test]
+    fn aggregate_expiring_with_no_vaults_is_available_and_empty() {
+        let result = aggregate_expiring(false, false, Vec::new());
+        assert!(result.available);
+        assert!(result.objects.is_empty());
+        assert_eq!(result.error, None);
+        assert!(!result.truncated);
+    }
+
+    #[test]
+    fn aggregate_expiring_propagates_the_truncated_flag() {
+        let listings = vec![listing(
+            "kv-a",
+            "sub-1",
+            true,
+            vec![object_with_expiry("x", Some("2026-07-01T00:00:00+00:00"))],
+        )];
+        let result = aggregate_expiring(true, true, listings);
+        assert!(result.available);
+        assert!(result.truncated);
+        assert_eq!(result.objects.len(), 1);
     }
 }

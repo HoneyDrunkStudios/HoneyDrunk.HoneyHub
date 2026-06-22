@@ -93,6 +93,9 @@ export interface WireClient {
   /** Reveal a single secret's value (the gated "view it" action). The answer arrives as a
       `secret_reveal` event via `subscribe`; the value is sensitive (never logged/persisted). */
   revealSecret(vault: string, subscriptionId: string, name: string): Promise<void>;
+  /** Scan the given subscriptions' vaults for objects with an expiry (for background expiry
+      notifications). The answer arrives as a `key_vault_expiry` event via `subscribe`. */
+  scanKeyVaultExpiry(subscriptionIds: string[]): Promise<void>;
   /** Non-destructively peek messages from a Service Bus queue (or topic subscription). The
       answer arrives as a `service_bus_peek` event via `subscribe`. */
   peekServiceBus(request: {

@@ -26,9 +26,15 @@ export function loadSelectedSubscriptions(): string[] | undefined {
   }
 }
 
+/** Broadcast on the global event target whenever the saved selection changes, so listeners (the
+    background expiry-scan engine) can re-read it immediately, without waiting for an unrelated
+    re-render or a view change. */
+export const KV_SUBSCRIPTIONS_CHANGED_EVENT = "honeyhub:keyvault-subscriptions-changed";
+
 export function saveSelectedSubscriptions(ids: string[]): void {
   try {
     globalThis.localStorage?.setItem(SUBS_STORAGE_KEY, JSON.stringify(ids));
+    globalThis.dispatchEvent?.(new Event(KV_SUBSCRIPTIONS_CHANGED_EVENT));
   } catch {
     // Storage unavailable; keep the in-memory selection for this session only.
   }
@@ -70,6 +76,12 @@ export function initialSelection(
     previous selection is ignored. */
 export function subscriptionKey(ids: readonly string[]): string {
   return [...ids].sort((a, b) => a.localeCompare(b)).join(",");
+}
+
+/** Whether two subscription selections are the same set (order-insensitive). Used to discard a
+    stale Key Vault expiry scan whose selection changed while it was in flight. */
+export function sameSubscriptions(a: readonly string[], b: readonly string[]): boolean {
+  return subscriptionKey(a) === subscriptionKey(b);
 }
 
 /** Filter vaults by a case-insensitive match on name, resource group, or location. */

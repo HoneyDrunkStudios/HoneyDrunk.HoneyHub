@@ -47,6 +47,7 @@ class FakeClient implements WireClient {
   async listKeyVaults(): Promise<void> {}
   async listVaultObjects(): Promise<void> {}
   async revealSecret(): Promise<void> {}
+  async scanKeyVaultExpiry(): Promise<void> {}
   async peekServiceBus(): Promise<void> {}
   async resubmitDeadLetter(): Promise<void> {}
   async purgeServiceBus(): Promise<void> {}

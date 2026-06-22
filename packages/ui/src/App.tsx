@@ -32,6 +32,10 @@ import { GoalsView } from "./routes/goals/GoalsView";
 import { GoalOrchestrator } from "./routes/goals/goalOrchestrator";
 import { orderGoals, type GoalsState } from "./routes/goals/goalsModel";
 import { enabledIds, loadConnectorPrefs } from "./connectors";
+import {
+  KV_SUBSCRIPTIONS_CHANGED_EVENT,
+  loadSelectedSubscriptions
+} from "./routes/observe/keyVaultModel";
 import { ChatSidebar, SIDEBAR_SESSION_ID } from "./routes/chat/ChatSidebar";
 import { HubView } from "./routes/hub/HubView";
 import { PlanView } from "./routes/plan/PlanView";
@@ -160,6 +164,12 @@ export function App({ client }: AppProps = {}) {
   // The enabled connectors (work + observability), re-read when the view changes so editing
   // them in Settings → Connectors re-points the notification poll.
   const [connectorPrefs, setConnectorPrefs] = useState(loadConnectorPrefs);
+  // The Key Vault subscription selection (owned by the Observe panel, persisted locally). Held in
+  // state and re-read on view change so the expiry-scan engine reliably consumes the current
+  // selection rather than a value captured at one render.
+  const [keyVaultSubscriptions, setKeyVaultSubscriptions] = useState<string[]>(
+    () => loadSelectedSubscriptions() ?? []
+  );
   // Every run's live summary (status/model/cost), aggregated from the bridge event
   // stream — the active-runs dashboard. Runs are registered at launch (for task +
   // backend) and updated as their events arrive.
@@ -265,7 +275,16 @@ export function App({ client }: AppProps = {}) {
   // Connectors re-points the notification engine's poll without a reload).
   useEffect(() => {
     setConnectorPrefs(loadConnectorPrefs());
+    setKeyVaultSubscriptions(loadSelectedSubscriptions() ?? []);
   }, [view]);
+
+  // Also react the moment the Key Vault selection changes (in the Observe panel), so the expiry
+  // scan re-points without needing a view change. Pairs with the view-change re-read above.
+  useEffect(() => {
+    const onChange = (): void => setKeyVaultSubscriptions(loadSelectedSubscriptions() ?? []);
+    globalThis.addEventListener?.(KV_SUBSCRIPTIONS_CHANGED_EVENT, onChange);
+    return () => globalThis.removeEventListener?.(KV_SUBSCRIPTIONS_CHANGED_EVENT, onChange);
+  }, []);
 
   // Whether the user is actively looking at a chat thread (so a finish there is silent). A
   // thread is "active" only when its surface is visible AND the window is focused.
@@ -292,6 +311,8 @@ export function App({ client }: AppProps = {}) {
     prefs: notificationPrefs,
     workSources: enabledIds(connectorPrefs, "work"),
     serviceBusEnabled: enabledIds(connectorPrefs, "observability").includes("servicebus"),
+    keyVaultEnabled: enabledIds(connectorPrefs, "observability").includes("keyvault"),
+    keyVaultSubscriptions,
     chatSessionIds: ["session-1", SIDEBAR_SESSION_ID],
     isThreadActive,
     onNotifications: (items) => setNotifications((prev) => mergeFeed(prev, items))

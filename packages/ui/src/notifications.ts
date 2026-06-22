@@ -1,4 +1,11 @@
-import type { ServiceBusSnapshot, WorkItem, WorkSnapshot } from "@honeydrunk/honeyhub-types";
+import type {
+  ExpiringObject,
+  ExpiringObjects,
+  ServiceBusSnapshot,
+  WorkItem,
+  WorkSnapshot
+} from "@honeydrunk/honeyhub-types";
+import { parseInstantMs } from "./routes/observe/keyVaultModel";
 
 // Client-side notification model + pure detection helpers. The cockpit subscribes to the
 // bridge's existing events (run status, work snapshot, Service Bus snapshot) and polls the
@@ -11,7 +18,8 @@ export type AppNotificationKind =
   | "work_assigned"
   | "work_mentioned"
   | "pr_review"
-  | "dead_letter";
+  | "dead_letter"
+  | "secret_expiring";
 
 export interface AppNotification {
   id: string;
@@ -32,6 +40,9 @@ export interface NotificationPrefs {
   workMentioned: boolean;
   prReview: boolean;
   deadLetter: boolean;
+  secretExpiring: boolean;
+  /** Days ahead within which an upcoming Key Vault expiry triggers an alert. */
+  secretExpiryDays: number;
 }
 
 export const defaultNotificationPrefs: NotificationPrefs = {
@@ -40,8 +51,22 @@ export const defaultNotificationPrefs: NotificationPrefs = {
   workAssigned: true,
   workMentioned: true,
   prReview: true,
-  deadLetter: true
+  deadLetter: true,
+  secretExpiring: true,
+  secretExpiryDays: 30
 };
+
+/** Bounds for the expiry-window setting (days). */
+export const MIN_EXPIRY_DAYS = 1;
+export const MAX_EXPIRY_DAYS = 365;
+
+/** Clamp a (possibly bad) expiry-days value into range, falling back to the default. */
+export function clampExpiryDays(value: number): number {
+  if (!Number.isFinite(value)) {
+    return defaultNotificationPrefs.secretExpiryDays;
+  }
+  return Math.min(MAX_EXPIRY_DAYS, Math.max(MIN_EXPIRY_DAYS, Math.round(value)));
+}
 
 const PREFS_KEY = "honeyhub.notificationPrefs.v1";
 const FEED_KEY = "honeyhub.notificationFeed.v1";
@@ -59,14 +84,21 @@ export function loadNotificationPrefs(): NotificationPrefs {
     }
     const record = parsed as Record<string, unknown>;
     const bool = (key: keyof NotificationPrefs): boolean =>
-      typeof record[key] === "boolean" ? record[key] : defaultNotificationPrefs[key];
+      typeof record[key] === "boolean"
+        ? (record[key] as boolean)
+        : (defaultNotificationPrefs[key] as boolean);
     return {
       desktop: bool("desktop"),
       chatFinished: bool("chatFinished"),
       workAssigned: bool("workAssigned"),
       workMentioned: bool("workMentioned"),
       prReview: bool("prReview"),
-      deadLetter: bool("deadLetter")
+      deadLetter: bool("deadLetter"),
+      secretExpiring: bool("secretExpiring"),
+      secretExpiryDays:
+        typeof record.secretExpiryDays === "number"
+          ? clampExpiryDays(record.secretExpiryDays)
+          : defaultNotificationPrefs.secretExpiryDays
     };
   } catch {
     return defaultNotificationPrefs;
@@ -121,6 +153,8 @@ export function isKindEnabled(prefs: NotificationPrefs, kind: AppNotificationKin
       return prefs.prReview;
     case "dead_letter":
       return prefs.deadLetter;
+    case "secret_expiring":
+      return prefs.secretExpiring;
   }
 }
 
@@ -151,6 +185,8 @@ function titleForKind(kind: AppNotificationKind): string {
       return "PR needs your review";
     case "dead_letter":
       return "New dead-letter message";
+    case "secret_expiring":
+      return "Key Vault secret expiring";
   }
 }
 
@@ -233,6 +269,178 @@ export function deadLetterNotifications(
     }
   }
   return { notifications, counts };
+}
+
+const EXPIRY_SEEN_KEY = "honeyhub.notificationExpirySeen.v1";
+
+/** The persisted set of expiry keys already alerted on, so each expiring item alerts once across
+    sessions (rather than every cockpit open). */
+export function loadExpirySeen(): Set<string> {
+  try {
+    const raw = globalThis.localStorage?.getItem(EXPIRY_SEEN_KEY);
+    if (raw === null || raw === undefined) {
+      return new Set();
+    }
+    const parsed: unknown = JSON.parse(raw);
+    if (!Array.isArray(parsed)) {
+      return new Set();
+    }
+    return new Set(parsed.filter((value): value is string => typeof value === "string"));
+  } catch {
+    return new Set();
+  }
+}
+
+export function saveExpirySeen(seen: ReadonlySet<string>): void {
+  try {
+    globalThis.localStorage?.setItem(EXPIRY_SEEN_KEY, JSON.stringify([...seen]));
+  } catch {
+    // Best-effort.
+  }
+}
+
+/** A deterministic 64-bit FNV-1a hash to hex. 64 bits (not 32) so a collision between two distinct
+    expiring objects, which would permanently suppress one object's alert, is vanishingly unlikely
+    even for large accounts, while still never persisting the object name. */
+function hashString(input: string): string {
+  const mask = 0xffff_ffff_ffff_ffffn;
+  const prime = 0x0000_0100_0000_01b3n;
+  let hash = 0xcbf2_9ce4_8422_2325n;
+  for (let i = 0; i < input.length; i += 1) {
+    hash = ((hash ^ BigInt(input.charCodeAt(i))) * prime) & mask;
+  }
+  return hash.toString(16).padStart(16, "0");
+}
+
+/** A stable, OPAQUE key for an expiring object (a hash, not the identifiers). It both de-dupes
+    alerts and is what lands in the persisted seen-set + notification id, so the operationally
+    revealing object name never reaches local storage. Includes `expires`, so renewing an object
+    (a new expiry) hashes differently and can alert again. */
+export function expiryKey(object: ExpiringObject): string {
+  return hashString(
+    `${object.subscriptionId}/${object.vault}/${object.kind}/${object.name}/${object.expires}`
+  );
+}
+
+/**
+ * New expiry notifications: objects whose expiry is at or within the operator's threshold (already
+ * expired included), not already in `seen`, when the secret-expiring kind is enabled. Returns the
+ * notifications to fire plus the FULL set of currently-in-window keys; the caller persists that as
+ * the new `seen`, so a renewed object drops out and only genuinely new ones fire. An unavailable
+ * scan leaves the prior `seen` untouched (no fire, no reset). `now` is an ISO timestamp.
+ */
+export function expiringNotifications(
+  expiring: ExpiringObjects,
+  prefs: NotificationPrefs,
+  seen: ReadonlySet<string>,
+  now: string
+): { notifications: AppNotification[]; keys: string[] } {
+  const nowMs = Date.parse(now);
+  if (!expiring.available || Number.isNaN(nowMs)) {
+    // Unavailable scan or an unparseable clock: change nothing, keep the prior alerted-set.
+    return { notifications: [], keys: [...seen] };
+  }
+  const windowMs = clampExpiryDays(prefs.secretExpiryDays) * 24 * 60 * 60 * 1000;
+  const keys: string[] = [];
+  const notifications: AppNotification[] = [];
+  for (const object of expiring.objects) {
+    const at = parseInstantMs(object.expires);
+    if (at === undefined || at > nowMs + windowMs) {
+      continue; // no parseable expiry, or not yet within the window
+    }
+    const key = expiryKey(object);
+    keys.push(key);
+    if (seen.has(key) || !isKindEnabled(prefs, "secret_expiring")) {
+      continue;
+    }
+    const expired = at <= nowMs;
+    const when = new Date(at).toISOString().slice(0, 10);
+    // Data minimization: the OS toast + persisted feed are visible outside the app (lock screen,
+    // notification centre), so they carry only the object KIND and date, never the object name OR
+    // the vault name (both can reveal operational inventory or purpose). The in-app Key Vault view
+    // shows exactly which vault + object it is.
+    notifications.push({
+      id: `kv-expiry:${key}`,
+      kind: "secret_expiring",
+      title: titleForKind("secret_expiring"),
+      body: `A ${object.kind} ${expired ? "expired" : "expires"} ${when}`,
+      createdAt: now,
+      read: false
+    });
+  }
+  return { notifications, keys };
+}
+
+/** Whether the operator was last warned about each kind of incomplete expiry coverage. Held in
+    session memory (NOT the persisted per-object seen-set) so a warning fires again when coverage
+    transitions complete -> incomplete, instead of being suppressed forever. */
+export interface CoverageWarned {
+  truncated: boolean;
+  partial: boolean;
+  unavailable: boolean;
+}
+
+export const noCoverageWarned: CoverageWarned = {
+  truncated: false,
+  partial: false,
+  unavailable: false
+};
+
+/**
+ * Coverage warnings for an expiry scan: the whole scan failed (unavailable), too many vaults to
+ * scan (truncated), or some vaults unreadable (partial). These are separate from the per-object
+ * alerts: deduped against `prev` (the last-warned state), they fire on a healthy -> degraded
+ * transition and stay quiet while degraded, and warn again if it recovers and degrades. An
+ * unavailable scan carries no coverage info, so the truncated/partial state resets (and vice
+ * versa). Returns the warnings plus the new last-warned state to carry forward.
+ */
+export function coverageWarnings(
+  expiring: ExpiringObjects,
+  prefs: NotificationPrefs,
+  prev: CoverageWarned,
+  now: string
+): { notifications: AppNotification[]; warned: CoverageWarned } {
+  const enabled = isKindEnabled(prefs, "secret_expiring");
+  const notifications: AppNotification[] = [];
+  if (!expiring.available) {
+    // The whole scan could not run (missing `az`, auth loss, invalid subscriptions, or no readable
+    // vaults). Warn once on the transition to unavailable so the connector does not silently look
+    // healthy while expiry coverage is dead; truncated/partial reset (we have no coverage info).
+    if (enabled && !prev.unavailable) {
+      notifications.push({
+        id: "kv-expiry:unavailable",
+        kind: "secret_expiring",
+        title: "Key Vault expiry scan unavailable",
+        body: "The Key Vault expiry scan could not run; expiring objects may go undetected.",
+        createdAt: now,
+        read: false
+      });
+    }
+    return { notifications, warned: { truncated: false, partial: false, unavailable: true } };
+  }
+  const truncated = expiring.truncated === true;
+  const partial = (expiring.unreadable ?? []).length > 0;
+  if (enabled && truncated && !prev.truncated) {
+    notifications.push({
+      id: "kv-expiry:truncated",
+      kind: "secret_expiring",
+      title: "Key Vault expiry scan incomplete",
+      body: "You have more Key Vaults than the expiry scan checks; some may not be covered.",
+      createdAt: now,
+      read: false
+    });
+  }
+  if (enabled && partial && !prev.partial) {
+    notifications.push({
+      id: "kv-expiry:partial",
+      kind: "secret_expiring",
+      title: "Key Vault expiry scan incomplete",
+      body: "Some Key Vaults could not be read for expiry; their objects are not being checked.",
+      createdAt: now,
+      read: false
+    });
+  }
+  return { notifications, warned: { truncated, partial, unavailable: false } };
 }
 
 /** Build the chat-finished notification for a completed run. */

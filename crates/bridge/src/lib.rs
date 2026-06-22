@@ -66,7 +66,8 @@ pub use jobs::{
 };
 pub use keyvault::{
     list_vault_objects as vault_objects, list_vaults as key_vaults, reveal_secret,
-    subscriptions as azure_subscriptions, AzureSubscription, AzureSubscriptionList, KeyVault,
+    scan_expiring as scan_key_vault_expiry, subscriptions as azure_subscriptions,
+    AzureSubscription, AzureSubscriptionList, ExpiringObject, ExpiringObjects, KeyVault,
     KeyVaultList, SecretReveal, VaultObject, VaultObjectKind, VaultObjects,
 };
 pub use network::{reachable_addresses, NetAddress, NetAddressKind, NetworkInfo};

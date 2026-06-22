@@ -1,18 +1,45 @@
-import { describe, expect, it } from "vitest";
-import type { ServiceBusSnapshot, WorkSnapshot } from "@honeydrunk/honeyhub-types";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import type {
+  ExpiringObjects,
+  ServiceBusSnapshot,
+  WorkSnapshot
+} from "@honeydrunk/honeyhub-types";
 import {
   chatFinishedNotification,
+  clampExpiryDays,
   collectWorkItems,
+  coverageWarnings,
   deadLetterNotifications,
   defaultNotificationPrefs,
+  expiringNotifications,
+  expiryKey,
   kindForCategory,
+  loadExpirySeen,
   mergeFeed,
+  noCoverageWarned,
+  saveExpirySeen,
   unreadCount,
   workNotifications,
   type AppNotification
 } from "./notifications";
 
 const NOW = "2026-06-21T12:00:00Z";
+const inDays = (days: number): string => new Date(Date.parse(NOW) + days * 86_400_000).toISOString();
+
+function expiringSnap(
+  objects: { name: string; expires: string; kind?: "secret" | "key" | "certificate" }[]
+): ExpiringObjects {
+  return {
+    available: true,
+    objects: objects.map((object) => ({
+      vault: "kv-dev",
+      subscriptionId: "sub-1",
+      kind: object.kind ?? "secret",
+      name: object.name,
+      expires: object.expires
+    }))
+  };
+}
 
 function workSnap(items: { id: string; category: string; source?: string }[]): WorkSnapshot {
   return {
@@ -186,5 +213,209 @@ describe("notifications model", () => {
     expect(unreadCount(feed)).toBe(1);
     // Re-merging the same id replaces rather than duplicates.
     expect(mergeFeed(feed, [a]).filter((n) => n.id === "1")).toHaveLength(1);
+  });
+
+  describe("expiry notifications", () => {
+    it("fires for items within the window (and already expired), not for ones beyond it", () => {
+      const snap = expiringSnap([
+        { name: "soon", expires: inDays(10) },
+        { name: "expired", expires: inDays(-5) },
+        { name: "far", expires: inDays(100) }
+      ]);
+      const { notifications, keys } = expiringNotifications(
+        snap,
+        defaultNotificationPrefs,
+        new Set(),
+        NOW
+      );
+      expect(notifications).toHaveLength(2);
+      expect(notifications.every((n) => n.kind === "secret_expiring")).toBe(true);
+      expect(notifications.find((n) => n.body.includes("expired"))).toBeTruthy();
+      // `keys` is the full in-window set (soon + expired); `far` is excluded.
+      expect(keys).toHaveLength(2);
+    });
+
+    it("tracks in-window keys but suppresses the toast when the alert is disabled", () => {
+      // Suppress-but-track (like dead-letter counts): a disabled alert must still record the keys,
+      // so re-enabling does not backlog objects that came into window while it was off.
+      const snap = expiringSnap([{ name: "soon", expires: inDays(10) }]);
+      const { notifications, keys } = expiringNotifications(
+        snap,
+        { ...defaultNotificationPrefs, secretExpiring: false },
+        new Set(),
+        NOW
+      );
+      expect(notifications).toHaveLength(0);
+      expect(keys).toHaveLength(1);
+    });
+
+    it("uses an opaque key + body that never carry the object OR vault name", () => {
+      const obj = {
+        vault: "kv-prod",
+        subscriptionId: "sub-1",
+        kind: "secret" as const,
+        name: "stripe-prod-signing-key",
+        expires: inDays(5)
+      };
+      const key = expiryKey(obj);
+      expect(key).not.toContain("stripe-prod-signing-key");
+      // Stable, and a renewed expiry hashes differently (so it can alert again).
+      expect(expiryKey(obj)).toBe(key);
+      expect(expiryKey({ ...obj, expires: inDays(400) })).not.toBe(key);
+
+      const { notifications } = expiringNotifications(
+        { available: true, objects: [obj] },
+        defaultNotificationPrefs,
+        new Set(),
+        NOW
+      );
+      // The lock-screen-visible id + body carry only the kind + date, never the object name and
+      // never the vault name (both are operational inventory); the in-app view has the detail.
+      expect(notifications[0]?.id).not.toContain("stripe-prod-signing-key");
+      expect(notifications[0]?.body).not.toContain("stripe-prod-signing-key");
+      expect(notifications[0]?.body).not.toContain("kv-prod");
+      expect(notifications[0]?.body).toContain("secret");
+    });
+
+    it("does not re-fire an item already in seen", () => {
+      const snap = expiringSnap([{ name: "soon", expires: inDays(10) }]);
+      const first = expiringNotifications(snap, defaultNotificationPrefs, new Set(), NOW);
+      const again = expiringNotifications(snap, defaultNotificationPrefs, new Set(first.keys), NOW);
+      expect(again.notifications).toHaveLength(0);
+    });
+
+    it("respects the secret-expiring toggle and the day threshold", () => {
+      const snap = expiringSnap([{ name: "soon", expires: inDays(10) }]);
+      // Toggle off → nothing fires (but keys still tracked so it won't spam when re-enabled).
+      const off = { ...defaultNotificationPrefs, secretExpiring: false };
+      expect(expiringNotifications(snap, off, new Set(), NOW).notifications).toHaveLength(0);
+      // A 5-day window excludes an item 10 days out.
+      const tight = { ...defaultNotificationPrefs, secretExpiryDays: 5 };
+      expect(expiringNotifications(snap, tight, new Set(), NOW).notifications).toHaveLength(0);
+    });
+
+    it("leaves the prior seen untouched on an unavailable scan or an unparseable clock", () => {
+      const seen = new Set(["k1", "k2"]);
+      const unavailable = expiringNotifications(
+        { available: false, objects: [] },
+        defaultNotificationPrefs,
+        seen,
+        NOW
+      );
+      expect(unavailable.notifications).toHaveLength(0);
+      expect(unavailable.keys.sort()).toEqual(["k1", "k2"]);
+
+      // A bad `now` changes nothing rather than mis-firing.
+      const badNow = expiringNotifications(
+        expiringSnap([{ name: "soon", expires: inDays(10) }]),
+        defaultNotificationPrefs,
+        seen,
+        "not a date"
+      );
+      expect(badNow.notifications).toHaveLength(0);
+      expect(badNow.keys.sort()).toEqual(["k1", "k2"]);
+    });
+  });
+
+  describe("coverage warnings", () => {
+    const truncatedSnap: ExpiringObjects = { available: true, truncated: true, objects: [] };
+    const partialSnap: ExpiringObjects = {
+      available: true,
+      unreadable: ["kv-locked"],
+      objects: []
+    };
+    const completeSnap: ExpiringObjects = { available: true, objects: [] };
+
+    it("warns on a complete to incomplete transition, stays quiet, then re-warns after recovery", () => {
+      const first = coverageWarnings(truncatedSnap, defaultNotificationPrefs, noCoverageWarned, NOW);
+      expect(first.notifications).toHaveLength(1);
+      expect(first.notifications[0]?.body).toMatch(/more Key Vaults/i);
+      expect(first.warned.truncated).toBe(true);
+
+      // Still incomplete: no repeat warning.
+      const again = coverageWarnings(truncatedSnap, defaultNotificationPrefs, first.warned, NOW);
+      expect(again.notifications).toHaveLength(0);
+
+      // Coverage recovers: no warning, and the warned-state resets so a future lapse re-warns.
+      const recovered = coverageWarnings(completeSnap, defaultNotificationPrefs, again.warned, NOW);
+      expect(recovered.notifications).toHaveLength(0);
+      expect(recovered.warned.truncated).toBe(false);
+
+      const degraded = coverageWarnings(truncatedSnap, defaultNotificationPrefs, recovered.warned, NOW);
+      expect(degraded.notifications).toHaveLength(1);
+    });
+
+    it("warns on partial (unreadable) coverage and is gated by the toggle", () => {
+      const on = coverageWarnings(partialSnap, defaultNotificationPrefs, noCoverageWarned, NOW);
+      expect(on.notifications[0]?.body).toMatch(/could not be read/i);
+
+      const off = coverageWarnings(
+        partialSnap,
+        { ...defaultNotificationPrefs, secretExpiring: false },
+        noCoverageWarned,
+        NOW
+      );
+      expect(off.notifications).toHaveLength(0);
+    });
+
+    it("warns once on the transition to an unavailable scan, then resets other coverage state", () => {
+      const unavailable: ExpiringObjects = { available: false, objects: [] };
+      // Coming from a truncated state, an unavailable scan warns (a new failure) and clears the
+      // truncated/partial flags, since an unavailable scan carries no coverage info.
+      const first = coverageWarnings(
+        unavailable,
+        defaultNotificationPrefs,
+        { truncated: true, partial: false, unavailable: false },
+        NOW
+      );
+      expect(first.notifications).toHaveLength(1);
+      expect(first.notifications[0]?.body).toMatch(/could not run/i);
+      expect(first.warned).toEqual({ truncated: false, partial: false, unavailable: true });
+
+      // Still unavailable: no repeat.
+      const again = coverageWarnings(unavailable, defaultNotificationPrefs, first.warned, NOW);
+      expect(again.notifications).toHaveLength(0);
+    });
+
+    it("does not warn on an unavailable scan when the alert is disabled, but still tracks it", () => {
+      const out = coverageWarnings(
+        { available: false, objects: [] },
+        { ...defaultNotificationPrefs, secretExpiring: false },
+        noCoverageWarned,
+        NOW
+      );
+      expect(out.notifications).toHaveLength(0);
+      expect(out.warned.unavailable).toBe(true);
+    });
+  });
+
+  describe("expiry settings + seen persistence", () => {
+    afterEach(() => vi.unstubAllGlobals());
+
+    it("clamps the expiry-days setting into range, defaulting bad input", () => {
+      expect(clampExpiryDays(0)).toBe(1);
+      expect(clampExpiryDays(10_000)).toBe(365);
+      expect(clampExpiryDays(7.6)).toBe(8);
+      expect(clampExpiryDays(Number.NaN)).toBe(defaultNotificationPrefs.secretExpiryDays);
+    });
+
+    it("round-trips the seen set through localStorage, tolerating bad data", () => {
+      const store: Record<string, string> = {};
+      vi.stubGlobal("localStorage", {
+        getItem: (key: string) => store[key] ?? null,
+        setItem: (key: string, value: string) => {
+          store[key] = value;
+        },
+        removeItem: () => undefined,
+        clear: () => undefined,
+        key: () => null,
+        length: 0
+      });
+      expect(loadExpirySeen().size).toBe(0);
+      saveExpirySeen(new Set(["a", "b"]));
+      expect([...loadExpirySeen()].sort()).toEqual(["a", "b"]);
+      store["honeyhub.notificationExpirySeen.v1"] = "not json";
+      expect(loadExpirySeen().size).toBe(0);
+    });
   });
 });

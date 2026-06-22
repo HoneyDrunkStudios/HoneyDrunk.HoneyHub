@@ -332,6 +332,13 @@ export class WebSocketWireClient implements WireClient {
     await this.dispatch({ kind: "reveal_secret", vault, subscriptionId, name });
   }
 
+  async scanKeyVaultExpiry(subscriptionIds: string[]): Promise<void> {
+    await this.dispatch({
+      kind: "scan_key_vault_expiry",
+      ...(subscriptionIds.length > 0 ? { subscriptionIds } : {})
+    });
+  }
+
   async peekServiceBus(request: {
     namespace: string;
     connectionString?: string;

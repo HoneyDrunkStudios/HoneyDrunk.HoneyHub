@@ -7,6 +7,7 @@ import type {
   DirListing,
   DispatchRunState,
   FileContents,
+  ExpiringObject,
   JobProbe,
   KeyVault,
   PolicyHint,
@@ -34,7 +35,7 @@ const MOCK_TAILNET_ADDRESS = [100, 110, 120, 130].join(".");
 const MOCK_LAN_ADDRESS = [192, 168, 1, 42].join(".");
 
 // mock-only sample Azure ids (scripted offline Key Vault surface; obviously-fake demo data).
-const MOCK_SUBSCRIPTION_DEV = "00000000-0000-0000-0000-0000000000de";
+export const MOCK_SUBSCRIPTION_DEV = "00000000-0000-0000-0000-0000000000de";
 const MOCK_SUBSCRIPTION_PROD = "00000000-0000-0000-0000-0000000000d0";
 const MOCK_SUBSCRIPTION_LOCKED = "00000000-0000-0000-0000-0000000010c0";
 const MOCK_TENANT = "00000000-0000-0000-0000-00000000beef";
@@ -1040,6 +1041,27 @@ export class MockWireClient implements WireClient {
     for (const reveal of queued) {
       this.emitDevice({ kind: "secret_reveal", reveal });
     }
+  }
+
+  async scanKeyVaultExpiry(subscriptionIds: string[]): Promise<void> {
+    // The real host walks every vault's objects via `az`; the mock scripts the objects-with-expiry
+    // for the requested subscriptions (one already expired, some far-future) so the expiry-alert
+    // engine is exercisable offline.
+    const bySubscription: Record<string, ExpiringObject[]> = {
+      [MOCK_SUBSCRIPTION_DEV]: [
+        { vault: "kv-honeydrunk-dev", subscriptionId: MOCK_SUBSCRIPTION_DEV, kind: "secret", name: "db-password", expires: "2026-01-15T00:00:00+00:00" },
+        { vault: "kv-honeydrunk-dev", subscriptionId: MOCK_SUBSCRIPTION_DEV, kind: "secret", name: "api-key", expires: "2030-01-01T00:00:00+00:00" },
+        { vault: "kv-honeydrunk-dev", subscriptionId: MOCK_SUBSCRIPTION_DEV, kind: "certificate", name: "tls-cert", expires: "2026-02-01T00:00:00+00:00" }
+      ],
+      [MOCK_SUBSCRIPTION_PROD]: [
+        { vault: "kv-honeydrunk-prod", subscriptionId: MOCK_SUBSCRIPTION_PROD, kind: "secret", name: "prod-db-password", expires: "2027-12-31T00:00:00+00:00" }
+      ]
+    };
+    const objects = subscriptionIds.flatMap((id) => bySubscription[id] ?? []);
+    this.emitDevice({
+      kind: "key_vault_expiry",
+      expiring: { available: true, subscriptionIds, objects }
+    });
   }
 
   async grafanaSummary(baseUrl: string, token: string): Promise<void> {

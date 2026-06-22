@@ -7,7 +7,8 @@ const KIND_LABEL: Record<AppNotificationKind, string> = {
   work_assigned: "Assigned",
   work_mentioned: "Mentioned",
   pr_review: "Review",
-  dead_letter: "Dead-letter"
+  dead_letter: "Dead-letter",
+  secret_expiring: "Expiring"
 };
 
 export interface NotificationListProps {

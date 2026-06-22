@@ -501,6 +501,13 @@ async fn handle_command(
                 now_rfc3339(),
                 honeyhub_bridge::reveal_secret(&vault, &subscription_id, &name),
             )])),
+            ClientCommand::ScanKeyVaultExpiry { subscription_ids } => {
+                Ok(Some(vec![BridgeEvent::key_vault_expiry(
+                    new_id(),
+                    now_rfc3339(),
+                    honeyhub_bridge::scan_key_vault_expiry(&subscription_ids),
+                )]))
+            }
             ClientCommand::PeekServiceBus {
                 namespace,
                 connection_string,
