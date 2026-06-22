@@ -85,6 +85,19 @@ export function KeyVaultPanel({
     [loadVaults]
   );
 
+  // Reset all expansion + revealed-secret state (used on collapse, and whenever the vault list
+  // reloads, so a previously revealed value can't linger or reappear under a returning vault).
+  const collapse = useCallback(() => {
+    setExpanded(undefined);
+    expandedRef.current = undefined;
+    setObjects(undefined);
+    setObjectsLoading(false);
+    setObjectQuery("");
+    setRevealed({});
+    setRevealError({});
+    setRevealing(undefined);
+  }, []);
+
   useEffect(() => {
     const unsubscribe = client.subscribe((event) => {
       const { payload } = event;
@@ -105,6 +118,9 @@ export function KeyVaultPanel({
         if (subscriptionKey(payload.vaults.subscriptionIds ?? []) !== requestedKey.current) {
           return;
         }
+        // A fresh vault list (selection change / refresh): drop any open expansion + revealed value
+        // so a previously revealed secret can't reappear under a returning vault.
+        collapse();
         setVaultList(payload.vaults);
         setUpdatedAt(Date.now());
         setLoading(false);
@@ -146,7 +162,7 @@ export function KeyVaultPanel({
       }
     });
     return unsubscribe;
-  }, [client, loadVaults]);
+  }, [client, loadVaults, collapse]);
 
   // On activation, (re)read the subscription list; subscriptions change rarely, so no poll.
   const refresh = useCallback(() => {
@@ -163,17 +179,6 @@ export function KeyVaultPanel({
       refresh();
     }
   }, [active, refresh]);
-
-  const collapse = useCallback(() => {
-    setExpanded(undefined);
-    expandedRef.current = undefined;
-    setObjects(undefined);
-    setObjectsLoading(false);
-    setObjectQuery("");
-    setRevealed({});
-    setRevealError({});
-    setRevealing(undefined);
-  }, []);
 
   const toggleExpand = useCallback(
     (vault: KeyVault) => {
@@ -503,9 +508,9 @@ function VaultObjectsView({
               key={`${object.kind}/${object.name}`}
               object={object}
               nowMs={nowMs}
-              revealedValue={revealed[object.name]}
-              revealErrorText={revealError[object.name]}
-              revealing={revealing === object.name}
+              revealedValue={object.kind === "secret" ? revealed[object.name] : undefined}
+              revealErrorText={object.kind === "secret" ? revealError[object.name] : undefined}
+              revealing={object.kind === "secret" && revealing === object.name}
               onReveal={() => onReveal(object.name)}
               onHide={() => onHide(object.name)}
             />

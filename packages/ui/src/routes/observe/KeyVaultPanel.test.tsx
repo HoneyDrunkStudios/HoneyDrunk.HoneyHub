@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, within } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it } from "vitest";
 import { MockWireClient } from "../../wire/mockClient";
 import { KeyVaultPanel } from "./KeyVaultPanel";
@@ -37,6 +37,24 @@ describe("KeyVaultPanel", () => {
     // The disabled secret is tagged.
     const disabledRow = screen.getByText("legacy-token").closest("li") as HTMLElement;
     expect(within(disabledRow).getByText("disabled")).toBeTruthy();
+    // Only secrets are revealable: keys and certificates have no Reveal button.
+    const keyRow = screen.getByText("signing-key").closest("li") as HTMLElement;
+    expect(within(keyRow).queryByRole("button", { name: "Reveal" })).toBeNull();
+    const certRow = screen.getByText("tls-cert").closest("li") as HTMLElement;
+    expect(within(certRow).queryByRole("button", { name: "Reveal" })).toBeNull();
+  });
+
+  it("clears a revealed value when the subscription selection changes", async () => {
+    const client = new MockWireClient();
+    render(<KeyVaultPanel client={client} active />);
+    fireEvent.click(await screen.findByRole("button", { name: /kv-honeydrunk-dev/ }));
+    const secretRow = (await screen.findByText("db-password")).closest("li") as HTMLElement;
+    fireEvent.click(within(secretRow).getByRole("button", { name: "Reveal" }));
+    await screen.findByText("P@ssw0rd-demo-only");
+
+    // Changing the selection reloads the vault list, which must drop the revealed value.
+    fireEvent.click(screen.getByRole("checkbox", { name: /HoneyDrunk Prod/ }));
+    await waitFor(() => expect(screen.queryByText("P@ssw0rd-demo-only")).toBeNull());
   });
 
   it("flags a past-dated secret as expired", async () => {

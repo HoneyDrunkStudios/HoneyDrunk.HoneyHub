@@ -375,7 +375,7 @@ impl VaultObjects {
 /// The result of revealing a single secret's value (the gated "view it" action). The `value` is
 /// sensitive: it rides the local bridge on demand only, is never persisted host-side, and the
 /// cockpit keeps it out of logs and storage.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SecretReveal {
     pub ok: bool,
@@ -386,6 +386,22 @@ pub struct SecretReveal {
     pub name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub value: Option<String>,
+}
+
+// `Debug` is hand-written (not derived) so the plaintext secret `value` can never leak through a
+// `{:?}` of this struct (or of any `BridgeEvent` that embeds it) into a log line; only its presence
+// is shown.
+impl std::fmt::Debug for SecretReveal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SecretReveal")
+            .field("ok", &self.ok)
+            .field("error", &self.error)
+            .field("vault", &self.vault)
+            .field("subscription_id", &self.subscription_id)
+            .field("name", &self.name)
+            .field("value", &self.value.as_ref().map(|_| "<redacted>"))
+            .finish()
+    }
 }
 
 impl SecretReveal {
@@ -568,6 +584,8 @@ pub fn parse_vault_objects(json: &str, kind: VaultObjectKind) -> Vec<VaultObject
                 return None;
             }
             let attributes = row.get("attributes");
+            // `enabled` defaults to true to match Key Vault's own default for the attribute when it
+            // is absent from a row.
             let enabled = attributes
                 .and_then(|a| a.get("enabled"))
                 .and_then(serde_json::Value::as_bool)
@@ -579,7 +597,11 @@ pub fn parse_vault_objects(json: &str, kind: VaultObjectKind) -> Vec<VaultObject
                 expires: attr_instant(attributes, "expires"),
                 created: attr_instant(attributes, "created"),
                 updated: attr_instant(attributes, "updated"),
-                content_type: opt_string(&row, "contentType"),
+                // `contentType` is a secret-only attribute; ignore any stray value on keys/certs.
+                content_type: match kind {
+                    VaultObjectKind::Secret => opt_string(&row, "contentType"),
+                    _ => None,
+                },
             })
         })
         .collect()
@@ -865,6 +887,33 @@ mod tests {
         // Garbage / missing id rows are dropped.
         assert!(parse_vault_objects("not json", VaultObjectKind::Secret).is_empty());
         assert!(parse_vault_objects(r#"[{"noId":1}]"#, VaultObjectKind::Secret).is_empty());
+    }
+
+    #[test]
+    fn secret_reveal_debug_redacts_the_plaintext_value() {
+        let revealed = SecretReveal {
+            ok: true,
+            error: None,
+            vault: "kv".to_string(),
+            subscription_id: "sub".to_string(),
+            name: "db-password".to_string(),
+            value: Some("super-secret-value".to_string()),
+        };
+        let debug = format!("{revealed:?}");
+        // The plaintext never appears via `{:?}`; only its presence is shown.
+        assert!(!debug.contains("super-secret-value"));
+        assert!(debug.contains("<redacted>"));
+        // Non-sensitive fields stay visible for diagnostics.
+        assert!(debug.contains("db-password"));
+    }
+
+    #[test]
+    fn content_type_is_kept_for_secrets_and_dropped_for_keys() {
+        let json = r#"[{"id":"https://kv.vault.azure.net/keys/k","attributes":{"enabled":true},
+                        "contentType":"stray"}]"#;
+        // A stray contentType on a key is ignored (it is a secret-only attribute).
+        let keys = parse_vault_objects(json, VaultObjectKind::Key);
+        assert_eq!(keys[0].content_type, None);
     }
 
     #[test]
