@@ -151,9 +151,12 @@ export function useNotifications(options: Readonly<UseNotificationsOptions>): vo
         expirySeen.current,
         new Date().toISOString()
       );
-      // The returned keys are the full current in-window set, so a renewed object drops out of
-      // `seen` and a later re-entry (new expiry) can alert again.
-      expirySeen.current = new Set(keys);
+      // Union (never replace) so a PARTIAL scan that could not read some vaults this round does not
+      // forget their previously-alerted objects and re-fire them when access returns. A renewed
+      // object still re-alerts because its new expiry yields a new key (the old key just lingers).
+      for (const key of keys) {
+        expirySeen.current.add(key);
+      }
       saveExpirySeen(expirySeen.current);
       fire(notifications);
     };
@@ -192,11 +195,19 @@ export function useNotifications(options: Readonly<UseNotificationsOptions>): vo
 
   // Background Key Vault expiry scan on a long cadence: expiry changes slowly and the scan is a
   // heavy `az` fan-out (every vault's objects), so it runs far less often than the 60s work poll.
-  // Re-arms when the connector toggles or the selected subscriptions change.
-  const expiryKeyDep = options.keyVaultEnabled ? options.keyVaultSubscriptions.join(",") : "";
+  // Only runs when the connector is on AND the expiry alert is enabled (no point scanning for an
+  // alert the operator turned off). The dep sorts the subscription ids so merely reordering the
+  // selection does not re-arm the timer; it re-arms on a real change, connector toggle, or the
+  // alert toggle.
+  const expiryActive = options.keyVaultEnabled && options.prefs.secretExpiring;
+  const expiryKeyDep = expiryActive ? [...options.keyVaultSubscriptions].sort().join(",") : "";
   useEffect(() => {
     const scan = (): void => {
-      if (keyVaultEnabledRef.current && keyVaultSubscriptionsRef.current.length > 0) {
+      if (
+        keyVaultEnabledRef.current &&
+        prefsRef.current.secretExpiring &&
+        keyVaultSubscriptionsRef.current.length > 0
+      ) {
         client.scanKeyVaultExpiry(keyVaultSubscriptionsRef.current).catch(() => undefined);
       }
     };
