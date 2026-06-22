@@ -124,8 +124,13 @@ pub fn list_vaults(subscription_ids: &[String]) -> KeyVaultList {
         return KeyVaultList::unavailable(subscription_ids, "Azure CLI (az) not found on PATH");
     }
 
+    // Bound the fan-out: dedupe + cap the requested ids before spawning a thread + an `az` process
+    // per one. The cockpit only ever sends its (small, unique) selection, but the paired client is
+    // not fully trusted, so a malformed or huge/duplicated list must not exhaust the host.
+    let to_query = bounded_unique(subscription_ids);
+
     let outcomes: Vec<Result<Vec<KeyVault>, String>> = std::thread::scope(|scope| {
-        let handles: Vec<_> = subscription_ids
+        let handles: Vec<_> = to_query
             .iter()
             .map(|sub| scope.spawn(move || vaults_for_subscription(sub)))
             .collect();
@@ -139,7 +144,25 @@ pub fn list_vaults(subscription_ids: &[String]) -> KeyVaultList {
             .collect()
     });
 
+    // Echo the ORIGINAL requested ids (not the deduped/capped set) so the UI's stale-response
+    // guard still correlates a response with the exact selection it asked for.
     merge_vault_outcomes(subscription_ids, outcomes)
+}
+
+/// Cap on how many subscriptions one request fans out to. A real operator account has a handful;
+/// this bounds host work (one thread + one `az` process each) against a malformed/compromised
+/// paired client sending a huge or duplicated list.
+const MAX_SUBSCRIPTIONS: usize = 64;
+
+/// Dedupe (preserving first-seen order) and cap the requested subscription ids before fan-out.
+fn bounded_unique(subscription_ids: &[String]) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    subscription_ids
+        .iter()
+        .filter(|id| seen.insert((*id).clone()))
+        .take(MAX_SUBSCRIPTIONS)
+        .cloned()
+        .collect()
 }
 
 /// Fold the per-subscription read outcomes into one list. Best-effort: keep every subscription
@@ -391,6 +414,28 @@ mod tests {
         );
         assert!(merged.vaults.is_empty());
         assert_eq!(merged.subscription_ids, requested);
+    }
+
+    #[test]
+    fn bounded_unique_dedupes_preserving_order_and_caps() {
+        // Duplicates collapse to first-seen; order preserved.
+        let ids = vec![
+            "b".to_string(),
+            "a".to_string(),
+            "b".to_string(),
+            "c".to_string(),
+            "a".to_string(),
+        ];
+        assert_eq!(
+            bounded_unique(&ids),
+            vec!["b".to_string(), "a".to_string(), "c".to_string()]
+        );
+
+        // A pathological huge list is capped to MAX_SUBSCRIPTIONS.
+        let many: Vec<String> = (0..1000).map(|n| n.to_string()).collect();
+        let bounded = bounded_unique(&many);
+        assert_eq!(bounded.len(), MAX_SUBSCRIPTIONS);
+        assert_eq!(bounded[0], "0");
     }
 
     #[test]

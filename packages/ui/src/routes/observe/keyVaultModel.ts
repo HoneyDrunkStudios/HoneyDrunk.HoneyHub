@@ -6,20 +6,23 @@ import type { AzureSubscription, KeyVault } from "@honeydrunk/honeyhub-types";
 
 const SUBS_STORAGE_KEY = "honeyhub.keyvault.subscriptions.v1";
 
-/** The locally-remembered selected subscription ids (the ones whose vaults we list). */
-export function loadSelectedSubscriptions(): string[] {
+/** The locally-remembered selected subscription ids (the ones whose vaults we list), or
+    `undefined` when nothing has been saved yet. `undefined` (no preference) is kept distinct from
+    `[]` (the user deliberately selected zero subscriptions) so a reload honors an intentional
+    empty selection instead of snapping back to the default. */
+export function loadSelectedSubscriptions(): string[] | undefined {
   try {
     const raw = globalThis.localStorage?.getItem(SUBS_STORAGE_KEY);
     if (raw === null || raw === undefined) {
-      return [];
+      return undefined;
     }
     const parsed: unknown = JSON.parse(raw);
     if (!Array.isArray(parsed)) {
-      return [];
+      return undefined;
     }
     return parsed.filter((value): value is string => typeof value === "string");
   } catch {
-    return [];
+    return undefined;
   }
 }
 
@@ -38,15 +41,23 @@ export function saveSelectedSubscriptions(ids: string[]): void {
  */
 export function initialSelection(
   subscriptions: AzureSubscription[],
-  saved: string[]
+  saved: string[] | undefined
 ): string[] {
   if (subscriptions.length === 0) {
     return [];
   }
-  const existing = new Set(subscriptions.map((subscription) => subscription.id));
-  const remembered = saved.filter((id) => existing.has(id));
-  if (remembered.length > 0) {
-    return remembered;
+  if (saved !== undefined) {
+    // A saved preference is honored, including a deliberate empty selection. Drop ids that no
+    // longer exist; only if a non-empty saved selection has gone entirely stale do we fall
+    // through to the default (rather than showing nothing for a vanished selection).
+    if (saved.length === 0) {
+      return [];
+    }
+    const existing = new Set(subscriptions.map((subscription) => subscription.id));
+    const remembered = saved.filter((id) => existing.has(id));
+    if (remembered.length > 0) {
+      return remembered;
+    }
   }
   const fallback = subscriptions.find((subscription) => subscription.isDefault) ?? subscriptions[0];
   // `fallback` is always defined here (we returned early on an empty list); the guard keeps the

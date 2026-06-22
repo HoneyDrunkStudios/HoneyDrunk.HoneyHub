@@ -24,21 +24,25 @@ describe("keyVaultModel", () => {
   });
 
   describe("initialSelection", () => {
-    it("picks the default subscription on a first run (nothing saved)", () => {
-      expect(initialSelection(subs, [])).toEqual(["sub-prod"]);
+    it("picks the default subscription on a first run (no preference saved)", () => {
+      expect(initialSelection(subs, undefined)).toEqual(["sub-prod"]);
     });
 
     it("falls back to the first subscription when none is default", () => {
       const noDefault = subs.map((sub) => ({ ...sub, isDefault: false }));
-      expect(initialSelection(noDefault, [])).toEqual(["sub-dev"]);
+      expect(initialSelection(noDefault, undefined)).toEqual(["sub-dev"]);
+    });
+
+    it("honors a deliberate empty selection (distinct from no preference)", () => {
+      expect(initialSelection(subs, [])).toEqual([]);
     });
 
     it("keeps the saved selection, dropping ids that no longer exist", () => {
       expect(initialSelection(subs, ["sub-dev", "sub-gone"])).toEqual(["sub-dev"]);
     });
 
-    it("ignores a stale saved selection that matches nothing", () => {
-      // Every saved id is gone → fall back to the default subscription.
+    it("falls back to the default when a non-empty saved selection is entirely stale", () => {
+      // Every saved id is gone → fall back to the default subscription (not a blank panel).
       expect(initialSelection(subs, ["sub-gone"])).toEqual(["sub-prod"]);
     });
 
@@ -86,13 +90,17 @@ describe("keyVaultModel", () => {
         length: 0
       });
 
-      expect(loadSelectedSubscriptions()).toEqual([]);
+      // Nothing saved yet reads as `undefined` (no preference), distinct from a saved `[]`.
+      expect(loadSelectedSubscriptions()).toBeUndefined();
       saveSelectedSubscriptions(["sub-dev", "sub-prod"]);
       expect(loadSelectedSubscriptions()).toEqual(["sub-dev", "sub-prod"]);
+      // A deliberately-empty saved selection round-trips as `[]`, not `undefined`.
+      saveSelectedSubscriptions([]);
+      expect(loadSelectedSubscriptions()).toEqual([]);
 
       // Non-array / non-string entries are rejected, not thrown on.
       store["honeyhub.keyvault.subscriptions.v1"] = '{"not":"an array"}';
-      expect(loadSelectedSubscriptions()).toEqual([]);
+      expect(loadSelectedSubscriptions()).toBeUndefined();
       store["honeyhub.keyvault.subscriptions.v1"] = '["ok", 7, null]';
       expect(loadSelectedSubscriptions()).toEqual(["ok"]);
     });
