@@ -377,16 +377,22 @@ export function expiringNotifications(
 export interface CoverageWarned {
   truncated: boolean;
   partial: boolean;
+  unavailable: boolean;
 }
 
-export const noCoverageWarned: CoverageWarned = { truncated: false, partial: false };
+export const noCoverageWarned: CoverageWarned = {
+  truncated: false,
+  partial: false,
+  unavailable: false
+};
 
 /**
- * Coverage warnings for an expiry scan (too many vaults to scan, or some vaults unreadable). These
- * are separate from the per-object alerts: deduped against `prev` (the last-warned state), they
- * fire on a complete -> incomplete transition and stay quiet while it remains incomplete, and warn
- * again if it recovers and degrades. An unavailable scan is treated as no coverage information (no
- * warning, no transition). Returns the warnings plus the new last-warned state to carry forward.
+ * Coverage warnings for an expiry scan: the whole scan failed (unavailable), too many vaults to
+ * scan (truncated), or some vaults unreadable (partial). These are separate from the per-object
+ * alerts: deduped against `prev` (the last-warned state), they fire on a healthy -> degraded
+ * transition and stay quiet while degraded, and warn again if it recovers and degrades. An
+ * unavailable scan carries no coverage info, so the truncated/partial state resets (and vice
+ * versa). Returns the warnings plus the new last-warned state to carry forward.
  */
 export function coverageWarnings(
   expiring: ExpiringObjects,
@@ -394,13 +400,26 @@ export function coverageWarnings(
   prev: CoverageWarned,
   now: string
 ): { notifications: AppNotification[]; warned: CoverageWarned } {
+  const enabled = isKindEnabled(prefs, "secret_expiring");
+  const notifications: AppNotification[] = [];
   if (!expiring.available) {
-    return { notifications: [], warned: prev };
+    // The whole scan could not run (missing `az`, auth loss, invalid subscriptions, or no readable
+    // vaults). Warn once on the transition to unavailable so the connector does not silently look
+    // healthy while expiry coverage is dead; truncated/partial reset (we have no coverage info).
+    if (enabled && !prev.unavailable) {
+      notifications.push({
+        id: "kv-expiry:unavailable",
+        kind: "secret_expiring",
+        title: "Key Vault expiry scan unavailable",
+        body: "The Key Vault expiry scan could not run; expiring objects may go undetected.",
+        createdAt: now,
+        read: false
+      });
+    }
+    return { notifications, warned: { truncated: false, partial: false, unavailable: true } };
   }
   const truncated = expiring.truncated === true;
   const partial = (expiring.unreadable ?? []).length > 0;
-  const enabled = isKindEnabled(prefs, "secret_expiring");
-  const notifications: AppNotification[] = [];
   if (enabled && truncated && !prev.truncated) {
     notifications.push({
       id: "kv-expiry:truncated",
@@ -421,7 +440,7 @@ export function coverageWarnings(
       read: false
     });
   }
-  return { notifications, warned: { truncated, partial } };
+  return { notifications, warned: { truncated, partial, unavailable: false } };
 }
 
 /** Build the chat-finished notification for a completed run. */

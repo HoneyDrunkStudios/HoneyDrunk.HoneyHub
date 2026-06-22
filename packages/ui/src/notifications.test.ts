@@ -358,16 +358,34 @@ describe("notifications model", () => {
       expect(off.notifications).toHaveLength(0);
     });
 
-    it("treats an unavailable scan as no coverage info: no warning, no transition", () => {
-      const prev = { truncated: true, partial: false };
+    it("warns once on the transition to an unavailable scan, then resets other coverage state", () => {
+      const unavailable: ExpiringObjects = { available: false, objects: [] };
+      // Coming from a truncated state, an unavailable scan warns (a new failure) and clears the
+      // truncated/partial flags, since an unavailable scan carries no coverage info.
+      const first = coverageWarnings(
+        unavailable,
+        defaultNotificationPrefs,
+        { truncated: true, partial: false, unavailable: false },
+        NOW
+      );
+      expect(first.notifications).toHaveLength(1);
+      expect(first.notifications[0]?.body).toMatch(/could not run/i);
+      expect(first.warned).toEqual({ truncated: false, partial: false, unavailable: true });
+
+      // Still unavailable: no repeat.
+      const again = coverageWarnings(unavailable, defaultNotificationPrefs, first.warned, NOW);
+      expect(again.notifications).toHaveLength(0);
+    });
+
+    it("does not warn on an unavailable scan when the alert is disabled, but still tracks it", () => {
       const out = coverageWarnings(
         { available: false, objects: [] },
-        defaultNotificationPrefs,
-        prev,
+        { ...defaultNotificationPrefs, secretExpiring: false },
+        noCoverageWarned,
         NOW
       );
       expect(out.notifications).toHaveLength(0);
-      expect(out.warned).toEqual(prev);
+      expect(out.warned.unavailable).toBe(true);
     });
   });
 
