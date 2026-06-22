@@ -235,6 +235,20 @@ describe("notifications model", () => {
       expect(keys).toHaveLength(2);
     });
 
+    it("tracks in-window keys but suppresses the toast when the alert is disabled", () => {
+      // Suppress-but-track (like dead-letter counts): a disabled alert must still record the keys,
+      // so re-enabling does not backlog objects that came into window while it was off.
+      const snap = expiringSnap([{ name: "soon", expires: inDays(10) }]);
+      const { notifications, keys } = expiringNotifications(
+        snap,
+        { ...defaultNotificationPrefs, secretExpiring: false },
+        new Set(),
+        NOW
+      );
+      expect(notifications).toHaveLength(0);
+      expect(keys).toHaveLength(1);
+    });
+
     it("uses an opaque key + body that never carry the object name", () => {
       const obj = {
         vault: "kv-prod",
