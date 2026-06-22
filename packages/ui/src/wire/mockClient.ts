@@ -10,6 +10,7 @@ import type {
   JobProbe,
   KeyVault,
   PolicyHint,
+  SecretReveal,
   StartRunRequest,
   UsageSignal,
   VaultObject,
@@ -46,6 +47,10 @@ interface MockState {
 export class MockWireClient implements WireClient {
   private readonly handlers = new Set<WireEventHandler>();
   private sequence = 0;
+  // Test hook: when set, `revealSecret` queues responses instead of emitting them, so a test can
+  // simulate a slow/out-of-order reveal and release it later via `flushReveals()`.
+  public deferReveals = false;
+  private deferredReveals: SecretReveal[] = [];
   private readonly runs = new Map<string, MockState>();
   private readonly createdAt = "2026-06-07T12:00:00.000Z";
   // Accumulate the usage the demo emits so `requestUsageSummary` can roll it up the
@@ -1018,17 +1023,23 @@ export class MockWireClient implements WireClient {
   }
 
   async revealSecret(vault: string, subscriptionId: string, name: string): Promise<void> {
-    // The real host shells `az keyvault secret show`; the mock returns an obviously-fake value.
-    const values: Record<string, string> = {
-      "db-password": "P@ssw0rd-demo-only",
-      "api-key": "sk-demo-0000000000",
-      "prod-db-password": "prod-demo-secret",
-      "webhook-secret": "whk-demo-value"
-    };
-    this.emitDevice({
-      kind: "secret_reveal",
-      reveal: { ok: true, vault, subscriptionId, name, value: values[name] ?? "demo-secret-value" }
-    });
+    // The real host shells `az keyvault secret show`; the mock synthesizes an obviously-fake value
+    // from the name (no hard-coded credential literals).
+    const reveal: SecretReveal = { ok: true, vault, subscriptionId, name, value: `demo-value-for-${name}` };
+    if (this.deferReveals) {
+      this.deferredReveals.push(reveal);
+      return;
+    }
+    this.emitDevice({ kind: "secret_reveal", reveal });
+  }
+
+  /** Test hook: release any reveal responses queued while `deferReveals` was set. */
+  flushReveals(): void {
+    const queued = this.deferredReveals;
+    this.deferredReveals = [];
+    for (const reveal of queued) {
+      this.emitDevice({ kind: "secret_reveal", reveal });
+    }
   }
 
   async grafanaSummary(baseUrl: string, token: string): Promise<void> {

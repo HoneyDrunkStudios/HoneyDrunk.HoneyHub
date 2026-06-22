@@ -62,6 +62,10 @@ export function KeyVaultPanel({
   const [revealed, setRevealed] = useState<Record<string, string>>({});
   const [revealError, setRevealError] = useState<Record<string, string>>({});
   const [revealing, setRevealing] = useState<string | undefined>(undefined);
+  // Secret names with a reveal in flight for the CURRENT expansion. Cleared on collapse / reload,
+  // so a reveal response that arrives after the operator collapsed (and maybe re-expanded) the
+  // vault is dropped instead of repopulating the value.
+  const pendingRevealsRef = useRef<Set<string>>(new Set());
 
   const loadVaults = useCallback(
     (ids: string[]) => {
@@ -90,6 +94,7 @@ export function KeyVaultPanel({
   const collapse = useCallback(() => {
     setExpanded(undefined);
     expandedRef.current = undefined;
+    pendingRevealsRef.current.clear();
     setObjects(undefined);
     setObjectsLoading(false);
     setObjectQuery("");
@@ -145,10 +150,14 @@ export function KeyVaultPanel({
         if (
           target === undefined ||
           result.vault !== target.vault ||
-          result.subscriptionId !== target.subscriptionId
+          result.subscriptionId !== target.subscriptionId ||
+          !pendingRevealsRef.current.has(result.name)
         ) {
+          // Not the vault/subscription we have open, or a stale reveal from before a
+          // collapse/reload (its pending key was cleared): drop it.
           return;
         }
+        pendingRevealsRef.current.delete(result.name);
         setRevealing(undefined);
         if (result.ok && result.value !== undefined) {
           const value = result.value;
@@ -189,6 +198,7 @@ export function KeyVaultPanel({
       const target: ExpandedVault = { vault: vault.name, subscriptionId: vault.subscriptionId };
       setExpanded(target);
       expandedRef.current = target;
+      pendingRevealsRef.current.clear();
       setObjects(undefined);
       setObjectQuery("");
       setRevealed({});
@@ -215,6 +225,7 @@ export function KeyVaultPanel({
       if (target === undefined) {
         return;
       }
+      pendingRevealsRef.current.add(name);
       setRevealing(name);
       setRevealError((prev) => {
         const next = { ...prev };
