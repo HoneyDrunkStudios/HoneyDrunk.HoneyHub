@@ -34,6 +34,7 @@ const MOCK_LAN_ADDRESS = [192, 168, 1, 42].join(".");
 // mock-only sample Azure ids (scripted offline Key Vault surface; obviously-fake demo data).
 const MOCK_SUBSCRIPTION_DEV = "00000000-0000-0000-0000-0000000000de";
 const MOCK_SUBSCRIPTION_PROD = "00000000-0000-0000-0000-0000000000d0";
+const MOCK_SUBSCRIPTION_LOCKED = "00000000-0000-0000-0000-0000000010c0";
 const MOCK_TENANT = "00000000-0000-0000-0000-00000000beef";
 
 interface MockState {
@@ -926,6 +927,15 @@ export class MockWireClient implements WireClient {
             isDefault: false,
             tenantId: MOCK_TENANT,
             state: "Enabled"
+          },
+          {
+            // A subscription with no scripted vaults: stands in for one the operator can see but
+            // cannot read, so the offline surface can exercise the partial-failure warning.
+            id: MOCK_SUBSCRIPTION_LOCKED,
+            name: "HoneyDrunk Locked",
+            isDefault: false,
+            tenantId: MOCK_TENANT,
+            state: "Enabled"
           }
         ]
       }
@@ -963,10 +973,20 @@ export class MockWireClient implements WireClient {
         }
       ]
     };
-    const vaults = subscriptionIds.flatMap((id) => bySubscription[id] ?? []);
+    const vaults: KeyVault[] = [];
+    const unreadable: string[] = [];
+    for (const id of subscriptionIds) {
+      const found = bySubscription[id];
+      if (found !== undefined) {
+        vaults.push(...found);
+      } else {
+        // A selected subscription with no scripted vaults stands in for one we can't read.
+        unreadable.push(id);
+      }
+    }
     this.emitDevice({
       kind: "key_vaults",
-      vaults: { available: true, subscriptionIds, vaults }
+      vaults: { available: true, subscriptionIds, unreadable, vaults }
     });
   }
 

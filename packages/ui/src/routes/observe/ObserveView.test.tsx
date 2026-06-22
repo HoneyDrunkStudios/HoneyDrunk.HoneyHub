@@ -207,6 +207,18 @@ describe("ObserveView", () => {
     expect(await screen.findByText("kv-honeydrunk-prod")).toBeTruthy();
   });
 
+  it("warns about a selected subscription it could not read", async () => {
+    stubPrefs('{"keyvault":true}');
+    const client = new MockWireClient();
+    render(<ObserveView client={client} active />);
+
+    await screen.findByText("kv-honeydrunk-dev");
+    // The "Locked" subscription has no vaults the mock can read → a partial-failure warning,
+    // not a silent empty list.
+    fireEvent.click(screen.getByRole("checkbox", { name: /HoneyDrunk Locked/ }));
+    expect(await screen.findByText(/Could not read 1 subscription/)).toBeTruthy();
+  });
+
   it("filters the vault list by name", async () => {
     stubPrefs('{"keyvault":true}');
     const client = new MockWireClient();
