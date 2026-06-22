@@ -324,6 +324,14 @@ export class WebSocketWireClient implements WireClient {
     });
   }
 
+  async listVaultObjects(vault: string, subscriptionId: string): Promise<void> {
+    await this.dispatch({ kind: "list_vault_objects", vault, subscriptionId });
+  }
+
+  async revealSecret(vault: string, subscriptionId: string, name: string): Promise<void> {
+    await this.dispatch({ kind: "reveal_secret", vault, subscriptionId, name });
+  }
+
   async peekServiceBus(request: {
     namespace: string;
     connectionString?: string;

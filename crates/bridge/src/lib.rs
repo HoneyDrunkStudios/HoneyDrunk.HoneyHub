@@ -65,8 +65,9 @@ pub use jobs::{
     snapshot as job_snapshot, JobProbe, JobSnapshot, KnownJob, ProcessInfo, ScheduledTask,
 };
 pub use keyvault::{
-    list_vaults as key_vaults, subscriptions as azure_subscriptions, AzureSubscription,
-    AzureSubscriptionList, KeyVault, KeyVaultList,
+    list_vault_objects as vault_objects, list_vaults as key_vaults, reveal_secret,
+    subscriptions as azure_subscriptions, AzureSubscription, AzureSubscriptionList, KeyVault,
+    KeyVaultList, SecretReveal, VaultObject, VaultObjectKind, VaultObjects,
 };
 pub use network::{reachable_addresses, NetAddress, NetAddressKind, NetworkInfo};
 pub use notify::{

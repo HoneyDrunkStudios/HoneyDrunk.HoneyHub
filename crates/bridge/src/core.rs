@@ -1223,6 +1223,20 @@ fn validate_stream_payload(
                 "a backend stream must not emit device-wide key vault lists",
             ));
         }
+        BridgeEventPayload::VaultObjects { .. } => {
+            // Device-wide, host-synthesized vault-objects listing; never streamed.
+            return Err(BridgeError::new(
+                "event_unexpected_vault_objects",
+                "a backend stream must not emit device-wide vault objects",
+            ));
+        }
+        BridgeEventPayload::SecretReveal { .. } => {
+            // Device-wide, host-synthesized secret reveal; never streamed.
+            return Err(BridgeError::new(
+                "event_unexpected_secret_reveal",
+                "a backend stream must not emit a device-wide secret reveal",
+            ));
+        }
         BridgeEventPayload::GrafanaSummary { .. } => {
             // Device-wide, host-synthesized Grafana summary — never streamed.
             return Err(BridgeError::new(
@@ -2870,6 +2884,31 @@ mod tests {
                 },
             }),
             "event_unexpected_key_vaults"
+        );
+        assert_eq!(
+            err_code(BridgeEventPayload::VaultObjects {
+                objects: crate::keyvault::VaultObjects {
+                    available: true,
+                    error: None,
+                    vault: "kv".to_string(),
+                    subscription_id: "sub".to_string(),
+                    objects: Vec::new(),
+                },
+            }),
+            "event_unexpected_vault_objects"
+        );
+        assert_eq!(
+            err_code(BridgeEventPayload::SecretReveal {
+                reveal: crate::keyvault::SecretReveal {
+                    ok: true,
+                    error: None,
+                    vault: "kv".to_string(),
+                    subscription_id: "sub".to_string(),
+                    name: "db-password".to_string(),
+                    value: Some("s3cr3t".to_string()),
+                },
+            }),
+            "event_unexpected_secret_reveal"
         );
         assert_eq!(
             err_code(BridgeEventPayload::JobSnapshot {

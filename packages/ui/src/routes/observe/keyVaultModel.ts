@@ -2,7 +2,7 @@
 // (persisted locally, like the connector prefs) and name/group/location filtering of the vault
 // list. Kept out of the component so they're unit-testable.
 
-import type { AzureSubscription, KeyVault } from "@honeydrunk/honeyhub-types";
+import type { AzureSubscription, KeyVault, VaultObject } from "@honeydrunk/honeyhub-types";
 
 const SUBS_STORAGE_KEY = "honeyhub.keyvault.subscriptions.v1";
 
@@ -83,4 +83,50 @@ export function filterVaults(vaults: KeyVault[], query: string): KeyVault[] {
       field.toLowerCase().includes(needle)
     )
   );
+}
+
+/** Filter a vault's objects by a case-insensitive match on name or kind. */
+export function filterVaultObjects(objects: VaultObject[], query: string): VaultObject[] {
+  const needle = query.trim().toLowerCase();
+  if (needle.length === 0) {
+    return objects;
+  }
+  return objects.filter(
+    (object) => object.name.toLowerCase().includes(needle) || object.kind.includes(needle)
+  );
+}
+
+/** Parse an `attributes.expires` value (an ISO-8601 string, or a numeric unix-seconds string from
+    the bridge's tolerant path) to epoch milliseconds, or `undefined` when absent/unparseable. */
+export function parseInstantMs(value: string | undefined): number | undefined {
+  if (value === undefined || value.trim() === "") {
+    return undefined;
+  }
+  const trimmed = value.trim();
+  // A pure-integer string is unix seconds (the bridge surfaces a numeric expiry as its digits).
+  if (/^\d+$/.test(trimmed)) {
+    return Number(trimmed) * 1000;
+  }
+  const ms = Date.parse(trimmed);
+  return Number.isNaN(ms) ? undefined : ms;
+}
+
+export type ExpiryState = "none" | "ok" | "soon" | "expired";
+
+/** Number of days within which an upcoming expiry is flagged "soon". */
+export const EXPIRY_SOON_DAYS = 30;
+
+/** Classify an object's expiry relative to `nowMs`, for the expiry badge. `none` = no expiry set. */
+export function expiryState(expires: string | undefined, nowMs: number): ExpiryState {
+  const at = parseInstantMs(expires);
+  if (at === undefined) {
+    return "none";
+  }
+  if (at <= nowMs) {
+    return "expired";
+  }
+  if (at <= nowMs + EXPIRY_SOON_DAYS * 24 * 60 * 60 * 1000) {
+    return "soon";
+  }
+  return "ok";
 }

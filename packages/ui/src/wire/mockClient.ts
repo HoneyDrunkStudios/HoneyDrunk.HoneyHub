@@ -12,6 +12,7 @@ import type {
   PolicyHint,
   StartRunRequest,
   UsageSignal,
+  VaultObject,
   WorkSource
 } from "@honeydrunk/honeyhub-types";
 import {
@@ -987,6 +988,46 @@ export class MockWireClient implements WireClient {
     this.emitDevice({
       kind: "key_vaults",
       vaults: { available: true, subscriptionIds, unreadable, vaults }
+    });
+  }
+
+  async listVaultObjects(vault: string, subscriptionId: string): Promise<void> {
+    // The real host shells `az keyvault {secret,key,certificate} list`; the mock scripts a mix of
+    // objects (one expired, one far-future, one disabled, plus a key and a certificate) so the
+    // surface, expiry badges, and reveal are exercisable offline.
+    const byVault: Record<string, VaultObject[]> = {
+      "kv-honeydrunk-dev": [
+        { name: "db-password", kind: "secret", enabled: true, expires: "2026-01-15T00:00:00+00:00", contentType: "password" },
+        { name: "api-key", kind: "secret", enabled: true, expires: "2030-01-01T00:00:00+00:00" },
+        { name: "legacy-token", kind: "secret", enabled: false },
+        { name: "signing-key", kind: "key", enabled: true, expires: "2030-06-01T00:00:00+00:00" },
+        { name: "tls-cert", kind: "certificate", enabled: true, expires: "2026-02-01T00:00:00+00:00" }
+      ],
+      "kv-automation-dev": [
+        { name: "webhook-secret", kind: "secret", enabled: true }
+      ],
+      "kv-honeydrunk-prod": [
+        { name: "prod-db-password", kind: "secret", enabled: true, expires: "2027-12-31T00:00:00+00:00", contentType: "password" }
+      ]
+    };
+    const objects = byVault[vault] ?? [];
+    this.emitDevice({
+      kind: "vault_objects",
+      objects: { available: true, vault, subscriptionId, objects }
+    });
+  }
+
+  async revealSecret(vault: string, subscriptionId: string, name: string): Promise<void> {
+    // The real host shells `az keyvault secret show`; the mock returns an obviously-fake value.
+    const values: Record<string, string> = {
+      "db-password": "P@ssw0rd-demo-only",
+      "api-key": "sk-demo-0000000000",
+      "prod-db-password": "prod-demo-secret",
+      "webhook-secret": "whk-demo-value"
+    };
+    this.emitDevice({
+      kind: "secret_reveal",
+      reveal: { ok: true, vault, subscriptionId, name, value: values[name] ?? "demo-secret-value" }
     });
   }
 
