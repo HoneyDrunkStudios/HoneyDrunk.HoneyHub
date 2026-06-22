@@ -9,7 +9,7 @@ import type {
 } from "@honeydrunk/honeyhub-types";
 import type { WireClient } from "./wire/client";
 import { osNotify } from "./osNotify";
-import { sameSubscriptions } from "./routes/observe/keyVaultModel";
+import { sameSubscriptions, subscriptionKey } from "./routes/observe/keyVaultModel";
 import {
   chatFinishedNotification,
   coverageWarnings,
@@ -235,7 +235,7 @@ export function useNotifications(options: Readonly<UseNotificationsOptions>): vo
   // subscription ids so merely reordering the selection does not re-arm the timer; it re-arms on a
   // real change or the connector toggle.
   const expiryActive = options.keyVaultEnabled;
-  const expiryKeyDep = expiryActive ? [...options.keyVaultSubscriptions].sort().join(",") : "";
+  const expiryKeyDep = expiryActive ? subscriptionKey(options.keyVaultSubscriptions) : "";
   useEffect(() => {
     const scan = (): void => {
       if (keyVaultEnabledRef.current && keyVaultSubscriptionsRef.current.length > 0) {
