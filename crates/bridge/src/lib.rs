@@ -4,6 +4,7 @@ pub mod adapters;
 pub mod agents;
 pub mod artifact;
 pub mod attachments;
+pub mod azcli;
 pub mod backend_catalog;
 pub mod clock;
 pub mod coaching;
@@ -13,6 +14,7 @@ pub mod fsbrowse;
 pub mod git;
 pub mod grafana;
 pub mod jobs;
+pub mod keyvault;
 pub mod network;
 pub mod notify;
 pub mod pairing;
@@ -61,6 +63,10 @@ pub use git::{
 pub use grafana::{summary as grafana_summary, GrafanaDashboard, GrafanaSummary};
 pub use jobs::{
     snapshot as job_snapshot, JobProbe, JobSnapshot, KnownJob, ProcessInfo, ScheduledTask,
+};
+pub use keyvault::{
+    list_vaults as key_vaults, subscriptions as azure_subscriptions, AzureSubscription,
+    AzureSubscriptionList, KeyVault, KeyVaultList,
 };
 pub use network::{reachable_addresses, NetAddress, NetAddressKind, NetworkInfo};
 pub use notify::{

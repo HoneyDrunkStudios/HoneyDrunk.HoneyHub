@@ -182,4 +182,41 @@ describe("ObserveView", () => {
     render(<ObserveView client={client} active />);
     expect(await screen.findByText(/Not configured/i)).toBeTruthy();
   });
+
+  it("with Key Vault enabled, lists the default subscription's vaults", async () => {
+    stubPrefs('{"keyvault":true}');
+    const client = new MockWireClient();
+    render(<ObserveView client={client} active />);
+
+    // Both subscriptions appear as checkboxes; the default is tagged + pre-selected.
+    expect(await screen.findByRole("checkbox", { name: /HoneyDrunk Dev/ })).toBeTruthy();
+    expect(screen.getByText("default")).toBeTruthy();
+    // The default subscription's vaults are listed; Prod's vault is not (not selected yet).
+    expect(await screen.findByText("kv-honeydrunk-dev")).toBeTruthy();
+    expect(screen.getByText("kv-automation-dev")).toBeTruthy();
+    expect(screen.queryByText("kv-honeydrunk-prod")).toBeNull();
+  });
+
+  it("selecting another subscription lists its vaults too", async () => {
+    stubPrefs('{"keyvault":true}');
+    const client = new MockWireClient();
+    render(<ObserveView client={client} active />);
+
+    await screen.findByText("kv-honeydrunk-dev");
+    fireEvent.click(screen.getByRole("checkbox", { name: /HoneyDrunk Prod/ }));
+    expect(await screen.findByText("kv-honeydrunk-prod")).toBeTruthy();
+  });
+
+  it("filters the vault list by name", async () => {
+    stubPrefs('{"keyvault":true}');
+    const client = new MockWireClient();
+    render(<ObserveView client={client} active />);
+
+    await screen.findByText("kv-automation-dev");
+    fireEvent.change(screen.getByLabelText("Filter Key Vaults"), {
+      target: { value: "automation" }
+    });
+    expect(screen.getByText("kv-automation-dev")).toBeTruthy();
+    expect(screen.queryByText("kv-honeydrunk-dev")).toBeNull();
+  });
 });

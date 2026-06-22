@@ -7,6 +7,7 @@
 //! child environment (never argv, never persisted host-side). Destructive ops are
 //! confirmation-gated in the cockpit (ADR-0094 D5).
 
+use crate::azcli::{resource_group_from_id, run_az};
 use crate::backend_catalog::program_on_path;
 use serde::{Deserialize, Serialize};
 use std::process::Command;
@@ -133,29 +134,6 @@ fn unavailable(error: &str) -> ServiceBusSnapshot {
     }
 }
 
-/// Run `az <args>`; sanitize errors (no subscription / not signed in), never leaking raw
-/// stderr (which can carry subscription ids / resource paths).
-fn run_az(args: &[&str]) -> Result<String, String> {
-    let output = Command::new("az")
-        .args(args)
-        .output()
-        .map_err(|_| "could not run the Azure CLI".to_string())?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).to_lowercase();
-        if stderr.contains("az login")
-            || stderr.contains("not signed in")
-            || stderr.contains("credential")
-        {
-            return Err("Azure CLI is not signed in (run `az login`)".to_string());
-        }
-        if stderr.contains("subscription") {
-            return Err("no Azure subscription selected (run `az account set`)".to_string());
-        }
-        return Err("the Azure CLI returned an error".to_string());
-    }
-    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
-}
-
 /// Parse `az servicebus namespace list -o json` → `(name, resourceGroup, location?)` rows.
 pub fn parse_namespaces(json: &str) -> Vec<(String, String, Option<String>)> {
     let Ok(serde_json::Value::Array(rows)) = serde_json::from_str::<serde_json::Value>(json) else {
@@ -179,17 +157,6 @@ pub fn parse_namespaces(json: &str) -> Vec<(String, String, Option<String>)> {
             Some((name, resource_group, location))
         })
         .collect()
-}
-
-/// Pull the resource group out of an ARM id (`…/resourceGroups/<rg>/…`), case-insensitively.
-fn resource_group_from_id(id: Option<&str>) -> Option<String> {
-    let id = id?;
-    let lower = id.to_lowercase();
-    let marker = "/resourcegroups/";
-    let start = lower.find(marker)? + marker.len();
-    let rest = &id[start..];
-    let end = rest.find('/').unwrap_or(rest.len());
-    Some(rest[..end].to_string())
 }
 
 /// Parse `az servicebus queue list` → queue entities with their message counts.

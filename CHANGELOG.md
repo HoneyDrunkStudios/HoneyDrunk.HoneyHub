@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.19.0] - 2026-06-22
+
+A new opt-in **Azure Key Vault** observability connector (read-only, first slice). Like the other
+Azure connectors it rides your existing `az` sign-in on the bridge host, so the cockpit (desktop or
+paired phone) never holds an Azure credential of its own. (Version tracks: npm + this changelog at
+0.19.0; the Rust crate workspace at 0.25.0; the Tauri app build stays on its own track.)
+
+- **Key Vault connector**: turn it on in Settings, Connectors, then in **Observe** pick which of
+  your Azure subscriptions to look at and see their Key Vaults (name, resource group, location)
+  with name/group/location filtering. Management plane only for now; browsing secret, key, and
+  certificate metadata plus expiry alerts ride the same `az` path in the next slices.
+- Internal: a shared `azcli` helper now backs both the Service Bus and Key Vault connectors
+  (running `az` on the host and sanitizing its errors so subscription ids/paths never leak).
+
 ## [0.18.0] - 2026-06-21
 
 A large control-hub expansion driven by operator dogfooding: a docked chat sidebar with

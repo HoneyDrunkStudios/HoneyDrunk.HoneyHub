@@ -43,6 +43,8 @@ class FakeClient implements WireClient {
   async listNetwork(): Promise<void> {}
   async listWork(): Promise<void> {}
   async listServiceBus(): Promise<void> {}
+  async listAzureSubscriptions(): Promise<void> {}
+  async listKeyVaults(): Promise<void> {}
   async peekServiceBus(): Promise<void> {}
   async resubmitDeadLetter(): Promise<void> {}
   async purgeServiceBus(): Promise<void> {}

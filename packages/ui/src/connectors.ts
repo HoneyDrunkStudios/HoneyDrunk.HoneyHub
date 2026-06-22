@@ -60,6 +60,14 @@ export const KNOWN_CONNECTORS: ConnectorDef[] = [
     authNote: "Uses your Azure CLI sign-in (az). No connection string stored."
   },
   {
+    id: "keyvault",
+    label: "Azure Key Vault",
+    category: "observability",
+    status: "available",
+    description: "Your Key Vaults across the subscriptions you pick.",
+    authNote: "Uses your Azure CLI sign-in (az). No secrets stored."
+  },
+  {
     id: "grafana",
     label: "Grafana (traces / metrics / logs)",
     category: "observability",

@@ -81,6 +81,12 @@ export interface WireClient {
   /** Snapshot Azure Service Bus (namespaces + queue/subscription counts). The answer arrives
       as a `service_bus_snapshot` event via `subscribe`. */
   listServiceBus(): Promise<void>;
+  /** List the operator's Azure subscriptions (the Key Vault connector's subscription picker).
+      The answer arrives as an `azure_subscriptions` event via `subscribe`. */
+  listAzureSubscriptions(): Promise<void>;
+  /** Snapshot the Key Vaults across the given subscription ids. The answer arrives as a
+      `key_vaults` event via `subscribe`. */
+  listKeyVaults(subscriptionIds: string[]): Promise<void>;
   /** Non-destructively peek messages from a Service Bus queue (or topic subscription). The
       answer arrives as a `service_bus_peek` event via `subscribe`. */
   peekServiceBus(request: {

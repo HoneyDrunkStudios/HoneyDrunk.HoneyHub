@@ -1209,6 +1209,20 @@ fn validate_stream_payload(
                 "a backend stream must not emit device-wide service bus management results",
             ));
         }
+        BridgeEventPayload::AzureSubscriptions { .. } => {
+            // Device-wide, host-synthesized Azure subscription list; never streamed.
+            return Err(BridgeError::new(
+                "event_unexpected_azure_subscriptions",
+                "a backend stream must not emit device-wide azure subscriptions",
+            ));
+        }
+        BridgeEventPayload::KeyVaults { .. } => {
+            // Device-wide, host-synthesized Key Vault list; never streamed.
+            return Err(BridgeError::new(
+                "event_unexpected_key_vaults",
+                "a backend stream must not emit device-wide key vault lists",
+            ));
+        }
         BridgeEventPayload::GrafanaSummary { .. } => {
             // Device-wide, host-synthesized Grafana summary — never streamed.
             return Err(BridgeError::new(
