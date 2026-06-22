@@ -571,6 +571,9 @@ export interface KeyVaultList {
   available: boolean;
   /** A short, non-leaking hint when unavailable (no `az` / not signed in). */
   error?: string;
+  /** Echoes the requested subscription ids, so the UI can ignore a stale response that no
+      longer matches the current selection (out-of-order responses). */
+  subscriptionIds?: string[];
   vaults: KeyVault[];
 }
 

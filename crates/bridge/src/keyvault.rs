@@ -59,22 +59,36 @@ pub struct KeyVault {
     pub uri: Option<String>,
 }
 
-/// The vaults across the selected subscriptions, with an honest unavailable state.
+/// The vaults across the selected subscriptions, with an honest unavailable state. `requested`
+/// echoes the subscription ids the cockpit asked for, so the UI can ignore a stale response that
+/// no longer matches the current selection (out-of-order responses).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct KeyVaultList {
     pub available: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub subscription_ids: Vec<String>,
     pub vaults: Vec<KeyVault>,
 }
 
 impl KeyVaultList {
-    fn unavailable(error: &str) -> Self {
+    fn unavailable(requested: &[String], error: &str) -> Self {
         Self {
             available: false,
             error: Some(error.to_string()),
+            subscription_ids: requested.to_vec(),
             vaults: Vec::new(),
+        }
+    }
+
+    fn ok(requested: &[String], vaults: Vec<KeyVault>) -> Self {
+        Self {
+            available: true,
+            error: None,
+            subscription_ids: requested.to_vec(),
+            vaults,
         }
     }
 }
@@ -104,20 +118,16 @@ pub fn subscriptions() -> AzureSubscriptionList {
 pub fn list_vaults(subscription_ids: &[String]) -> KeyVaultList {
     if subscription_ids.is_empty() {
         // Nothing selected = nothing to query; an available, empty list (needs no `az`).
-        return KeyVaultList {
-            available: true,
-            error: None,
-            vaults: Vec::new(),
-        };
+        return KeyVaultList::ok(subscription_ids, Vec::new());
     }
     if !program_on_path("az") {
-        return KeyVaultList::unavailable("Azure CLI (az) not found on PATH");
+        return KeyVaultList::unavailable(subscription_ids, "Azure CLI (az) not found on PATH");
     }
 
     let outcomes: Vec<Result<Vec<KeyVault>, String>> = std::thread::scope(|scope| {
         let handles: Vec<_> = subscription_ids
             .iter()
-            .map(|sub| scope.spawn(|| vaults_for_subscription(sub)))
+            .map(|sub| scope.spawn(move || vaults_for_subscription(sub)))
             .collect();
         handles
             .into_iter()
@@ -129,6 +139,16 @@ pub fn list_vaults(subscription_ids: &[String]) -> KeyVaultList {
             .collect()
     });
 
+    merge_vault_outcomes(subscription_ids, outcomes)
+}
+
+/// Fold the per-subscription read outcomes into one list. Best-effort: keep every subscription
+/// that succeeded; if *none* did, surface the first error so the cockpit shows "not signed in"
+/// rather than a false "no vaults". Pure (no `az`), so the aggregation behavior is unit-tested.
+fn merge_vault_outcomes(
+    subscription_ids: &[String],
+    outcomes: Vec<Result<Vec<KeyVault>, String>>,
+) -> KeyVaultList {
     let mut vaults = Vec::new();
     let mut first_error: Option<String> = None;
     let mut any_ok = false;
@@ -148,14 +168,11 @@ pub fn list_vaults(subscription_ids: &[String]) -> KeyVaultList {
 
     if !any_ok {
         return KeyVaultList::unavailable(
+            subscription_ids,
             &first_error.unwrap_or_else(|| "could not read Key Vaults".to_string()),
         );
     }
-    KeyVaultList {
-        available: true,
-        error: None,
-        vaults,
-    }
+    KeyVaultList::ok(subscription_ids, vaults)
 }
 
 /// Read one subscription's vaults. `Err` means that subscription could not be read (skipped
@@ -312,5 +329,75 @@ mod tests {
         assert!(list.available);
         assert!(list.vaults.is_empty());
         assert_eq!(list.error, None);
+        assert!(list.subscription_ids.is_empty());
+    }
+
+    fn vault(name: &str, sub: &str) -> KeyVault {
+        KeyVault {
+            name: name.to_string(),
+            resource_group: "rg".to_string(),
+            location: None,
+            subscription_id: sub.to_string(),
+            uri: None,
+        }
+    }
+
+    #[test]
+    fn merge_outcomes_aggregates_all_successful_subscriptions() {
+        let requested = vec!["a".to_string(), "b".to_string()];
+        let merged = merge_vault_outcomes(
+            &requested,
+            vec![Ok(vec![vault("kv1", "a")]), Ok(vec![vault("kv2", "b")])],
+        );
+        assert!(merged.available);
+        assert_eq!(merged.error, None);
+        assert_eq!(merged.vaults.len(), 2);
+        // The requested set is echoed for the UI's stale-response guard.
+        assert_eq!(merged.subscription_ids, requested);
+    }
+
+    #[test]
+    fn merge_outcomes_keeps_partial_success_and_does_not_error() {
+        let requested = vec!["a".to_string(), "b".to_string()];
+        let merged = merge_vault_outcomes(
+            &requested,
+            vec![
+                Ok(vec![vault("kv1", "a")]),
+                Err("no access to subscription b".to_string()),
+            ],
+        );
+        // One subscription failed, one succeeded: best-effort keeps the vaults we could read.
+        assert!(merged.available);
+        assert_eq!(merged.error, None);
+        assert_eq!(merged.vaults.len(), 1);
+        assert_eq!(merged.vaults[0].name, "kv1");
+    }
+
+    #[test]
+    fn merge_outcomes_surfaces_first_error_when_all_fail() {
+        let requested = vec!["a".to_string(), "b".to_string()];
+        let merged = merge_vault_outcomes(
+            &requested,
+            vec![
+                Err("Azure CLI is not signed in (run `az login`)".to_string()),
+                Err("second error".to_string()),
+            ],
+        );
+        // Every subscription failed: unavailable, surfacing the FIRST error (not "no vaults").
+        assert!(!merged.available);
+        assert_eq!(
+            merged.error.as_deref(),
+            Some("Azure CLI is not signed in (run `az login`)")
+        );
+        assert!(merged.vaults.is_empty());
+        assert_eq!(merged.subscription_ids, requested);
+    }
+
+    #[test]
+    fn merge_outcomes_with_empty_outcomes_is_unavailable() {
+        // Defensive: no outcomes at all (e.g. a join folding) is treated as all-fail.
+        let merged = merge_vault_outcomes(&["a".to_string()], Vec::new());
+        assert!(!merged.available);
+        assert_eq!(merged.error.as_deref(), Some("could not read Key Vaults"));
     }
 }

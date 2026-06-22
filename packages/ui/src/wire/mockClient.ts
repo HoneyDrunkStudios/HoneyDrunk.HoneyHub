@@ -966,7 +966,7 @@ export class MockWireClient implements WireClient {
     const vaults = subscriptionIds.flatMap((id) => bySubscription[id] ?? []);
     this.emitDevice({
       kind: "key_vaults",
-      vaults: { available: true, vaults }
+      vaults: { available: true, subscriptionIds, vaults }
     });
   }
 

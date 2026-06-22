@@ -4,7 +4,8 @@ import {
   filterVaults,
   initialSelection,
   loadSelectedSubscriptions,
-  saveSelectedSubscriptions
+  saveSelectedSubscriptions,
+  subscriptionKey
 } from "./keyVaultModel";
 
 const subs: AzureSubscription[] = [
@@ -43,6 +44,17 @@ describe("keyVaultModel", () => {
 
     it("returns empty when there are no subscriptions", () => {
       expect(initialSelection([], ["sub-dev"])).toEqual([]);
+    });
+  });
+
+  describe("subscriptionKey", () => {
+    it("is order-insensitive so a reordered selection matches its response", () => {
+      expect(subscriptionKey(["b", "a"])).toBe(subscriptionKey(["a", "b"]));
+    });
+
+    it("distinguishes different selections (stale response detection)", () => {
+      expect(subscriptionKey(["a"])).not.toBe(subscriptionKey(["a", "b"]));
+      expect(subscriptionKey([])).toBe("");
     });
   });
 

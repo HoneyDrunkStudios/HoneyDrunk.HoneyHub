@@ -54,6 +54,13 @@ export function initialSelection(
   return fallback === undefined ? [] : [fallback.id];
 }
 
+/** A selection-independent key for a set of subscription ids (order-insensitive), used to match
+    a `key_vaults` response against the current selection so a stale/out-of-order response for a
+    previous selection is ignored. */
+export function subscriptionKey(ids: readonly string[]): string {
+  return [...ids].sort((a, b) => a.localeCompare(b)).join(",");
+}
+
 /** Filter vaults by a case-insensitive match on name, resource group, or location. */
 export function filterVaults(vaults: KeyVault[], query: string): KeyVault[] {
   const needle = query.trim().toLowerCase();

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactElement } from "react";
 import type {
   AzureSubscription,
@@ -25,7 +25,8 @@ import {
   filterVaults,
   initialSelection,
   loadSelectedSubscriptions,
-  saveSelectedSubscriptions
+  saveSelectedSubscriptions,
+  subscriptionKey
 } from "./keyVaultModel";
 
 export interface ObserveViewProps {
@@ -126,9 +127,13 @@ function KeyVaultPanel({
   const [query, setQuery] = useState("");
   const [updatedAt, setUpdatedAt] = useState<number | undefined>(undefined);
   const now = useRelativeNow(active);
+  // The key of the most-recently-requested subscription set, so a stale/out-of-order `key_vaults`
+  // response for a previous selection is ignored rather than clobbering the current list.
+  const requestedKey = useRef<string>("");
 
   const loadVaults = useCallback(
     (ids: string[]) => {
+      requestedKey.current = subscriptionKey(ids);
       setLoading(true);
       client.listKeyVaults(ids).catch(() => {
         setError("could not read Key Vaults");
@@ -165,6 +170,11 @@ function KeyVaultPanel({
           setLoading(false);
         }
       } else if (payload.kind === "key_vaults") {
+        // Ignore a response whose echoed subscription set no longer matches the current request
+        // (a stale, out-of-order answer for a previous selection).
+        if (subscriptionKey(payload.vaults.subscriptionIds ?? []) !== requestedKey.current) {
+          return;
+        }
         setVaultList(payload.vaults);
         setUpdatedAt(Date.now());
         setLoading(false);

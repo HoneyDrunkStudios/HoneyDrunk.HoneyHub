@@ -2864,6 +2864,7 @@ mod tests {
                 vaults: crate::keyvault::KeyVaultList {
                     available: true,
                     error: None,
+                    subscription_ids: Vec::new(),
                     vaults: Vec::new(),
                 },
             }),
