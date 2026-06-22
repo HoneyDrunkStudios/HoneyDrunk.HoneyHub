@@ -670,6 +670,11 @@ pub struct ExpiringObjects {
     pub available: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// True when the account has more vaults than the scan cap, so coverage is incomplete. The
+    /// cockpit surfaces this so an operator with many vaults is not misled into thinking "no
+    /// alert" means "nothing expiring".
+    #[serde(default)]
+    pub truncated: bool,
     pub objects: Vec<ExpiringObject>,
 }
 
@@ -678,6 +683,7 @@ impl ExpiringObjects {
         Self {
             available: false,
             error: Some(error.to_string()),
+            truncated: false,
             objects: Vec::new(),
         }
     }
@@ -703,13 +709,15 @@ pub fn scan_expiring(subscription_ids: &[String]) -> ExpiringObjects {
     }
 
     let had_vaults = !vaults.vaults.is_empty();
+    // The account has more vaults than we will walk this scan: coverage is incomplete.
+    let truncated = vaults.vaults.len() > MAX_SCAN_VAULTS;
     let listings: Vec<VaultObjects> = vaults
         .vaults
         .iter()
         .take(MAX_SCAN_VAULTS)
         .map(|vault| list_vault_objects(&vault.name, &vault.subscription_id))
         .collect();
-    aggregate_expiring(had_vaults, listings)
+    aggregate_expiring(had_vaults, truncated, listings)
 }
 
 /// Fold per-vault listings into the expiring set: keep every object that carries an `expires`,
@@ -717,7 +725,11 @@ pub fn scan_expiring(subscription_ids: &[String]) -> ExpiringObjects {
 /// of their listings were readable (e.g. a transient data-plane access loss), report unavailable
 /// rather than a false "nothing expiring", so the cockpit keeps its prior alerted-set instead of
 /// resetting it and re-firing on restore. Pure (no `az`), so the aggregation is unit-tested.
-fn aggregate_expiring(had_vaults: bool, listings: Vec<VaultObjects>) -> ExpiringObjects {
+fn aggregate_expiring(
+    had_vaults: bool,
+    truncated: bool,
+    listings: Vec<VaultObjects>,
+) -> ExpiringObjects {
     let mut objects = Vec::new();
     let mut any_vault_read = false;
     for listing in listings {
@@ -746,6 +758,7 @@ fn aggregate_expiring(had_vaults: bool, listings: Vec<VaultObjects>) -> Expiring
     ExpiringObjects {
         available: true,
         error: None,
+        truncated,
         objects,
     }
 }
@@ -1135,7 +1148,7 @@ mod tests {
                 vec![object_with_expiry("k", Some("2026-08-01T00:00:00+00:00"))],
             ),
         ];
-        let result = aggregate_expiring(true, listings);
+        let result = aggregate_expiring(true, false, listings);
         assert!(result.available);
         // Only objects WITH an expiry are kept, tagged with their vault + subscription.
         assert_eq!(result.objects.len(), 2);
@@ -1157,7 +1170,7 @@ mod tests {
             ),
             listing("kv-b", "sub-1", false, Vec::new()),
         ];
-        let result = aggregate_expiring(true, listings);
+        let result = aggregate_expiring(true, false, listings);
         assert!(result.available);
         assert_eq!(result.objects.len(), 1);
     }
@@ -1169,7 +1182,7 @@ mod tests {
             listing("kv-a", "sub-1", false, Vec::new()),
             listing("kv-b", "sub-1", false, Vec::new()),
         ];
-        let result = aggregate_expiring(true, listings);
+        let result = aggregate_expiring(true, false, listings);
         assert!(!result.available);
         assert_eq!(
             result.error.as_deref(),
@@ -1179,9 +1192,24 @@ mod tests {
 
     #[test]
     fn aggregate_expiring_with_no_vaults_is_available_and_empty() {
-        let result = aggregate_expiring(false, Vec::new());
+        let result = aggregate_expiring(false, false, Vec::new());
         assert!(result.available);
         assert!(result.objects.is_empty());
         assert_eq!(result.error, None);
+        assert!(!result.truncated);
+    }
+
+    #[test]
+    fn aggregate_expiring_propagates_the_truncated_flag() {
+        let listings = vec![listing(
+            "kv-a",
+            "sub-1",
+            true,
+            vec![object_with_expiry("x", Some("2026-07-01T00:00:00+00:00"))],
+        )];
+        let result = aggregate_expiring(true, true, listings);
+        assert!(result.available);
+        assert!(result.truncated);
+        assert_eq!(result.objects.len(), 1);
     }
 }

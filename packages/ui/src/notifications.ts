@@ -340,6 +340,23 @@ export function expiringNotifications(
   const windowMs = clampExpiryDays(prefs.secretExpiryDays) * 24 * 60 * 60 * 1000;
   const keys: string[] = [];
   const notifications: AppNotification[] = [];
+
+  // Incomplete coverage (more vaults than the scan cap): tell the operator once, so a missing
+  // alert is not mistaken for "nothing expiring". Deduped via a sentinel key in the seen-set.
+  if (expiring.truncated) {
+    const truncationKey = "kv-expiry-truncated";
+    keys.push(truncationKey);
+    if (!seen.has(truncationKey) && isKindEnabled(prefs, "secret_expiring")) {
+      notifications.push({
+        id: "kv-expiry:truncated",
+        kind: "secret_expiring",
+        title: "Key Vault expiry scan incomplete",
+        body: "You have more Key Vaults than the expiry scan checks; some may not be covered.",
+        createdAt: now,
+        read: false
+      });
+    }
+  }
   for (const object of expiring.objects) {
     const at = parseInstantMs(object.expires);
     if (at === undefined || at > nowMs + windowMs) {

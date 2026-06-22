@@ -276,6 +276,17 @@ describe("notifications model", () => {
       expect(expiringNotifications(snap, tight, new Set(), NOW).notifications).toHaveLength(0);
     });
 
+    it("warns once when the scan is truncated (incomplete coverage)", () => {
+      const snap: ExpiringObjects = { available: true, truncated: true, objects: [] };
+      const first = expiringNotifications(snap, defaultNotificationPrefs, new Set(), NOW);
+      expect(first.notifications).toHaveLength(1);
+      expect(first.notifications[0]?.body).toMatch(/more Key Vaults/i);
+      expect(first.keys).toContain("kv-expiry-truncated");
+      // Deduped: once the sentinel is in seen, it does not re-warn.
+      const again = expiringNotifications(snap, defaultNotificationPrefs, new Set(first.keys), NOW);
+      expect(again.notifications).toHaveLength(0);
+    });
+
     it("leaves the prior seen untouched on an unavailable scan or an unparseable clock", () => {
       const seen = new Set(["k1", "k2"]);
       const unavailable = expiringNotifications(

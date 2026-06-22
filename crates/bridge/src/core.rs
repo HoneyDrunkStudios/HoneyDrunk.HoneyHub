@@ -2922,6 +2922,7 @@ mod tests {
                 expiring: crate::keyvault::ExpiringObjects {
                     available: true,
                     error: None,
+                    truncated: false,
                     objects: Vec::new(),
                 },
             }),
