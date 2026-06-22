@@ -299,14 +299,17 @@ export function saveExpirySeen(seen: ReadonlySet<string>): void {
   }
 }
 
-/** A small deterministic FNV-1a hash to hex. */
+/** A deterministic 64-bit FNV-1a hash to hex. 64 bits (not 32) so a collision between two distinct
+    expiring objects, which would permanently suppress one object's alert, is vanishingly unlikely
+    even for large accounts, while still never persisting the object name. */
 function hashString(input: string): string {
-  let hash = 0x811c9dc5;
+  const mask = 0xffff_ffff_ffff_ffffn;
+  const prime = 0x0000_0100_0000_01b3n;
+  let hash = 0xcbf2_9ce4_8422_2325n;
   for (let i = 0; i < input.length; i += 1) {
-    hash ^= input.charCodeAt(i);
-    hash = Math.imul(hash, 0x0100_0193);
+    hash = ((hash ^ BigInt(input.charCodeAt(i))) * prime) & mask;
   }
-  return (hash >>> 0).toString(16).padStart(8, "0");
+  return hash.toString(16).padStart(16, "0");
 }
 
 /** A stable, OPAQUE key for an expiring object (a hash, not the identifiers). It both de-dupes

@@ -8,6 +8,7 @@ import {
   initialSelection,
   loadSelectedSubscriptions,
   parseInstantMs,
+  sameSubscriptions,
   saveSelectedSubscriptions,
   subscriptionKey
 } from "./keyVaultModel";
@@ -63,6 +64,15 @@ describe("keyVaultModel", () => {
     it("distinguishes different selections (stale response detection)", () => {
       expect(subscriptionKey(["a"])).not.toBe(subscriptionKey(["a", "b"]));
       expect(subscriptionKey([])).toBe("");
+    });
+  });
+
+  describe("sameSubscriptions", () => {
+    it("matches the same set regardless of order, and rejects a changed set", () => {
+      expect(sameSubscriptions(["a", "b"], ["b", "a"])).toBe(true);
+      expect(sameSubscriptions([], [])).toBe(true);
+      expect(sameSubscriptions(["a"], ["a", "b"])).toBe(false);
+      expect(sameSubscriptions(["a", "b"], ["a", "c"])).toBe(false);
     });
   });
 

@@ -9,6 +9,7 @@ import type {
 } from "@honeydrunk/honeyhub-types";
 import type { WireClient } from "./wire/client";
 import { osNotify } from "./osNotify";
+import { sameSubscriptions } from "./routes/observe/keyVaultModel";
 import {
   chatFinishedNotification,
   coverageWarnings,
@@ -156,17 +157,17 @@ export function useNotifications(options: Readonly<UseNotificationsOptions>): vo
       if (!keyVaultEnabledRef.current || !prefsRef.current.secretExpiring) {
         return;
       }
-      // Filter to the CURRENTLY-selected subscriptions, so a scan that resolves after the selection
-      // changed cannot alert for objects in a since-deselected subscription.
-      const current = new Set(keyVaultSubscriptionsRef.current);
-      const scoped: ExpiringObjects = {
-        ...expiring,
-        objects: expiring.objects.filter((object) => current.has(object.subscriptionId))
-      };
+      // Discard the whole result (objects AND coverage metadata) if the subscriptions it covered no
+      // longer match the current selection: a slow scan can resolve after the operator re-selects,
+      // and a stale result describes a prior view, so neither its alerts nor its "scan incomplete"
+      // warnings apply now.
+      if (!sameSubscriptions(expiring.subscriptionIds ?? [], keyVaultSubscriptionsRef.current)) {
+        return;
+      }
       const now = new Date().toISOString();
 
       const { notifications, keys } = expiringNotifications(
-        scoped,
+        expiring,
         prefsRef.current,
         expirySeen.current,
         now
@@ -182,7 +183,7 @@ export function useNotifications(options: Readonly<UseNotificationsOptions>): vo
 
       // Coverage warnings are separate + transition-based (session memory), so they re-warn if
       // coverage degrades again rather than being suppressed forever.
-      const coverage = coverageWarnings(scoped, prefsRef.current, coverageWarned.current, now);
+      const coverage = coverageWarnings(expiring, prefsRef.current, coverageWarned.current, now);
       coverageWarned.current = coverage.warned;
       fire(coverage.notifications);
     };

@@ -1058,7 +1058,10 @@ export class MockWireClient implements WireClient {
       ]
     };
     const objects = subscriptionIds.flatMap((id) => bySubscription[id] ?? []);
-    this.emitDevice({ kind: "key_vault_expiry", expiring: { available: true, objects } });
+    this.emitDevice({
+      kind: "key_vault_expiry",
+      expiring: { available: true, subscriptionIds, objects }
+    });
   }
 
   async grafanaSummary(baseUrl: string, token: string): Promise<void> {

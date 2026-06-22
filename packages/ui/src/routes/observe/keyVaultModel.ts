@@ -78,6 +78,12 @@ export function subscriptionKey(ids: readonly string[]): string {
   return [...ids].sort((a, b) => a.localeCompare(b)).join(",");
 }
 
+/** Whether two subscription selections are the same set (order-insensitive). Used to discard a
+    stale Key Vault expiry scan whose selection changed while it was in flight. */
+export function sameSubscriptions(a: readonly string[], b: readonly string[]): boolean {
+  return subscriptionKey(a) === subscriptionKey(b);
+}
+
 /** Filter vaults by a case-insensitive match on name, resource group, or location. */
 export function filterVaults(vaults: KeyVault[], query: string): KeyVault[] {
   const needle = query.trim().toLowerCase();

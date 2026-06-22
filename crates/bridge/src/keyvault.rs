@@ -670,6 +670,11 @@ pub struct ExpiringObjects {
     pub available: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// The subscriptions this scan covered (echoed from the request). The cockpit compares these
+    /// against the currently-selected subscriptions and discards a stale result whose selection
+    /// has since changed, so neither objects nor coverage warnings leak from a prior selection.
+    #[serde(default)]
+    pub subscription_ids: Vec<String>,
     /// True when the account has more vaults than the scan cap, so coverage is incomplete. The
     /// cockpit surfaces this so an operator with many vaults is not misled into thinking "no
     /// alert" means "nothing expiring".
@@ -687,6 +692,7 @@ impl ExpiringObjects {
         Self {
             available: false,
             error: Some(error.to_string()),
+            subscription_ids: Vec::new(),
             truncated: false,
             unreadable: Vec::new(),
             objects: Vec::new(),
@@ -704,6 +710,14 @@ const MAX_SCAN_VAULTS: usize = 100;
 /// be read is simply skipped. Returns only objects with an `expires` set; the UI does the
 /// threshold + clock math. Heavy (many `az` calls), so the caller polls it on a long cadence.
 pub fn scan_expiring(subscription_ids: &[String]) -> ExpiringObjects {
+    // Echo the scanned subscriptions on every return path, so the cockpit can discard a result
+    // whose selection has since changed (the scan is slow; the selection can move under it).
+    let mut result = scan_expiring_inner(subscription_ids);
+    result.subscription_ids = subscription_ids.to_vec();
+    result
+}
+
+fn scan_expiring_inner(subscription_ids: &[String]) -> ExpiringObjects {
     let vaults = list_vaults(subscription_ids);
     if !vaults.available {
         return ExpiringObjects::unavailable(
@@ -768,6 +782,8 @@ fn aggregate_expiring(
     ExpiringObjects {
         available: true,
         error: None,
+        // The public `scan_expiring` fills this in from the request on every path.
+        subscription_ids: Vec::new(),
         truncated,
         unreadable,
         objects,
@@ -1112,6 +1128,16 @@ mod tests {
         assert!(scan.available);
         assert!(scan.objects.is_empty());
         assert_eq!(scan.error, None);
+        assert!(scan.subscription_ids.is_empty());
+    }
+
+    #[test]
+    fn scan_expiring_echoes_the_requested_subscriptions() {
+        // A malformed subscription id is rejected before any `az` call (so this is offline). The
+        // scan still echoes the requested set on every path, so the UI can detect a since-changed
+        // selection regardless of the scan's availability.
+        let scan = scan_expiring(&["not-a-guid".to_string()]);
+        assert_eq!(scan.subscription_ids, vec!["not-a-guid".to_string()]);
     }
 
     fn object_with_expiry(name: &str, expires: Option<&str>) -> VaultObject {
