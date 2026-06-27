@@ -19,6 +19,10 @@ export interface RunSummary {
   needsInput: boolean;
   /** Count of artifacts (PRs/branches/files) the run has produced. */
   artifacts: number;
+  /** The workspace/repo path the run launched against, when known at launch. Lets the
+      Groups surface attribute a run to the repo (and thus the branch) it is working in.
+      Unknown for runs we only learned about from the event stream. */
+  workspaceRoot?: string | undefined;
   updatedAt: string;
 }
 
@@ -33,6 +37,7 @@ export function registerRun(
     backend: AgentBackend;
     task: string;
     model?: string;
+    workspaceRoot?: string;
     createdAt: string;
   }
 ): RunsState {
@@ -50,6 +55,10 @@ export function registerRun(
       totalTokens: existing?.totalTokens ?? 0,
       needsInput: existing?.needsInput ?? false,
       artifacts: existing?.artifacts ?? 0,
+      workspaceRoot:
+        init.workspaceRoot !== undefined && init.workspaceRoot.length > 0
+          ? init.workspaceRoot
+          : existing?.workspaceRoot,
       updatedAt: init.createdAt
     }
   };

@@ -28,6 +28,7 @@ import {
   registerRun,
   type RunsState
 } from "./routes/runs/runsModel";
+import { GroupsView } from "./routes/groups/GroupsView";
 import { GoalsView } from "./routes/goals/GoalsView";
 import { GoalOrchestrator } from "./routes/goals/goalOrchestrator";
 import { orderGoals, type GoalsState } from "./routes/goals/goalsModel";
@@ -61,6 +62,7 @@ type View =
   | "hub"
   | "run"
   | "runs"
+  | "groups"
   | "goals"
   | "plan"
   | "work"
@@ -87,6 +89,7 @@ const PRIMARY_NAV: NavItem[] = [
   { view: "hub", label: "Hub", icon: <IconHome /> },
   { view: "run", label: "Chat", icon: <IconChat /> },
   { view: "runs", label: "Runs", icon: <IconRuns /> },
+  { view: "groups", label: "Groups", icon: <IconGroups /> },
   { view: "goals", label: "Goals", icon: <IconTarget /> },
   { view: "plan", label: "Plan", icon: <IconMap /> },
   { view: "work", label: "Work", icon: <IconInbox /> },
@@ -500,6 +503,15 @@ export function App({ client }: AppProps = {}) {
             <RunsView runs={orderRuns(runs)} />
           </div>
 
+          <div hidden={view !== "groups"}>
+            <GroupsView
+              client={wireClient}
+              active={view === "groups"}
+              workspaceRoots={settings.workspaceRoots}
+              runs={orderRuns(runs)}
+            />
+          </div>
+
           <div hidden={view !== "goals"}>
             <GoalsView
               goals={orderGoals(goals)}
@@ -649,6 +661,17 @@ function IconRuns() {
       <circle cx="7" cy="6" r="1.4" fill="currentColor" stroke="none" />
       <circle cx="11" cy="12" r="1.4" fill="currentColor" stroke="none" />
       <circle cx="8" cy="18" r="1.4" fill="currentColor" stroke="none" />
+    </svg>
+  );
+}
+
+function IconGroups() {
+  return (
+    <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2">
+      <rect x="3" y="4" width="8" height="6" rx="1.5" />
+      <rect x="13" y="4" width="8" height="6" rx="1.5" />
+      <rect x="8" y="14" width="8" height="6" rx="1.5" />
+      <path d="M7 10v2h10v-2M12 12v2" strokeLinecap="round" strokeLinejoin="round" />
     </svg>
   );
 }

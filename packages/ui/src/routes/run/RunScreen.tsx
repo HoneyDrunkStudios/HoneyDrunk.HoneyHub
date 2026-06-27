@@ -94,6 +94,7 @@ export interface RunScreenProps {
     backend: AgentBackend;
     task: string;
     model?: string;
+    workspaceRoot?: string;
     createdAt: string;
   }) => void;
 }
@@ -585,6 +586,7 @@ export function RunScreen({
       backend: launchBackend,
       task: taskText,
       ...(launchModel === undefined ? {} : { model: launchModel }),
+      ...(workspaceRoot.length === 0 ? {} : { workspaceRoot }),
       createdAt: startedAt
     });
 
