@@ -4447,22 +4447,34 @@ h2 {
   .app-shell,
   .app-shell.chat-open,
   .app-shell.chat-collapsed {
-    grid-template-columns: 1fr;
+    /* minmax(0, …) not 1fr: a bare `1fr` track keeps an auto min-size, so a wide
+       non-wrapping child (the nav strip below) would stretch the whole page instead of
+       scrolling within it. */
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .sidebar,
+  .content {
+    min-width: 0;
   }
 
   /* The right chat sidebar does not fit a phone layout; the dedicated Chat tab covers
-     chat on small screens. */
-  .chat-sidebar {
+     chat on small screens. Scoped to `.app-shell` so it outranks the base `.chat-sidebar`
+     rule, which is later in source order at equal specificity (so a bare `.chat-sidebar`
+     here would lose and the sidebar would stack below the content). */
+  .app-shell .chat-sidebar {
     display: none;
   }
 
+  /* The left nav becomes a stack of horizontally-scrollable strips instead of wrapping
+     into ~6 rows that ate a third of a phone screen. */
   .sidebar {
     position: static;
     height: auto;
-    flex-direction: row;
-    flex-wrap: wrap;
-    align-items: center;
+    flex-direction: column;
+    align-items: stretch;
     gap: 8px;
+    padding: 8px 12px;
   }
 
   .sidebar-brand {
@@ -4471,7 +4483,23 @@ h2 {
 
   .sidebar-nav {
     flex-direction: row;
-    flex-wrap: wrap;
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    /* min-width: 0 lets this flex item shrink below its content width so overflow-x
+       actually scrolls instead of the strip stretching its parent. */
+    min-width: 0;
+    gap: 4px;
+    padding-bottom: 4px;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: none;
+  }
+
+  .sidebar-nav::-webkit-scrollbar {
+    display: none;
+  }
+
+  .nav-item {
+    flex: 0 0 auto;
   }
 
   .sidebar-nav.secondary {
@@ -4493,15 +4521,18 @@ h2 {
   }
 
   .content-inner {
-    padding: 22px 18px 40px;
+    padding: 20px 14px 40px;
   }
 
   .message {
     max-width: 92%;
   }
 
+  /* Multi-column forms / boards / stat grids collapse to a single column on a phone. */
   .spend-totals,
-  .diagnostics-grid {
+  .diagnostics-grid,
+  .goal-form-row,
+  .plan-board {
     grid-template-columns: 1fr;
   }
 
@@ -4509,6 +4540,56 @@ h2 {
   .browse {
     grid-template-columns: 1fr;
     height: auto;
+  }
+
+  /* Let grid/flex panels shrink to the viewport instead of forcing a horizontal clip. */
+  .bridge-settings,
+  .bridge-settings fieldset,
+  .connectors,
+  .connector,
+  .plans-settings,
+  .runs,
+  .groups,
+  .jobs,
+  .git,
+  .observe,
+  .work {
+    min-width: 0;
+    max-width: 100%;
+  }
+
+  /* Long unbreakable strings (env vars, addresses, command lines) wrap rather than force
+     the panel wider than the screen — the root cause of the settings/jobs clipping. */
+  .bridge-settings code,
+  .connect-phone-bind code,
+  .connect-phone-url code,
+  .connect-phone-addrs code,
+  .jobs-cmd {
+    word-break: break-all;
+    overflow-wrap: anywhere;
+    white-space: normal;
+    max-width: 100%;
+  }
+
+  /* Code / diff blocks scroll within their card rather than blow out page width. */
+  .diff-view,
+  .group-check-output pre {
+    max-width: 100%;
+    overflow-x: auto;
+  }
+
+  /* The expanded Change-group detail (members, per-repo check inputs, combined diff) must
+     shrink to the card so its wide children scroll instead of stretching/clipping it. */
+  .group-detail,
+  .group-members,
+  .group-member,
+  .group-member-check,
+  .group-checks-bar,
+  .group-diff,
+  .group-repo-diff,
+  .group-check-command {
+    min-width: 0;
+    max-width: 100%;
   }
 }
 
