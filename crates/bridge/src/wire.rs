@@ -5,6 +5,7 @@ use crate::artifact::DispatchArtifact;
 use crate::backend_catalog::BackendCapability;
 use crate::environment::EnvironmentInfo;
 use crate::fsbrowse::{DirListing, FileContents, SearchResults, WorkspaceFolders};
+use crate::checks::CheckOutcome;
 use crate::git::{GitBranches, GitDiff, GitOpResult, GitOverview, GitStatus};
 use crate::grafana::GrafanaSummary;
 use crate::jobs::{JobProbe, JobSnapshot};
@@ -486,6 +487,15 @@ pub enum ClientCommand {
     /// Fast-forward (`git pull --ff-only`) the Architecture repo, then re-read it. Answers
     /// with a [`BridgeEventPayload::Roadmap`] of the refreshed repo (or a git error).
     PullArchitecture,
+    /// **Run** (confirmation-gated in the UI): run a declared check command (the repo's
+    /// build/test) in a repo root — the "test a change group" action. Crosses the read-only
+    /// boundary like a git write, so the host gates `root` against the allowlist. The command
+    /// is run shell-free (tokenized; no metacharacter interpretation). The host answers with a
+    /// single [`BridgeEventPayload::CheckResult`].
+    RunCheck {
+        root: String,
+        command: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1210,6 +1220,23 @@ impl BridgeEvent {
         }
     }
 
+    /// A device-wide group-check result (one declared command run in a repo root). Not scoped
+    /// to a run or session, so `session_id`/`run_id` are empty and `sequence` is `0`.
+    pub fn check_result(
+        id: impl Into<String>,
+        created_at: impl Into<String>,
+        result: CheckOutcome,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            session_id: String::new(),
+            run_id: String::new(),
+            sequence: 0,
+            created_at: created_at.into(),
+            payload: BridgeEventPayload::CheckResult { result },
+        }
+    }
+
     /// A device-wide persisted-session-list event. Not scoped to a run or session, so
     /// `session_id`/`run_id` are empty and `sequence` is `0`.
     pub fn session_list(
@@ -1404,6 +1431,9 @@ pub enum BridgeEventPayload {
     },
     Roadmap {
         roadmap: RoadmapSnapshot,
+    },
+    CheckResult {
+        result: CheckOutcome,
     },
 }
 
@@ -2459,6 +2489,21 @@ mod tests {
                 }),
             ),
             BridgeEventPayload::Roadmap { .. }
+        );
+        check!(
+            BridgeEvent::check_result(
+                "e",
+                at,
+                from_json!(CheckOutcome, {
+                    "root": "C:/work",
+                    "command": "npm test",
+                    "ok": true,
+                    "exitCode": 0,
+                    "output": "all good",
+                    "truncated": false
+                }),
+            ),
+            BridgeEventPayload::CheckResult { .. }
         );
     }
 }

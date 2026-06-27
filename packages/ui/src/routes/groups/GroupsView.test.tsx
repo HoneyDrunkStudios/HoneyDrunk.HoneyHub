@@ -132,6 +132,26 @@ describe("GroupsView", () => {
     expect(screen.getByText("Combined diff")).toBeTruthy();
   });
 
+  it("runs checks for a group and shows pass/fail per repo", async () => {
+    const client = new PushableWireClient();
+    render(<GroupsView client={client} active workspaceRoots={ROOTS} runs={[]} />);
+
+    client.push({
+      kind: "git_overview",
+      overview: {
+        root: "C:/repos/Studios/api",
+        repos: [status("C:/repos/Studios/api", "claude/feature-x", true)]
+      }
+    });
+
+    fireEvent.click(await screen.findByRole("button", { name: /claude\/feature-x/ }));
+    // Run the group's checks (the mock answers each with a passing check_result).
+    fireEvent.click(await screen.findByRole("button", { name: /Run checks/ }));
+
+    expect(await screen.findByText("passed")).toBeTruthy();
+    expect(screen.getByText("1 passed")).toBeTruthy();
+  });
+
   it("hides a lone clean baseline repo behind a toggle", async () => {
     const client = new PushableWireClient();
     render(<GroupsView client={client} active workspaceRoots={ROOTS} runs={[]} />);

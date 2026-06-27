@@ -773,6 +773,22 @@ export class MockWireClient implements WireClient {
     return this.roadmap();
   }
 
+  async runCheck(root: string, command: string): Promise<void> {
+    // The mock doesn't run a process; script a passing check so the Groups "Run checks"
+    // flow is exercisable offline.
+    this.emitDevice({
+      kind: "check_result",
+      result: {
+        root,
+        command,
+        ok: true,
+        exitCode: 0,
+        output: `(demo) ${command} passed`,
+        truncated: false
+      }
+    });
+  }
+
   async detectEnvironment(): Promise<void> {
     // The real host runs `<cli> --version`; the mock scripts Claude installed with a
     // version and Codex not installed, so the Updates surface is exercisable offline.

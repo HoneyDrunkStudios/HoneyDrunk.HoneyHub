@@ -1321,6 +1321,13 @@ fn validate_stream_payload(
                 "a backend stream must not emit device-wide roadmap snapshots",
             ));
         }
+        BridgeEventPayload::CheckResult { .. } => {
+            // Device-wide, host-synthesized group-check result — never streamed.
+            return Err(BridgeError::new(
+                "event_unexpected_check_result",
+                "a backend stream must not emit device-wide check results",
+            ));
+        }
     }
 
     Ok(())

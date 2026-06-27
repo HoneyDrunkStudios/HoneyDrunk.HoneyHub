@@ -14,6 +14,17 @@ import {
   type ChangeGroup,
   type GroupRepo
 } from "./groupsModel";
+import {
+  applyCheckOutcome,
+  checkCommandFor,
+  loadCheckCommands,
+  saveCheckCommands,
+  setCheckCommand,
+  startCheck,
+  summarizeChecks,
+  type CheckState,
+  type ChecksState
+} from "./checksModel";
 
 export interface GroupsViewProps {
   client: WireClient;
@@ -49,6 +60,9 @@ export function GroupsView({
   const [showAll, setShowAll] = useState(false);
   // The combined diff for the expanded group: one patch per member repo root.
   const [diffs, setDiffs] = useState<Record<string, GitDiff>>({});
+  // Live check runs keyed by repo root, and the user's per-repo check commands (persisted).
+  const [checks, setChecks] = useState<ChecksState>({});
+  const [commands, setCommands] = useState<Record<string, string>>(() => loadCheckCommands());
 
   const refresh = useCallback(() => {
     if (workspaceRoots.length === 0) {
@@ -87,6 +101,8 @@ export function GroupsView({
         if (diff.path === undefined) {
           setDiffs((prev) => ({ ...prev, [diff.root]: diff }));
         }
+      } else if (payload.kind === "check_result") {
+        setChecks((prev) => applyCheckOutcome(prev, payload.result));
       } else if (payload.kind === "fs_changed") {
         // A file changed under one of our roots → re-scan (silent refresh).
         const roots = rootsRef.current;
@@ -127,6 +143,36 @@ export function GroupsView({
       if (!member.status.clean) {
         client.gitDiff(member.status.root).catch(() => undefined);
       }
+    }
+  };
+
+  // Persist a repo's check command as the user edits it (blank reverts to the default).
+  const onCommandChange = (root: string, value: string) => {
+    setCommands((prev) => {
+      const next = setCheckCommand(prev, root, value);
+      saveCheckCommands(next);
+      return next;
+    });
+  };
+
+  // Run every member repo's declared check — the "test the group" action. Each is marked
+  // running immediately; the bridge answers with a `check_result` per repo.
+  const runChecks = (group: ChangeGroup) => {
+    for (const member of group.repos) {
+      const root = member.status.root;
+      const command = checkCommandFor(commands, root);
+      setChecks((prev) => startCheck(prev, { root, command }));
+      client.runCheck(root, command).catch(() =>
+        setChecks((prev) =>
+          applyCheckOutcome(prev, {
+            root,
+            command,
+            ok: false,
+            output: "could not start the check",
+            truncated: false
+          })
+        )
+      );
     }
   };
 
@@ -184,7 +230,16 @@ export function GroupsView({
                 expanded={expanded === group.branch}
                 onToggle={() => toggleGroup(group)}
               />
-              {expanded === group.branch && <GroupDetail group={group} diffs={diffs} />}
+              {expanded === group.branch && (
+                <GroupDetail
+                  group={group}
+                  diffs={diffs}
+                  checks={checks}
+                  commands={commands}
+                  onCommandChange={onCommandChange}
+                  onRunChecks={() => runChecks(group)}
+                />
+              )}
             </li>
           ))}
         </ul>
@@ -222,12 +277,25 @@ function GroupSummary({
   );
 }
 
-/** The expanded group: each member repo with its change count + attributed runs, and the
-    combined diff across all member repos. */
+interface GroupDetailProps {
+  group: ChangeGroup;
+  diffs: Record<string, GitDiff>;
+  checks: ChecksState;
+  commands: Record<string, string>;
+  onCommandChange: (root: string, value: string) => void;
+  onRunChecks: () => void;
+}
+
+/** The expanded group: a "run checks" bar, each member repo with its change count, attributed
+    runs, declared check command + result, and the combined diff across all member repos. */
 function GroupDetail({
   group,
-  diffs
-}: Readonly<{ group: ChangeGroup; diffs: Record<string, GitDiff> }>): ReactElement {
+  diffs,
+  checks,
+  commands,
+  onCommandChange,
+  onRunChecks
+}: Readonly<GroupDetailProps>): ReactElement {
   const combinedStat = useMemo(() => {
     let added = 0;
     let removed = 0;
@@ -242,14 +310,35 @@ function GroupDetail({
     return { added, removed };
   }, [group.repos, diffs]);
 
+  const checkStates = group.repos
+    .map((member) => checks[member.status.root])
+    .filter((state): state is CheckState => state !== undefined);
+  const summary = summarizeChecks(checkStates);
+
   return (
     <div className="group-detail">
+      <div className="group-checks-bar">
+        <button type="button" className="group-run-checks" onClick={onRunChecks}>
+          {summary.running > 0 ? "Running…" : "Run checks"}
+        </button>
+        {summary.total > 0 && (
+          <span className="group-checks-summary" aria-label="Check summary">
+            {summary.passed > 0 && <span className="checks-passed">{summary.passed} passed</span>}
+            {summary.failed > 0 && <span className="checks-failed">{summary.failed} failed</span>}
+            {summary.running > 0 && <span className="checks-running">{summary.running} running</span>}
+          </span>
+        )}
+      </div>
+
       <div className="group-members">
         {group.repos.map((member) => (
           <GroupMember
             key={member.status.root}
             member={member}
             runs={group.runs.filter((run) => runInRepo(run, member.status.root))}
+            command={commands[member.status.root] ?? ""}
+            onCommandChange={(value) => onCommandChange(member.status.root, value)}
+            check={checks[member.status.root]}
           />
         ))}
       </div>
@@ -282,18 +371,30 @@ function runInRepo(run: RunSummary, repoRoot: string): boolean {
   return ws === repoRoot || isWithin(repoRoot, ws) || isWithin(ws, repoRoot);
 }
 
+interface GroupMemberProps {
+  member: GroupRepo;
+  runs: RunSummary[];
+  command: string;
+  onCommandChange: (value: string) => void;
+  check: CheckState | undefined;
+}
+
 function GroupMember({
   member,
-  runs
-}: Readonly<{ member: GroupRepo; runs: RunSummary[] }>): ReactElement {
+  runs,
+  command,
+  onCommandChange,
+  check
+}: Readonly<GroupMemberProps>): ReactElement {
+  const name = basename(member.status.root);
   return (
     <div className="group-member">
-      <span className="group-member-name">{basename(member.status.root)}</span>
+      <span className="group-member-name">{name}</span>
       <span className={member.changedFiles > 0 ? "group-dirty" : "group-clean"}>
         {member.changedFiles > 0 ? `${member.changedFiles} changed` : "clean"}
       </span>
       {runs.length > 0 && (
-        <ul className="group-member-runs" aria-label={`Runs in ${basename(member.status.root)}`}>
+        <ul className="group-member-runs" aria-label={`Runs in ${name}`}>
           {runs.map((run) => (
             <li key={run.runId} className={`group-member-run ${isRunActive(run) ? "is-active" : "is-done"}`}>
               <span className="group-run-dot" aria-hidden="true" />
@@ -304,6 +405,40 @@ function GroupMember({
             </li>
           ))}
         </ul>
+      )}
+      <div className="group-member-check">
+        <input
+          className="group-check-command"
+          aria-label={`Check command for ${name}`}
+          value={command}
+          placeholder="npm test"
+          onChange={(event) => onCommandChange(event.target.value)}
+        />
+        {check !== undefined && <CheckResultView check={check} />}
+      </div>
+    </div>
+  );
+}
+
+/** A member's check result: a phase pill and, once finished, a collapsible output block. */
+function CheckResultView({ check }: Readonly<{ check: CheckState }>): ReactElement {
+  return (
+    <div className={`group-check-result phase-${check.phase}`}>
+      <span className="group-check-pill" aria-label="Check status">
+        {check.phase === "running"
+          ? "running…"
+          : check.phase === "passed"
+            ? "passed"
+            : `failed${check.exitCode === undefined ? "" : ` (exit ${check.exitCode})`}`}
+      </span>
+      {check.output !== undefined && check.output.length > 0 && (
+        <details className="group-check-output">
+          <summary>output</summary>
+          <pre aria-label="Check output">
+            {check.output}
+            {check.truncated === true ? "\n… (truncated)" : ""}
+          </pre>
+        </details>
       )}
     </div>
   );

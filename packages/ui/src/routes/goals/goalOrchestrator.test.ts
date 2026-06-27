@@ -75,6 +75,7 @@ class FakeClient implements WireClient {
   async roadmap(): Promise<void> {}
   async scaffoldArchitecture(): Promise<void> {}
   async pullArchitecture(): Promise<void> {}
+  async runCheck(): Promise<void> {}
 
   private emit(runId: string, payload: BridgeEventPayload): void {
     const event: BridgeEvent = {

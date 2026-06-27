@@ -216,6 +216,11 @@ export interface WireClient {
   /** Fast-forward the Architecture repo (`git pull --ff-only`) and re-read it. The answer
       arrives as a `roadmap` event; rejects with the git error (e.g. diverged/dirty). */
   pullArchitecture(): Promise<void>;
+  /** **Run** (confirmation-gated in the UI): run a declared check command (a repo's
+      build/test) in an allowlisted repo root — the "test a change group" action. The bridge
+      runs it shell-free. The answer arrives as a `check_result` event via `subscribe`
+      (correlate by `root`); a spawn failure surfaces as `ok: false`, not a rejection. */
+  runCheck(root: string, command: string): Promise<void>;
   /** Subscribe to bridge events; returns an unsubscribe function. */
   subscribe(handler: WireEventHandler): () => void;
 }

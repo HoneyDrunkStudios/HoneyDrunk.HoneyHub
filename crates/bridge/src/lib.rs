@@ -6,6 +6,7 @@ pub mod artifact;
 pub mod attachments;
 pub mod azcli;
 pub mod backend_catalog;
+pub mod checks;
 pub mod clock;
 pub mod coaching;
 pub mod core;
@@ -45,6 +46,7 @@ pub use backend_catalog::{
     detect_default_backends, detect_one, program_on_path, BackendCapability, BackendModel,
     ModelSource,
 };
+pub use checks::{run_check, CheckOutcome};
 pub use coaching::{coach, CoachingSnapshot};
 pub use core::{BridgeRuntime, ManagedRun, ReplyOutcome};
 pub use environment::{detect_environment, BackendVersion, EnvironmentInfo};

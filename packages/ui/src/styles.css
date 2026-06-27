@@ -4335,6 +4335,112 @@ h2 {
   color: var(--honey-soft);
 }
 
+.group-checks-bar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.group-run-checks {
+  padding: 6px 14px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-strong);
+  background: var(--panel-3);
+  color: var(--honey-bright);
+  cursor: pointer;
+}
+
+.group-run-checks:hover {
+  background: var(--panel-2);
+}
+
+.group-checks-summary {
+  display: flex;
+  gap: 10px;
+  font-size: 0.8rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.checks-passed {
+  color: var(--positive);
+}
+
+.checks-failed {
+  color: var(--neon-pink);
+}
+
+.checks-running {
+  color: var(--neon-blue);
+}
+
+.group-member-check {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 6px;
+}
+
+.group-check-command {
+  flex: 1 1 200px;
+  min-width: 0;
+  padding: 5px 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--panel-2);
+  color: inherit;
+  font-family: var(--font-mono, monospace);
+  font-size: 0.78rem;
+}
+
+.group-check-result {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.group-check-pill {
+  padding: 3px 9px;
+  border-radius: var(--radius-pill);
+  border: 1px solid var(--border-strong);
+  font-size: 0.72rem;
+  white-space: nowrap;
+}
+
+.group-check-result.phase-passed .group-check-pill {
+  color: var(--positive);
+  border-color: var(--positive);
+}
+
+.group-check-result.phase-failed .group-check-pill {
+  color: var(--neon-pink);
+  border-color: var(--neon-pink);
+}
+
+.group-check-result.phase-running .group-check-pill {
+  color: var(--neon-blue);
+  border-color: var(--neon-blue);
+}
+
+.group-check-output summary {
+  cursor: pointer;
+  font-size: 0.76rem;
+  color: var(--text-muted);
+}
+
+.group-check-output pre {
+  margin: 6px 0 0;
+  max-height: 240px;
+  overflow: auto;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--panel);
+  font-size: 0.74rem;
+  white-space: pre-wrap;
+}
+
 /* ------------------------------------------------------------------ responsive */
 
 @media (max-width: 860px) {

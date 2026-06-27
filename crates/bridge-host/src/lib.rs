@@ -792,6 +792,18 @@ async fn handle_command(
                 honeyhub_bridge::pull_architecture(&roots)
                     .map(|snapshot| one(BridgeEvent::roadmap(new_id(), now_rfc3339(), snapshot)))
             }
+            ClientCommand::RunCheck { root, command } => {
+                // Running a declared check (build/test) crosses the read-only boundary like a
+                // git write, so gate the repo to the allowlist first; `run_check` itself never
+                // errors (a spawn failure becomes an `ok: false` outcome surfaced inline).
+                require(runtime.workspace_allows(&root), "check root").map(|()| {
+                    one(BridgeEvent::check_result(
+                        new_id(),
+                        now_rfc3339(),
+                        honeyhub_bridge::run_check(&root, &command),
+                    ))
+                })
+            }
             ClientCommand::Resume { .. } => Err(BridgeError::new(
                 "unsupported_command",
                 "resume is not driven by the host runtime yet",

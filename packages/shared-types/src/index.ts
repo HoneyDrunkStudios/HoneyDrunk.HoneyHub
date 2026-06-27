@@ -858,6 +858,21 @@ export interface GitOpResult {
   message?: string;
 }
 
+/** The outcome of running one declared check command (a repo's build/test) in a repo root —
+    the "test a change group" action. The command is run shell-free by the bridge; a spawn
+    failure or empty command surfaces as `ok: false` with the reason in `output`. */
+export interface CheckOutcome {
+  root: string;
+  command: string;
+  ok: boolean;
+  /** The process exit code, when one was returned (absent on signal/spawn failure). */
+  exitCode?: number;
+  /** Combined stdout + stderr, trimmed and clamped. */
+  output: string;
+  /** True when `output` was clamped. */
+  truncated: boolean;
+}
+
 export interface RunHandle {
   runId: string;
   processId?: number;
@@ -974,7 +989,8 @@ export type ClientCommand =
   | { kind: "session_detail"; sessionId: string }
   | { kind: "roadmap" }
   | { kind: "scaffold_architecture"; name?: string; location?: string }
-  | { kind: "pull_architecture" };
+  | { kind: "pull_architecture" }
+  | { kind: "run_check"; root: string; command: string };
 
 export interface ReconnectRequest {
   sessionId: string;
@@ -1056,7 +1072,8 @@ export type BridgeEventPayload =
       runs: DispatchRun[];
       transcript: DispatchMessage[];
     }
-  | { kind: "roadmap"; roadmap: RoadmapSnapshot };
+  | { kind: "roadmap"; roadmap: RoadmapSnapshot }
+  | { kind: "check_result"; result: CheckOutcome };
 
 export interface BridgeStatusEvent {
   state: DispatchRunState;
