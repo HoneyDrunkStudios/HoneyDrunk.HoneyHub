@@ -57,7 +57,9 @@ export function loadJobHistory(): JobHistory {
 
 /** Fold a snapshot's user jobs into the history: append an entry per job whose
     running/instances state CHANGED since the last one (memory alone never appends —
-    it fluctuates every poll). Returns the updated history and persists it. */
+    it fluctuates every poll). Pure: returns the SAME reference when nothing changed
+    (so a state updater can skip a re-render) and never touches storage — callers
+    persist via `saveJobHistory` in an effect. */
 export function recordJobHistory(
   history: JobHistory,
   jobs: readonly KnownJob[],
@@ -77,12 +79,14 @@ export function recordJobHistory(
     ];
     changed = true;
   }
-  if (changed) {
-    try {
-      globalThis.localStorage?.setItem(STORAGE_KEY, JSON.stringify(next));
-    } catch {
-      // Storage unavailable — keep the in-memory history only.
-    }
-  }
   return changed ? next : history;
+}
+
+/** Persist the history. Best-effort: a read-only/throwing Storage is swallowed. */
+export function saveJobHistory(history: JobHistory): void {
+  try {
+    globalThis.localStorage?.setItem(STORAGE_KEY, JSON.stringify(history));
+  } catch {
+    // Storage unavailable — keep the in-memory history only.
+  }
 }

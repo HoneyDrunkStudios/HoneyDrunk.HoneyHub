@@ -81,6 +81,19 @@ Environment knobs (all optional):
   the CLI program names / default model.
 - `HONEYHUB_BRIDGE_ADDR` - the in-process server's loopback address (default
   `127.0.0.1:8765`; falls back to an ephemeral port if taken).
+- `HONEYHUB_MODEL_RATES` - optional JSON map of model id to USD-per-MTok rates used to
+  DERIVE a dollar figure from token counts, e.g.
+  `{"gpt-5-codex": {"input": 1.25, "output": 10}}`.
+  Rates are never hard-coded in HoneyHub; without an entry a model's usage shows token
+  counts (and "estimated" markers) instead of invented dollars. You own keeping these
+  current with your provider's pricing page.
+- `HONEYHUB_EXTRA_CHECKS` - optional JSON map extending (or overriding) the named group
+  checks the bridge will run, e.g. `{"lint": ["npm", "run", "lint"]}`. The cockpit only
+  ever sends a check id; only ids in this table plus the built-ins
+  (`npm-test`, `npm-build`, `cargo-test`, `dotnet-test`, `go-test`, `pytest`, `make-test`)
+  can run, always inside an allowlisted workspace root.
+- `HONEYHUB_CHECK_TIMEOUT_SECS` - wall-clock budget for one group check (default 600).
+  On timeout the whole process tree is killed and the check reports `timed_out`.
 
 ## Driving a real Claude Code session (PWA + standalone host)
 

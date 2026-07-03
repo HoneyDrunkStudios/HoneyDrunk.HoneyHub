@@ -32,7 +32,7 @@ use crate::adapter::{
     AgentBackend, AgentBackendAdapter, BridgeError, CapabilityFlags, RunHandle, StartRunRequest,
 };
 use crate::adapters::child_run::{ChildRun, EventClock, RunSlot};
-use crate::backend_catalog::{codex_rate_table, ModelPricing};
+use crate::backend_catalog::{model_rate_table, ModelPricing};
 use crate::session::{
     DispatchMessage, DispatchMessageRole, UsageConfidence, UsageFidelity, UsageSignal,
 };
@@ -59,7 +59,7 @@ pub fn no_rate_lookup() -> UsdRateLookup {
 }
 
 /// Build a rate lookup from a parsed rate table (normally
-/// [`crate::backend_catalog::codex_rate_table`]), so hosts wire the operator-owned
+/// [`crate::backend_catalog::model_rate_table`]), so hosts wire the operator-owned
 /// rates in one line. Exact slug match; unknown models stay cost-absent.
 pub fn rate_lookup_from(table: HashMap<String, ModelPricing>) -> UsdRateLookup {
     Arc::new(move |model, input, output| {
@@ -86,10 +86,10 @@ impl CodexLocalAdapter {
         Self::with_rate_lookup(program, clock, no_rate_lookup())
     }
 
-    /// Build an adapter priced from the operator's `HONEYHUB_CODEX_RATES` env table
-    /// (see [`crate::backend_catalog::codex_rate_table`]) — the standard host wiring.
+    /// Build an adapter priced from the operator's `HONEYHUB_MODEL_RATES` env table
+    /// (see [`crate::backend_catalog::model_rate_table`]) — the standard host wiring.
     pub fn with_env_rates(program: impl Into<String>, clock: EventClock) -> Self {
-        Self::with_rate_lookup(program, clock, rate_lookup_from(codex_rate_table()))
+        Self::with_rate_lookup(program, clock, rate_lookup_from(model_rate_table()))
     }
 
     /// Build an adapter with an injected rate lookup so `result` token counts gain a

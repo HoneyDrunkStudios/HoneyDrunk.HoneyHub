@@ -3,7 +3,12 @@ import type { ReactElement, SyntheticEvent } from "react";
 import type { JobProbe, JobSnapshot, KnownJob } from "@honeydrunk/honeyhub-types";
 import type { WireClient } from "../../wire/client";
 import { filterProcesses, formatMemoryKb } from "./jobsModel";
-import { loadJobHistory, recordJobHistory, type JobHistoryEntry } from "./jobHistory";
+import {
+  loadJobHistory,
+  recordJobHistory,
+  saveJobHistory,
+  type JobHistoryEntry
+} from "./jobHistory";
 import { addProbe, loadJobPatterns, removeProbe, saveJobPatterns } from "./jobPatterns";
 
 export interface JobsViewProps {
@@ -87,12 +92,17 @@ export function JobsView({ client, active }: Readonly<JobsViewProps>): ReactElem
   );
 
   // Fold each snapshot into the per-job history (state transitions only), so a job row
-  // can answer "when did this last start/stop?".
+  // can answer "when did this last start/stop?". recordJobHistory is pure (returns the
+  // same reference when nothing changed), so persistence happens in its own effect
+  // instead of as a side effect inside the state updater.
   useEffect(() => {
     if (userJobs.length > 0) {
       setHistory((prev) => recordJobHistory(prev, userJobs, new Date().toISOString()));
     }
   }, [userJobs]);
+  useEffect(() => {
+    saveJobHistory(history);
+  }, [history]);
 
   return (
     <section className="jobs" aria-label="Jobs">
@@ -284,8 +294,8 @@ function UserJobRow({ job, history }: Readonly<UserJobRowProps>): ReactElement {
         <details className="job-history">
           <summary>history</summary>
           <ul className="job-history-list">
-            {newestFirst.map((entry) => (
-              <li key={entry.at} className={entry.running ? "is-up" : "is-down"}>
+            {newestFirst.map((entry, index) => (
+              <li key={`${entry.at}-${index}`} className={entry.running ? "is-up" : "is-down"}>
                 <span className="job-history-at">
                   {entry.at.slice(0, 16).replace("T", " ")}
                 </span>

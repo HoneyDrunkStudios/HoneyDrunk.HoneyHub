@@ -632,6 +632,7 @@ export function App({ client }: AppProps = {}) {
         hidden={chatHidden}
         open={chatOpen}
         onToggle={() => setChatOpen((prev) => !prev)}
+        width={chatWidth}
         onResize={(width) => {
           setChatWidth(width);
           saveChatDockWidth(width);

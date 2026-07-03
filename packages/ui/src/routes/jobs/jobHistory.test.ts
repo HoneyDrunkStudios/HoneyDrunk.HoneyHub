@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { KnownJob } from "@honeydrunk/honeyhub-types";
-import { loadJobHistory, recordJobHistory } from "./jobHistory";
+import { loadJobHistory, recordJobHistory, saveJobHistory } from "./jobHistory";
 
 function job(label: string, running: boolean, instances: number): KnownJob {
   return { label, patterns: [label], running, instances, pids: [], memoryKb: 1024 };
@@ -35,8 +35,10 @@ afterEach(() => {
 describe("job history", () => {
   it("records state transitions only, not every refresh", () => {
     let history = recordJobHistory({}, [job("worker", true, 1)], "2026-07-03T10:00:00Z");
-    // Same state again: no new entry.
-    history = recordJobHistory(history, [job("worker", true, 1)], "2026-07-03T10:05:00Z");
+    // Same state again: no new entry, and the SAME reference back (pure no-op).
+    const unchanged = recordJobHistory(history, [job("worker", true, 1)], "2026-07-03T10:05:00Z");
+    expect(unchanged).toBe(history);
+    history = unchanged;
     expect(history["worker"]).toHaveLength(1);
     // A stop and a scale-up both record.
     history = recordJobHistory(history, [job("worker", false, 0)], "2026-07-03T11:00:00Z");
@@ -49,7 +51,7 @@ describe("job history", () => {
   });
 
   it("persists and reloads, tolerating garbage", () => {
-    recordJobHistory({}, [job("worker", true, 1)], "2026-07-03T10:00:00Z");
+    saveJobHistory(recordJobHistory({}, [job("worker", true, 1)], "2026-07-03T10:00:00Z"));
     expect(loadJobHistory()["worker"]).toHaveLength(1);
 
     globalThis.localStorage?.setItem("honeyhub.jobHistory.v1", "not json");
@@ -63,7 +65,7 @@ describe("job history", () => {
 
   it("does not throw when storage is unavailable", () => {
     vi.stubGlobal("localStorage", undefined);
-    expect(() => recordJobHistory({}, [job("worker", true, 1)], "t")).not.toThrow();
+    expect(() => saveJobHistory(recordJobHistory({}, [job("worker", true, 1)], "t"))).not.toThrow();
     expect(loadJobHistory()).toEqual({});
   });
 });

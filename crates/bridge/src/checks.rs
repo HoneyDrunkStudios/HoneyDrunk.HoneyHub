@@ -270,6 +270,12 @@ fn run_argv(root: &str, check: &str, argv: &[String], timeout: Duration) -> Chec
     let display = argv.join(" ");
     let program = &argv[0];
     let resolved = resolve_check_program(root, program);
+    // Audit line: every check spawn is host-logged with what actually launches,
+    // so the operator can trace any run from the bridge console.
+    eprintln!(
+        "[checks] running '{check}' in {root}: {display} (program: {})",
+        resolved.to_string_lossy()
+    );
 
     let mut command = Command::new(&resolved);
     command

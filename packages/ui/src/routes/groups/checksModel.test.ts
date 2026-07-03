@@ -4,7 +4,7 @@ import {
   applyCheckOutcome,
   checkIdFor,
   DEFAULT_CHECK_ID,
-  KNOWN_CHECKS,
+  KNOWN_CHECK_IDS,
   loadCheckIds,
   saveCheckIds,
   setCheckId,
@@ -64,11 +64,11 @@ describe("check selection", () => {
     expect(setCheckId(set, "/a", DEFAULT_CHECK_ID)["/a"]).toBeUndefined();
   });
 
-  it("offers only named checks (no free command lines)", () => {
-    expect(KNOWN_CHECKS.length).toBeGreaterThan(0);
-    expect(KNOWN_CHECKS.some((check) => check.id === DEFAULT_CHECK_ID)).toBe(true);
-    for (const check of KNOWN_CHECKS) {
-      expect(check.id).not.toContain(" ");
+  it("offers only named check ids (no free command lines)", () => {
+    expect(KNOWN_CHECK_IDS.length).toBeGreaterThan(0);
+    expect(KNOWN_CHECK_IDS).toContain(DEFAULT_CHECK_ID);
+    for (const id of KNOWN_CHECK_IDS) {
+      expect(id).not.toContain(" ");
     }
   });
 });
@@ -133,6 +133,32 @@ describe("run state", () => {
     );
     expect(state["/a"]!.phase).toBe("failed");
     expect(state["/a"]!.output).toBe("not an allowed check");
+  });
+
+  it("keeps a running pill through an OVERLAP denial (the real outcome is still coming)", () => {
+    const running = startCheck({}, { root: "/a", command: "npm-test" });
+    const state = applyCheckOutcome(
+      running,
+      outcome("/a", false, {
+        disposition: "denied",
+        output: "a check is already running in this repo"
+      })
+    );
+    expect(state).toBe(running);
+    expect(state["/a"]!.phase).toBe("running");
+  });
+
+  it("lands a NON-overlap denial of a running check as failed (it is the final answer)", () => {
+    const running = startCheck({}, { root: "/a", command: "nope-check" });
+    const state = applyCheckOutcome(
+      running,
+      outcome("/a", false, {
+        disposition: "denied",
+        output: "`nope-check` is not an allowed check"
+      })
+    );
+    expect(state["/a"]!.phase).toBe("failed");
+    expect(state["/a"]!.output).toContain("not an allowed check");
   });
 
   it("records an outcome for a repo we never started", () => {

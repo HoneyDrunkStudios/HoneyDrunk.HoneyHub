@@ -10,24 +10,20 @@ const STORAGE_KEY = "honeyhub.groupChecks.v2";
 /** The free-text-command era key, migrated (mappable values only) then removed. */
 const LEGACY_STORAGE_KEY = "honeyhub.groupChecks.v1";
 
-/** One named check the bridge is willing to run. Mirrors the bridge's built-in set.
-    Operator extras (HONEYHUB_EXTRA_CHECKS) run on the host but are not offered by
-    this picker yet — surfacing the host's full check table over the wire is the
-    planned follow-up that retires this mirror. */
-export interface KnownCheck {
-  id: string;
-  /** The command line the id resolves to (display only). */
-  command: string;
-}
-
-export const KNOWN_CHECKS: readonly KnownCheck[] = [
-  { id: "npm-test", command: "npm test" },
-  { id: "npm-build", command: "npm run build" },
-  { id: "cargo-test", command: "cargo test --workspace" },
-  { id: "dotnet-test", command: "dotnet test" },
-  { id: "go-test", command: "go test ./..." },
-  { id: "pytest", command: "pytest" },
-  { id: "make-test", command: "make test" }
+/** The named check IDS the bridge's built-in set offers. Ids only — what an id
+    resolves to is host knowledge (the operator's HONEYHUB_EXTRA_CHECKS may override
+    a built-in), so the picker never claims a command line; the outcome echoes the
+    command the host actually ran. Operator extras are not offered by this picker
+    yet — surfacing the host's full check table over the wire is the planned
+    follow-up that retires this mirror. */
+export const KNOWN_CHECK_IDS: readonly string[] = [
+  "npm-test",
+  "npm-build",
+  "cargo-test",
+  "dotnet-test",
+  "go-test",
+  "pytest",
+  "make-test"
 ];
 
 /** The fallback check when a repo has no pick. A sensible default for the
@@ -82,7 +78,7 @@ function parsePicks(raw: string): Record<string, string> {
       continue;
     }
     const id = V1_COMMAND_TO_ID[value.trim()] ?? value;
-    if (KNOWN_CHECKS.some((check) => check.id === id)) {
+    if (KNOWN_CHECK_IDS.includes(id)) {
       out[root] = id;
     }
   }
@@ -151,10 +147,25 @@ export function startCheck(
   };
 }
 
+/** The host's per-root overlap refusal (bridge-host `spawn_check`); the one denial that
+    is NOT the terminal answer to a running check — the in-flight run's real outcome is
+    still coming. Kept in lockstep with the host string (both ends live in this repo). */
+const OVERLAP_DENIAL = "a check is already running";
+
 /** Fold a finished `check_result` outcome into the state: passed/failed with its output.
     An outcome for a repo we never started is still recorded (the host is the source of
-    truth), so a result is never silently dropped. */
+    truth), so a result is never silently dropped. The one exception: results broadcast
+    to every cockpit, so an OVERLAP denial (another surface, or two path spellings of one
+    repo) must not clobber a live running pill — every other denial (unknown check id,
+    allowlist refusal, panicked task) IS our request's final answer and lands as failed. */
 export function applyCheckOutcome(state: ChecksState, outcome: CheckOutcome): ChecksState {
+  if (
+    outcome.disposition === "denied" &&
+    state[outcome.root]?.phase === "running" &&
+    outcome.output.includes(OVERLAP_DENIAL)
+  ) {
+    return state;
+  }
   return {
     ...state,
     [outcome.root]: {

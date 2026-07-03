@@ -12,6 +12,7 @@ function renderSidebar(overrides: Partial<ChatSidebarProps> = {}) {
       hidden={overrides.hidden ?? false}
       open={overrides.open ?? true}
       onToggle={onToggle}
+      width={overrides.width ?? 380}
       onResize={onResize}
       run={{
         client,
@@ -54,5 +55,16 @@ describe("ChatSidebar", () => {
     renderSidebar({ open: true, onToggle });
     fireEvent.click(screen.getByRole("button", { name: "Collapse chat" }));
     expect(onToggle).toHaveBeenCalledTimes(1);
+  });
+
+  it("resizes with the arrow keys on the focused divider (clamped)", () => {
+    const onResize = vi.fn();
+    renderSidebar({ width: 400, onResize });
+    const divider = screen.getByRole("separator", { name: "Resize chat" });
+    // The dock hangs off the right edge: ArrowLeft widens, ArrowRight narrows.
+    fireEvent.keyDown(divider, { key: "ArrowLeft" });
+    expect(onResize).toHaveBeenCalledWith(416);
+    fireEvent.keyDown(divider, { key: "ArrowRight" });
+    expect(onResize).toHaveBeenCalledWith(384);
   });
 });

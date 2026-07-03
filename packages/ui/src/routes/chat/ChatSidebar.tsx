@@ -1,5 +1,14 @@
-import { useRef, type PointerEvent as ReactPointerEvent, type ReactElement } from "react";
-import { clampChatDockWidth } from "../../chatDock";
+import {
+  useRef,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type PointerEvent as ReactPointerEvent,
+  type ReactElement
+} from "react";
+import {
+  CHAT_DOCK_MAX_WIDTH,
+  CHAT_DOCK_MIN_WIDTH,
+  clampChatDockWidth
+} from "../../chatDock";
 import { RunScreen, type RunScreenProps } from "../run/RunScreen";
 
 // The right-hand chat dock — THE chat surface on desktop. It renders the same
@@ -35,16 +44,22 @@ export interface ChatSidebarProps {
   open: boolean;
   /** Toggle expanded/collapsed. */
   onToggle: () => void;
-  /** Report a dragged width (already clamped) so App can size the shell column. */
+  /** The current dock width (px), for the separator's value semantics + keyboard resize. */
+  width: number;
+  /** Report a new width (already clamped) so App can size the shell column. */
   onResize: (width: number) => void;
   /** Everything RunScreen needs; the dock injects `variant` + `sessionId` itself. */
   run: Omit<RunScreenProps, "variant" | "sessionId">;
 }
 
+/** How far one arrow-key press moves the dock edge (px). */
+const KEYBOARD_RESIZE_STEP = 16;
+
 export function ChatSidebar({
   hidden,
   open,
   onToggle,
+  width,
   onResize,
   run
 }: Readonly<ChatSidebarProps>): ReactElement {
@@ -82,6 +97,17 @@ export function ChatSidebar({
       draggedWidth.current = undefined;
     }
   };
+  // Keyboard resize on the focused separator: the dock hangs off the right edge, so
+  // ArrowLeft widens it and ArrowRight narrows it. Each press commits through the
+  // same clamped `onResize` path as a drag release.
+  const onResizeKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>) => {
+    if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") {
+      return;
+    }
+    event.preventDefault();
+    const delta = event.key === "ArrowLeft" ? KEYBOARD_RESIZE_STEP : -KEYBOARD_RESIZE_STEP;
+    onResize(clampChatDockWidth(width + delta));
+  };
 
   const stateClass = sidebarStateClass(hidden, open);
   return (
@@ -92,12 +118,17 @@ export function ChatSidebar({
         <div
           className="chat-sidebar-resizer"
           role="separator"
+          tabIndex={0}
           aria-orientation="vertical"
           aria-label="Resize chat"
+          aria-valuenow={width}
+          aria-valuemin={CHAT_DOCK_MIN_WIDTH}
+          aria-valuemax={CHAT_DOCK_MAX_WIDTH}
           onPointerDown={onResizeStart}
           onPointerMove={onResizeMove}
           onPointerUp={onResizeEnd}
           onPointerCancel={onResizeEnd}
+          onKeyDown={onResizeKeyDown}
         />
         <div className="chat-sidebar-head">
           <span className="chat-sidebar-title">Chat</span>

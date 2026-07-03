@@ -17,7 +17,7 @@ import {
 import {
   applyCheckOutcome,
   checkIdFor,
-  KNOWN_CHECKS,
+  KNOWN_CHECK_IDS,
   loadCheckIds,
   saveCheckIds,
   setCheckId,
@@ -103,6 +103,7 @@ export function GroupsView({
           setDiffs((prev) => ({ ...prev, [diff.root]: diff }));
         }
       } else if (payload.kind === "check_result") {
+        // The overlap-vs-terminal folding rule lives in applyCheckOutcome.
         setChecks((prev) => applyCheckOutcome(prev, payload.result));
       } else if (payload.kind === "fs_changed") {
         // A file changed under one of our roots → re-scan (silent refresh).
@@ -430,17 +431,18 @@ function GroupMember({
         </ul>
       )}
       <div className="group-member-check">
-        {/* Named checks only: the option set mirrors the bridge's host-owned
-            definitions — the client never sends a command line. */}
+        {/* Named checks only: the option set mirrors the bridge's host-owned check
+            IDS — the client never sends (or claims) a command line; what an id runs
+            is host knowledge, echoed back on the outcome. */}
         <select
           className="group-check-command"
           aria-label={`Check for ${name}`}
           value={checkId}
           onChange={(event) => onCheckChange(event.target.value)}
         >
-          {KNOWN_CHECKS.map((known) => (
-            <option key={known.id} value={known.id}>
-              {known.command}
+          {KNOWN_CHECK_IDS.map((id) => (
+            <option key={id} value={id}>
+              {id}
             </option>
           ))}
         </select>

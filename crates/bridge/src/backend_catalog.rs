@@ -74,14 +74,6 @@ impl BackendModel {
         }
     }
 
-    fn with_pricing(mut self, input_usd_per_mtok: f64, output_usd_per_mtok: f64) -> Self {
-        self.pricing = Some(ModelPricing {
-            input_usd_per_mtok,
-            output_usd_per_mtok,
-        });
-        self
-    }
-
     fn with_metered(mut self) -> Self {
         self.metered = true;
         self
@@ -136,52 +128,40 @@ pub fn default_program(backend: AgentBackend) -> &'static str {
 /// Resolve the models offered for a backend, with provenance. Reads each CLI's real
 /// source where one exists, falling back to a conservative bridge-known seed.
 fn models_for(backend: AgentBackend) -> (Vec<BackendModel>, ModelSource) {
-    match backend {
+    let (models, source) = match backend {
         // Claude's selectable set is its canonical aliases (latest of each family).
         // Order matters: the cockpit defaults to the FIRST entry when the user hasn't
         // picked, so `opus` stays first; `fable` (usage-credit billed) is opt-in only.
-        // Rates are Anthropic's API sticker prices (USD per MTok, 2026-06) — used for
-        // pre-send estimates only; actual Claude spend stays exact via total_cost_usd.
+        // No rate is ever coined here (invariant 45): pricing comes solely from the
+        // operator's HONEYHUB_MODEL_RATES table below, and actual Claude spend stays
+        // exact via the CLI's total_cost_usd regardless.
         AgentBackend::ClaudeLocal => (
             vec![
-                BackendModel::new("opus", "Claude Opus 4.8").with_pricing(5.0, 25.0),
-                BackendModel::new("sonnet", "Claude Sonnet 5").with_pricing(3.0, 15.0),
-                BackendModel::new("haiku", "Claude Haiku 4.5").with_pricing(1.0, 5.0),
-                BackendModel::new("fable", "Claude Fable 5")
-                    .with_pricing(10.0, 50.0)
-                    .with_metered(),
+                BackendModel::new("opus", "Claude Opus 4.8"),
+                BackendModel::new("sonnet", "Claude Sonnet 5"),
+                BackendModel::new("haiku", "Claude Haiku 4.5"),
+                BackendModel::new("fable", "Claude Fable 5").with_metered(),
             ],
             ModelSource::CliAlias,
         ),
-        // Codex caches its real model list; read it, else fall back to a seed. Rates
-        // come from the operator's HONEYHUB_CODEX_RATES table when configured, and
-        // apply uniformly — the fallback seed is priced the same as a cached model.
-        AgentBackend::CodexLocal => {
-            let rates = codex_rate_table();
-            let (models, source) = match codex_cached_models() {
-                Some(models) if !models.is_empty() => (models, ModelSource::CliCache),
-                _ => (
-                    vec![BackendModel::new("gpt-5-codex", "GPT-5 Codex")],
-                    ModelSource::BridgeKnown,
-                ),
-            };
-            (
-                models
-                    .into_iter()
-                    .map(|mut model| {
-                        model.pricing = rates.get(&model.id).copied();
-                        model
-                    })
-                    .collect(),
-                source,
-            )
-        }
+        // Codex caches its real model list; read it, else fall back to a seed.
+        AgentBackend::CodexLocal => match codex_cached_models() {
+            Some(models) if !models.is_empty() => (models, ModelSource::CliCache),
+            _ => (
+                vec![BackendModel::new("gpt-5-codex", "GPT-5 Codex")],
+                ModelSource::BridgeKnown,
+            ),
+        },
         // Not surfaced by default detection (see module note); seed for completeness.
         AgentBackend::CopilotLocal => (
             vec![BackendModel::new("auto", "Copilot (auto)")],
             ModelSource::BridgeKnown,
         ),
-    }
+    };
+    // Rates attach uniformly to EVERY backend's list (one env read per call), so an
+    // operator entry works the same for a cached Codex model, a Claude alias, or a
+    // seed row — no per-branch exemptions.
+    (priced(models, &model_rate_table()), source)
 }
 
 fn capabilities_for(backend: AgentBackend) -> CapabilityFlags {
@@ -192,17 +172,31 @@ fn capabilities_for(backend: AgentBackend) -> CapabilityFlags {
     }
 }
 
-/// The operator's Codex rate table, from the `HONEYHUB_CODEX_RATES` env var:
-/// `{"<slug>": {"input": <usd per MTok>, "output": <usd per MTok>}, ...}`. The host
-/// owns vendor prices (ADR-0092 D2) — absent or invalid config just means no rates,
-/// so Codex costs stay honestly absent rather than guessed.
-pub fn codex_rate_table() -> HashMap<String, ModelPricing> {
-    parse_codex_rates(&std::env::var("HONEYHUB_CODEX_RATES").unwrap_or_default())
+/// The operator's model rate table, from the `HONEYHUB_MODEL_RATES` env var:
+/// `{"<model id or alias>": {"input": <usd per MTok>, "output": <usd per MTok>}, ...}`
+/// (e.g. `opus`, `fable`, `gpt-5-codex`). Rates are never coined in application code
+/// (invariant 45 / ADR-0092 D2): the operator — or a canonical Grid rate projection
+/// feeding this seam — owns vendor prices. Absent or invalid config just means no
+/// rates, so costs stay honestly absent rather than guessed.
+pub fn model_rate_table() -> HashMap<String, ModelPricing> {
+    parse_model_rates(&std::env::var("HONEYHUB_MODEL_RATES").unwrap_or_default())
 }
 
-/// Parse a `HONEYHUB_CODEX_RATES` JSON document. Entries with a missing or
+/// Attach the operator's rates (by exact id) to a model list. Models without a
+/// configured rate keep `pricing: None`.
+fn priced(models: Vec<BackendModel>, rates: &HashMap<String, ModelPricing>) -> Vec<BackendModel> {
+    models
+        .into_iter()
+        .map(|mut model| {
+            model.pricing = rates.get(&model.id).copied();
+            model
+        })
+        .collect()
+}
+
+/// Parse a `HONEYHUB_MODEL_RATES` JSON document. Entries with a missing or
 /// non-positive rate are dropped; any parse failure yields an empty table.
-pub fn parse_codex_rates(json: &str) -> HashMap<String, ModelPricing> {
+pub fn parse_model_rates(json: &str) -> HashMap<String, ModelPricing> {
     let Ok(value) = serde_json::from_str::<serde_json::Value>(json) else {
         return HashMap::new();
     };
@@ -430,7 +424,7 @@ mod tests {
     }
 
     #[test]
-    fn claude_models_carry_pricing_and_metering() {
+    fn claude_models_carry_metering_but_never_coined_rates() {
         let claude = detect_one(AgentBackend::ClaudeLocal, "claude");
         // First entry is the picker's default when the user has not chosen — it must
         // stay a plan-included model, never the usage-credit-billed fable.
@@ -441,33 +435,49 @@ mod tests {
             .find(|model| model.id == "fable")
             .expect("fable offered");
         assert!(fable.metered);
-        let pricing = fable.pricing.expect("fable priced");
-        assert_eq!(pricing.input_usd_per_mtok, 10.0);
-        assert_eq!(pricing.output_usd_per_mtok, 50.0);
         for model in &claude.models {
             if model.id != "fable" {
                 assert!(!model.metered, "{} must be plan-included", model.id);
-                assert!(model.pricing.is_some(), "{} carries a rate", model.id);
             }
         }
+        // Invariant 45: no rate is hand-authored into the catalog. Assert against an
+        // explicitly EMPTY rate table (not the live env, which an operator may have
+        // configured on the machine running the tests).
+        for model in priced(claude.models, &HashMap::new()) {
+            assert!(model.pricing.is_none(), "{} must not coin a rate", model.id);
+        }
+        // And rates attach purely from the supplied table, by exact id.
+        let table = parse_model_rates(r#"{"opus": {"input": 5.0, "output": 25.0}}"#);
+        let repriced = priced(
+            detect_one(AgentBackend::ClaudeLocal, "claude").models,
+            &table,
+        );
+        assert!(repriced.iter().any(|model| {
+            model.id == "opus"
+                && model
+                    .pricing
+                    .is_some_and(|rate| rate.input_usd_per_mtok == 5.0)
+        }));
     }
 
     #[test]
-    fn parses_codex_rates_and_drops_garbage() {
-        let table = parse_codex_rates(
+    fn parses_model_rates_and_drops_garbage() {
+        let table = parse_model_rates(
             r#"{
                 "gpt-5-codex": {"input": 1.25, "output": 10.0},
+                "opus": {"input": 5.0, "output": 25.0},
                 "negative": {"input": -1, "output": 2},
                 "half": {"input": 1.0}
             }"#,
         );
-        assert_eq!(table.len(), 1);
+        assert_eq!(table.len(), 2);
         let rate = table.get("gpt-5-codex").expect("valid entry kept");
         assert_eq!(rate.input_usd_per_mtok, 1.25);
         assert_eq!(rate.output_usd_per_mtok, 10.0);
-        assert!(parse_codex_rates("not json").is_empty());
-        assert!(parse_codex_rates("[]").is_empty());
-        assert!(parse_codex_rates("").is_empty());
+        assert!(table.contains_key("opus"));
+        assert!(parse_model_rates("not json").is_empty());
+        assert!(parse_model_rates("[]").is_empty());
+        assert!(parse_model_rates("").is_empty());
     }
 
     #[test]

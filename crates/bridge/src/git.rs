@@ -180,17 +180,24 @@ fn walk_for_repos(dir: &Path, depth: usize, repos: &mut Vec<String>) {
         }
         let name = entry.file_name();
         let name = name.to_string_lossy();
-        if name.starts_with('.')
-            || DISCOVER_SKIP_DIRS
-                .iter()
-                .any(|skip| name.eq_ignore_ascii_case(skip))
-        {
+        // Dot-directories are pruned unconditionally — hidden tool clones (`.nvm`,
+        // `.oh-my-zsh`, editor caches) are noise even when they ARE git repos.
+        if name.starts_with('.') {
             continue;
         }
+        // The repo test comes BEFORE the named skip-list, so a real repo that happens
+        // to be named `vendor`/`dist`/… is still discovered; the skip-list only prunes
+        // what the walk would otherwise descend into.
         if path.join(".git").exists() {
             // A repo bounds the walk: submodules and nested checkouts inside it are its
             // own business, not separate workspace repos.
             repos.push(path.to_string_lossy().to_string());
+            continue;
+        }
+        if DISCOVER_SKIP_DIRS
+            .iter()
+            .any(|skip| name.eq_ignore_ascii_case(skip))
+        {
             continue;
         }
         walk_for_repos(&path, depth - 1, repos);
@@ -545,10 +552,14 @@ mod tests {
             "gitdir: elsewhere",
         )
         .expect("worktree marker");
+        // A real repo that happens to carry a skip-list name is still discovered —
+        // the repo test runs before the prune.
+        std::fs::create_dir_all(dir.path().join("vendor/.git")).expect("repo named vendor");
 
         let repos = discover_repos(&dir.path().to_string_lossy());
-        assert_eq!(repos.len(), 2, "found: {repos:?}");
+        assert_eq!(repos.len(), 3, "found: {repos:?}");
         assert!(repos.iter().any(|repo| repo.ends_with("site")));
         assert!(repos.iter().any(|repo| repo.ends_with("feature-x")));
+        assert!(repos.iter().any(|repo| repo.ends_with("vendor")));
     }
 }
