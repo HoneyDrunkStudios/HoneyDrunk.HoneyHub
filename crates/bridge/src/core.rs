@@ -742,22 +742,26 @@ impl BridgeRuntime {
         }
     }
 
-    /// A persisted session's runs plus its concatenated transcript (across runs, in run
-    /// order), for reopening a past chat. Empty when no store or unknown session.
+    /// A persisted session's runs, its concatenated transcript (across runs, in run
+    /// order), and its usage rolled up per (backend, fidelity) — the per-thread cost
+    /// view. Empty/absent when no store, unknown session, or no recorded usage.
     pub fn stored_session_detail(
         &self,
         session_id: &str,
-    ) -> (Vec<DispatchRun>, Vec<DispatchMessage>) {
+    ) -> (Vec<DispatchRun>, Vec<DispatchMessage>, Option<UsageSummary>) {
         match &self.store {
             Some(store) => {
                 let runs = store.runs(session_id);
                 let mut transcript = Vec::new();
+                let mut signals = Vec::new();
                 for run in &runs {
                     transcript.extend(store.read_transcript(&run.id).unwrap_or_default());
+                    signals.extend(store.usage(session_id, &run.id));
                 }
-                (runs, transcript)
+                let usage = (!signals.is_empty()).then(|| UsageSummary::from_signals(&signals, 1));
+                (runs, transcript, usage)
             }
-            None => (Vec::new(), Vec::new()),
+            None => (Vec::new(), Vec::new(), None),
         }
     }
 
@@ -1634,12 +1638,17 @@ mod tests {
         let sessions = runtime.stored_sessions();
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].id, "session-1");
-        let (runs, transcript) = runtime.stored_session_detail("session-1");
+        let (runs, transcript, usage) = runtime.stored_session_detail("session-1");
         assert_eq!(runs.len(), 1);
         // Durable run record carries no raw prompt (task redacted in the store).
         assert!(runs[0].task.is_empty());
         assert_eq!(transcript.len(), 1);
         assert_eq!(transcript[0].body, "did the thing");
+        // The per-thread rollup is absent when no usage was recorded (this fake run
+        // emits none) and scoped to exactly this session when one exists.
+        if let Some(usage) = usage {
+            assert_eq!(usage.session_count, 1);
+        }
 
         let _ = fs::remove_dir_all(&store_root);
     }
@@ -3041,6 +3050,7 @@ mod tests {
                 session_id: "s".to_string(),
                 runs: Vec::new(),
                 transcript: Vec::new(),
+                usage: None,
             }),
             "event_unexpected_session_detail"
         );

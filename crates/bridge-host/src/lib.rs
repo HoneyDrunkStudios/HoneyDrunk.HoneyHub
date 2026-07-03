@@ -766,13 +766,14 @@ async fn handle_command(
                 runtime.stored_sessions(),
             )])),
             ClientCommand::SessionDetail { session_id } => {
-                let (runs, transcript) = runtime.stored_session_detail(&session_id);
+                let (runs, transcript, usage) = runtime.stored_session_detail(&session_id);
                 Ok(Some(vec![BridgeEvent::session_detail(
                     new_id(),
                     now_rfc3339(),
                     session_id,
                     runs,
                     transcript,
+                    usage,
                 )]))
             }
             // Thread management on the durable store. Each op answers with a refreshed

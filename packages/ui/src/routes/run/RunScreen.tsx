@@ -18,7 +18,8 @@ import type {
   DispatchRunState,
   DispatchSession,
   StartRunRequest,
-  UsageSignal
+  UsageSignal,
+  UsageSummary
 } from "@honeydrunk/honeyhub-types";
 import { UsageBadge } from "../../components/UsageBadge";
 import { backendLabel } from "../../backends";
@@ -406,18 +407,26 @@ export function RunScreen({
     sessionId: string;
     runs: { state: DispatchRunState }[];
     transcript: DispatchMessage[];
+    usage?: UsageSummary;
   }) => {
     setSyncedSessions((sessions) => {
       const meta = sessions.find((session) => session.id === detail.sessionId);
       const lastState = detail.runs.at(-1)?.state ?? "completed";
+      // Grounded totals come from the host's rollup (exact + derived only, per the
+      // ADR-0092 fidelity rules); zero stays honest when nothing was recorded.
+      const totalTokens = (detail.usage?.rollups ?? []).reduce(
+        (sum, rollup) => sum + rollup.totalTokens,
+        0
+      );
       setOpenedChat({
         id: detail.sessionId,
         task: meta?.title ?? detail.transcript[0]?.body ?? "(session)",
         ...(meta?.backend === undefined ? {} : { backend: meta.backend }),
         state: lastState,
         messages: detail.transcript,
-        totalUsd: 0,
-        totalTokens: 0,
+        totalUsd: detail.usage?.groundedTotalUsd ?? 0,
+        totalTokens,
+        ...(detail.usage === undefined ? {} : { usage: detail.usage }),
         createdAt: meta?.createdAt ?? "",
         updatedAt: meta?.updatedAt ?? ""
       });
@@ -432,8 +441,13 @@ export function RunScreen({
       if (event.payload.kind === "session_list") {
         setSyncedSessions(event.payload.sessions);
       } else if (event.payload.kind === "session_detail") {
-        const { sessionId, runs: detailRuns, transcript } = event.payload;
-        reopenSyncedSession({ sessionId, runs: detailRuns, transcript });
+        const { sessionId, runs: detailRuns, transcript, usage } = event.payload;
+        reopenSyncedSession({
+          sessionId,
+          runs: detailRuns,
+          transcript,
+          ...(usage === undefined ? {} : { usage })
+        });
       }
     });
     void client.listSessions().catch(() => undefined);
@@ -1016,6 +1030,34 @@ export function RunScreen({
             {chat.model === undefined ? "" : ` · ${chat.model}`}
             {` · $${chat.totalUsd.toFixed(4)} · ${chat.state}`}
           </p>
+          {chat.usage !== undefined && (
+            <details className="thread-cost">
+              <summary>
+                Thread cost: {chat.usage.groundedTotalUsd === undefined
+                  ? "no grounded USD"
+                  : `$${chat.usage.groundedTotalUsd.toFixed(4)}`}
+                {` · ${chat.usage.totalTurns} turns`}
+                {chat.usage.totalPremiumRequests > 0
+                  ? ` · ${chat.usage.totalPremiumRequests} premium requests`
+                  : ""}
+              </summary>
+              <ul className="thread-cost-rollups">
+                {chat.usage.rollups.map((rollup) => (
+                  <li key={`${rollup.backend}:${rollup.fidelity}`}>
+                    <span className="rollup-backend">{backendLabel(rollup.backend)}</span>
+                    <span className="rollup-fidelity">{rollup.fidelity}</span>
+                    <span className="rollup-meta">
+                      {rollup.totalTokens.toLocaleString()} tok · {rollup.turnCount}×
+                      {rollup.totalUsd === undefined ? "" : ` · $${rollup.totalUsd.toFixed(4)}`}
+                      {rollup.premiumRequests === undefined
+                        ? ""
+                        : ` · ${rollup.premiumRequests} premium`}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            </details>
+          )}
           <ol className="transcript" aria-label="Transcript">
             {chat.messages.map((message) => (
               <li key={message.id} className={`message role-${message.role}`}>

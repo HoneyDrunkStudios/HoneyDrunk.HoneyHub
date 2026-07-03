@@ -171,10 +171,12 @@ describe("RunScreen", () => {
     const entry = within(history).getByText("Wire the deploy triggers");
     fireEvent.click(entry);
 
-    // Clicking fetches its detail and reopens the transcript read-only.
+    // Clicking fetches its detail and reopens the transcript read-only, with the
+    // per-thread cost rollup the host attached to the detail.
     await waitFor(() =>
       expect(screen.getByText("Done. Staged the workflow and opened a PR.")).toBeTruthy()
     );
+    expect(screen.getByText(/Thread cost: \$0\.0421 · 2 turns/)).toBeTruthy();
   });
 
   it("manual mode lets the user pin a model that the task no longer moves", () => {

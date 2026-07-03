@@ -1106,6 +1106,9 @@ export type BridgeEventPayload =
       sessionId: string;
       runs: DispatchRun[];
       transcript: DispatchMessage[];
+      /** The session's usage rolled up per (backend, fidelity) — the per-thread cost
+          view. Absent when the session recorded no usage signals. */
+      usage?: UsageSummary;
     }
   | { kind: "roadmap"; roadmap: RoadmapSnapshot }
   | { kind: "check_result"; result: CheckOutcome };

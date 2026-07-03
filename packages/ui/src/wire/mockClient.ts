@@ -636,6 +636,24 @@ export class MockWireClient implements WireClient {
     this.emitDevice({
       kind: "session_detail",
       sessionId,
+      usage: {
+        sessionCount: 1,
+        totalTurns: 2,
+        rollups: [
+          {
+            backend: "claude.local",
+            fidelity: "exact",
+            turnCount: 2,
+            inputTokens: 1200,
+            outputTokens: 800,
+            totalTokens: 2000,
+            totalUsd: 0.0421,
+            durationMs: 61000
+          }
+        ],
+        groundedTotalUsd: 0.0421,
+        totalPremiumRequests: 0
+      },
       runs: [
         {
           id: "run-past-1",

@@ -1287,6 +1287,7 @@ impl BridgeEvent {
         session_id: String,
         runs: Vec<DispatchRun>,
         transcript: Vec<DispatchMessage>,
+        usage: Option<UsageSummary>,
     ) -> Self {
         Self {
             id: id.into(),
@@ -1298,6 +1299,7 @@ impl BridgeEvent {
                 session_id,
                 runs,
                 transcript,
+                usage,
             },
         }
     }
@@ -1453,6 +1455,10 @@ pub enum BridgeEventPayload {
         session_id: String,
         runs: Vec<DispatchRun>,
         transcript: Vec<DispatchMessage>,
+        /// The session's usage rolled up per (backend, fidelity) — the per-thread
+        /// cost view. Absent when the session recorded no usage signals (additive).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        usage: Option<UsageSummary>,
     },
     Roadmap {
         roadmap: RoadmapSnapshot,
@@ -2529,6 +2535,7 @@ mod tests {
                     "body": "done",
                     "createdAt": at
                 })],
+                None,
             ),
             BridgeEventPayload::SessionDetail { .. }
         );

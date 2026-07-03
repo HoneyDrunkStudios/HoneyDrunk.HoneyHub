@@ -816,6 +816,41 @@ h2 {
   font-size: 0.78rem;
 }
 
+/* The reopened thread's cost breakdown (per-backend/fidelity rollups). */
+.thread-cost {
+  font-size: 0.8rem;
+  color: var(--text-muted);
+}
+
+.thread-cost summary {
+  cursor: pointer;
+}
+
+.thread-cost-rollups {
+  list-style: none;
+  margin: 6px 0 0;
+  padding: 0;
+  display: grid;
+  gap: 4px;
+}
+
+.thread-cost-rollups li {
+  display: flex;
+  gap: 10px;
+  align-items: baseline;
+}
+
+.rollup-fidelity {
+  color: var(--text-dim);
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+}
+
+.rollup-meta {
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+}
+
 /* The composer's pre-send cost hint (included-in-plan / ~$ range / floor). */
 .cost-estimate {
   margin: 2px 0 0;

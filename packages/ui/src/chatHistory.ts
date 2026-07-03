@@ -1,4 +1,4 @@
-import type { AgentBackend, DispatchMessage } from "@honeydrunk/honeyhub-types";
+import type { AgentBackend, DispatchMessage, UsageSummary } from "@honeydrunk/honeyhub-types";
 
 // Local chat history (packet 09 §3c). Each finished/updated chat is saved so you can
 // reopen past sessions. This is the per-device client-side store; a bridge-backed store
@@ -21,6 +21,9 @@ export interface ChatRecord {
   messages: DispatchMessage[];
   totalUsd: number;
   totalTokens: number;
+  /** Per-(backend, fidelity) usage rollup for the thread, when the bridge store has
+      one (synced sessions reopened from the host); local records omit it. */
+  usage?: UsageSummary;
   createdAt: string;
   updatedAt: string;
 }
