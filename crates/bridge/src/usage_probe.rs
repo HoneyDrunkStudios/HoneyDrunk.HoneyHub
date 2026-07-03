@@ -16,6 +16,7 @@
 //! trade until the vendors expose the meters programmatically.
 
 use crate::adapter::AgentBackend;
+use crate::backend_catalog::resolve_program;
 use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 use serde::{Deserialize, Serialize};
 use std::io::Read;
@@ -26,9 +27,15 @@ use std::time::{Duration, Instant};
 /// take seconds to boot; the default leaves slack without letting a hang wedge.
 const DEFAULT_TIMEOUT_SECS: u64 = 25;
 
-/// How long the capture waits after output goes quiet before concluding the panel
-/// has fully rendered (the TUIs repaint in bursts).
-const QUIET_MS: u64 = 1500;
+/// How long the capture waits after output goes quiet before concluding the TUI has
+/// finished a phase (the TUIs repaint in bursts, and boot does background work like
+/// MCP-server startup between paints).
+const QUIET_MS: u64 = 2500;
+
+/// Minimum time the capture keeps collecting after typing the slash command, so a
+/// panel that renders late (observed: Codex paints /status well after its banner)
+/// is not cut off by an early quiet period.
+const POST_SEND_MIN_MS: u64 = 5000;
 
 fn probe_timeout() -> Duration {
     let secs = std::env::var("HONEYHUB_USAGE_PROBE_TIMEOUT_SECS")
@@ -78,6 +85,28 @@ fn usage_command(backend: AgentBackend) -> Option<&'static str> {
     }
 }
 
+/// True when `haystack` contains `needle` as a byte subsequence.
+fn contains_seq(haystack: &[u8], needle: &[u8]) -> bool {
+    haystack
+        .windows(needle.len())
+        .any(|window| window == needle)
+}
+
+/// Answer the terminal-capability queries a booting TUI blocks on. The probe IS the
+/// terminal, so unanswered queries stall the CLI before it paints anything (observed
+/// live: Claude Code sends a cursor-position request, `ESC[6n`, and waits).
+fn respond_to_terminal_queries(chunk: &[u8], writer: &mut (impl std::io::Write + ?Sized)) {
+    // DSR 6 (cursor position report): reply "row 1, col 1".
+    if contains_seq(chunk, b"\x1b[6n") {
+        let _ = writer.write_all(b"\x1b[1;1R");
+    }
+    // Primary device attributes: claim a VT220-class terminal.
+    if contains_seq(chunk, b"\x1b[c") || contains_seq(chunk, b"\x1b[0c") {
+        let _ = writer.write_all(b"\x1b[?62c");
+    }
+    let _ = writer.flush();
+}
+
 /// Strip ANSI escape sequences (CSI/OSC/simple ESC) so panel text is inspectable.
 fn strip_ansi(input: &str) -> String {
     let mut out = String::with_capacity(input.len());
@@ -117,8 +146,10 @@ fn strip_ansi(input: &str) -> String {
 }
 
 /// Collapse the stripped capture to meaningful lines: drop blanks, box-drawing
-/// chrome, and spinner noise; trim and de-duplicate consecutive repaints.
+/// chrome, and spinner noise; trim and de-duplicate repaints GLOBALLY (interactive
+/// TUIs repaint the same lines many times, interleaved, as they redraw).
 fn clean_lines(stripped: &str) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
     let mut lines: Vec<String> = Vec::new();
     for raw_line in stripped.lines() {
         let line: String = raw_line
@@ -129,16 +160,34 @@ fn clean_lines(stripped: &str) -> Vec<String> {
         if line.is_empty() {
             continue;
         }
-        if lines.last().map(String::as_str) != Some(line.as_str()) {
+        if seen.insert(line.clone()) {
             lines.push(line);
         }
     }
     lines
 }
 
-/// Pull the meter lines out of the cleaned panel text: anything carrying a percent,
-/// or a session/week/limit/reset keyword next to a number.
+/// Pull the meter lines out of the cleaned panel text. Two passes:
+/// 1. **High signal** — the vendors' own meter shape ("Current session … 34% used …",
+///    "… limit left …"), skipping smooshed multi-segment repaint lines (length cap).
+/// 2. **Fallback** — when no meter-shaped line exists, anything carrying a percent or
+///    a usage keyword next to a number, so an unknown layout still surfaces SOMETHING.
 fn parse_windows(lines: &[String]) -> Vec<UsageWindow> {
+    let meter_shaped = |line: &String| {
+        let lower = line.to_lowercase();
+        (lower.contains("% used") || lower.contains("%used") || lower.contains("limit left"))
+            && line.chars().count() <= 140
+    };
+    let meters: Vec<&String> = lines.iter().filter(|line| meter_shaped(line)).collect();
+    if !meters.is_empty() {
+        return meters
+            .into_iter()
+            .map(|line| UsageWindow {
+                line: line.clone(),
+                used_percent: first_percent(line),
+            })
+            .collect();
+    }
     let keywords = ["session", "week", "limit", "reset", "usage", "used", "left"];
     lines
         .iter()
@@ -155,17 +204,17 @@ fn parse_windows(lines: &[String]) -> Vec<UsageWindow> {
         .collect()
 }
 
-/// The first "NN%" or "NN.N%" on the line, as a number.
+/// The first "NN%" or "NN.N%" on the line, as a number. Char-safe: TUI panels mix
+/// multi-byte glyphs (meter bars like `█`) into the same line as the digits.
 fn first_percent(line: &str) -> Option<f32> {
     let index = line.find('%')?;
-    let head = &line[..index];
-    let start = head
-        .rfind(|ch: char| !(ch.is_ascii_digit() || ch == '.'))
-        .map_or(0, |position| position + 1);
-    head[start..]
-        .parse::<f32>()
-        .ok()
-        .filter(|value| *value >= 0.0)
+    let digits: Vec<char> = line[..index]
+        .chars()
+        .rev()
+        .take_while(|ch| ch.is_ascii_digit() || *ch == '.')
+        .collect();
+    let number: String = digits.into_iter().rev().collect();
+    number.parse::<f32>().ok().filter(|value| *value >= 0.0)
 }
 
 /// Probe one backend's usage meters. `program` is the CLI to launch (the caller
@@ -189,6 +238,15 @@ pub fn probe_usage(
         return not_run("this backend exposes no usage surface".to_string());
     };
 
+    // Resolve the CLI through PATH/PATHEXT (the adapters' resolver): on Windows the
+    // npm shims are `claude.cmd` / `codex.cmd`, which CreateProcess cannot launch
+    // bare — batch shims must run under `cmd /c`.
+    let resolved = resolve_program(program)
+        .map(|path| path.to_string_lossy().into_owned())
+        .unwrap_or_else(|| program.to_string());
+    let lower = resolved.to_lowercase();
+    let batch_shim = lower.ends_with(".cmd") || lower.ends_with(".bat");
+
     let pty = native_pty_system();
     let pair = match pty.openpty(PtySize {
         rows: 40,
@@ -199,11 +257,18 @@ pub fn probe_usage(
         Ok(pair) => pair,
         Err(error) => return not_run(format!("could not open a pty: {error}")),
     };
-    let mut builder = CommandBuilder::new(program);
+    let mut builder = if batch_shim {
+        let mut builder = CommandBuilder::new("cmd.exe");
+        builder.arg("/c");
+        builder.arg(&resolved);
+        builder
+    } else {
+        CommandBuilder::new(&resolved)
+    };
     builder.cwd(cwd);
     let mut child = match pair.slave.spawn_command(builder) {
         Ok(child) => child,
-        Err(error) => return not_run(format!("could not launch {program}: {error}")),
+        Err(error) => return not_run(format!("could not launch {resolved}: {error}")),
     };
     drop(pair.slave);
 
@@ -219,9 +284,21 @@ pub fn probe_usage(
     };
     std::thread::spawn(move || {
         let mut buffer = [0u8; 8192];
-        while let Ok(count) = reader.read(&mut buffer) {
-            if count == 0 || sender.send(buffer[..count].to_vec()).is_err() {
-                break;
+        loop {
+            match reader.read(&mut buffer) {
+                Ok(0) => {
+                    eprintln!("[usage-probe] reader: EOF");
+                    break;
+                }
+                Ok(count) => {
+                    if sender.send(buffer[..count].to_vec()).is_err() {
+                        break;
+                    }
+                }
+                Err(error) => {
+                    eprintln!("[usage-probe] reader error: {error}");
+                    break;
+                }
             }
         }
     });
@@ -233,12 +310,15 @@ pub fn probe_usage(
         }
     };
 
-    // Capture loop: wait for the TUI to boot (first quiet period), type the slash
-    // command, then capture until the panel settles or the budget runs out.
+    // Capture loop: wait for the TUI to boot (it must have PAINTED something and
+    // then gone quiet — a quiet period before any output just means it is still
+    // starting), type the slash command, then capture until the panel settles or
+    // the budget runs out.
     let deadline = Instant::now() + probe_timeout();
     let quiet = Duration::from_millis(QUIET_MS);
+    let post_send_min = Duration::from_millis(POST_SEND_MIN_MS);
     let mut captured: Vec<u8> = Vec::new();
-    let mut sent_command = false;
+    let mut sent_at: Option<Instant> = None;
     let mut last_output = Instant::now();
     loop {
         if Instant::now() >= deadline {
@@ -246,34 +326,68 @@ pub fn probe_usage(
         }
         match receiver.recv_timeout(Duration::from_millis(200)) {
             Ok(chunk) => {
+                respond_to_terminal_queries(&chunk, &mut writer);
                 captured.extend_from_slice(&chunk);
                 last_output = Instant::now();
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {
-                if last_output.elapsed() >= quiet {
-                    if sent_command {
-                        break; // The panel rendered and settled.
+                if last_output.elapsed() < quiet {
+                    continue;
+                }
+                match sent_at {
+                    // The panel rendered and settled (with a minimum render window,
+                    // so a late paint after the send is not cut off).
+                    Some(when) if when.elapsed() >= post_send_min => break,
+                    Some(_) => {}
+                    None if captured.is_empty() => {} // Still booting: nothing painted yet.
+                    None => {
+                        // The TUI painted and went idle: type the command + Enter.
+                        let _ = writer.write_all(format!("{command_text}\r").as_bytes());
+                        let _ = writer.flush();
+                        sent_at = Some(Instant::now());
+                        last_output = Instant::now();
                     }
-                    // The TUI booted and went idle: type the command + Enter.
-                    let _ = writer.write_all(format!("{command_text}\r").as_bytes());
-                    let _ = writer.flush();
-                    sent_command = true;
-                    last_output = Instant::now();
                 }
             }
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
         }
     }
+    // An early exit (crash, not-a-tty bailout) is part of the answer.
+    let exit_note = match child.try_wait() {
+        Ok(Some(status)) => format!("\n[probe] the CLI exited early: {status}"),
+        _ => String::new(),
+    };
     let _ = child.kill();
 
+    if std::env::var("HONEYHUB_USAGE_PROBE_DEBUG").is_ok() {
+        eprintln!("[usage-probe] captured {} bytes", captured.len());
+        let _ = std::fs::write(
+            std::env::temp_dir().join(format!("honeyhub-probe-{backend:?}.bin")),
+            &captured,
+        );
+    }
     let stripped = strip_ansi(&String::from_utf8_lossy(&captured));
     let lines = clean_lines(&stripped);
-    let windows = parse_windows(&lines);
+    // Claude Code gates untrusted folders behind an interactive safety prompt. The
+    // probe never answers it for the operator (trusting a folder is their call, made
+    // in the CLI itself) — it reports the stall instead.
+    let trust_note =
+        if stripped.contains("Quick safety check") || stripped.contains("trust this folder") {
+            "[probe] Claude Code is waiting on its folder-trust prompt for this workspace. \
+         Open Claude Code there once, accept the prompt, then re-check.\n"
+        } else {
+            ""
+        };
+    let windows = if trust_note.is_empty() {
+        parse_windows(&lines)
+    } else {
+        Vec::new()
+    };
     UsageProbeReport {
         backend,
         ok: true,
         windows,
-        raw: lines.join("\n"),
+        raw: format!("{trust_note}{}{exit_note}", lines.join("\n")),
         captured_at,
     }
 }
@@ -302,6 +416,31 @@ mod tests {
         assert_eq!(windows.len(), 2, "windows: {windows:?}");
         assert_eq!(windows[0].used_percent, None);
         assert!(windows[1].line.contains("420"));
+    }
+
+    /// Live validation against the real CLIs on the operator's machine — the panel
+    /// timing/layout cannot be exercised headlessly in CI. Run explicitly with:
+    /// `cargo test -p honeyhub-bridge live_probe -- --ignored --nocapture`
+    #[test]
+    #[ignore = "drives the real vendor CLIs; operator machine only"]
+    fn live_probe_against_installed_clis() {
+        // Run from the repo root — a folder the operator's CLIs already trust.
+        let root = concat!(env!("CARGO_MANIFEST_DIR"), "/../..");
+        for (backend, program) in [
+            (AgentBackend::ClaudeLocal, "claude"),
+            (AgentBackend::CodexLocal, "codex"),
+        ] {
+            let report = probe_usage(backend, program, root, "live".to_string());
+            println!(
+                "=== {backend:?} ok={} windows={}",
+                report.ok,
+                report.windows.len()
+            );
+            for window in &report.windows {
+                println!("  [{:?}%] {}", window.used_percent, window.line);
+            }
+            println!("--- raw ---\n{}\n", report.raw);
+        }
     }
 
     #[test]
