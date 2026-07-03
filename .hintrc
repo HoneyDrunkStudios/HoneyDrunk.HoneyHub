@@ -12,6 +12,7 @@
       {
         "ignore": ["scrollbar-width"]
       }
-    ]
+    ],
+    "no-inline-styles": "off"
   }
 }

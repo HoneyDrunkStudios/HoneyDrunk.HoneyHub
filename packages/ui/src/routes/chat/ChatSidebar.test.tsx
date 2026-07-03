@@ -6,11 +6,13 @@ import { ChatSidebar, type ChatSidebarProps } from "./ChatSidebar";
 function renderSidebar(overrides: Partial<ChatSidebarProps> = {}) {
   const client = new MockWireClient();
   const onToggle = overrides.onToggle ?? vi.fn();
+  const onResize = overrides.onResize ?? vi.fn();
   render(
     <ChatSidebar
       hidden={overrides.hidden ?? false}
       open={overrides.open ?? true}
       onToggle={onToggle}
+      onResize={onResize}
       run={{
         client,
         availableBackends: ["claude.local"],
@@ -20,7 +22,7 @@ function renderSidebar(overrides: Partial<ChatSidebarProps> = {}) {
       }}
     />
   );
-  return { client, onToggle };
+  return { client, onToggle, onResize };
 }
 
 describe("ChatSidebar", () => {

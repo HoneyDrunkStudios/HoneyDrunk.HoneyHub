@@ -1,4 +1,11 @@
-import { useCallback, useEffect, useRef, useState, type ReactElement } from "react";
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type CSSProperties,
+  type ReactElement
+} from "react";
 import type { AgentBackend, BackendCapability } from "@honeydrunk/honeyhub-types";
 import { BridgeSettings } from "./BridgeSettings";
 import { NotificationList } from "./NotificationList";
@@ -52,6 +59,7 @@ import {
   type BridgeSettingsState
 } from "./settingsModel";
 import { loadProviderPrefs, saveProviderPrefs } from "./providerPrefs";
+import { loadChatDockWidth, saveChatDockWidth } from "./chatDock";
 import { loadPlans, savePlans, type Plans } from "./plans";
 import { MockWireClient } from "./wire/mockClient";
 import { bridgeWsUrl, WebSocketWireClient } from "./wire/webSocketClient";
@@ -81,13 +89,18 @@ interface NavItem {
   view: View;
   label: string;
   icon: ReactElement;
+  /** Shown only in the small-screen layout (e.g. Chat, which desktop gets as the
+      right-hand dock instead of a page). */
+  mobileOnly?: boolean;
 }
 
 // Two groups: the day-to-day surfaces, then the trust/plumbing surfaces. The
 // sidebar keeps the primary work (Run) at the top and pushes config to the foot.
 const PRIMARY_NAV: NavItem[] = [
   { view: "hub", label: "Hub", icon: <IconHome /> },
-  { view: "run", label: "Chat", icon: <IconChat /> },
+  // On desktop the right-hand dock IS the chat; the Chat page exists for phones,
+  // where the dock does not fit. The nav item is CSS-hidden on wide screens.
+  { view: "run", label: "Chat", icon: <IconChat />, mobileOnly: true },
   { view: "runs", label: "Runs", icon: <IconRuns /> },
   { view: "groups", label: "Groups", icon: <IconGroups /> },
   { view: "goals", label: "Goals", icon: <IconTarget /> },
@@ -114,14 +127,9 @@ export interface AppProps {
 }
 
 export function App({ client }: AppProps = {}) {
-  // Land on the Hub when the operator has connectors wired (the daily-driver glance);
-  // otherwise default to Chat (a fresh install has an empty Hub, so Chat is more useful).
-  const [view, setView] = useState<View>(() => {
-    const prefs = loadConnectorPrefs();
-    const hasConnectors =
-      enabledIds(prefs, "work").length > 0 || enabledIds(prefs, "observability").length > 0;
-    return hasConnectors ? "hub" : "run";
-  });
+  // Land on the Hub; chat lives in the always-available right-hand dock, so there is
+  // no dedicated Chat page to land on anymore.
+  const [view, setView] = useState<View>("hub");
   // The active transport. Defaults to the offline mock (a scripted demo); the
   // operator can connect to a real bridge host by pasting the cockpit URL it
   // prints, which swaps in the WebSocket client behind the same seam.
@@ -138,9 +146,11 @@ export function App({ client }: AppProps = {}) {
   // run screen so the router can treat flat-rate subs as effectively free. Persisted on
   // change, like provider prefs.
   const [plans, setPlans] = useState<Plans>(loadPlans);
-  // Whether the right-hand chat sidebar is expanded (vs collapsed to a slim rail). Owned
-  // here so the shell grid can size its column to match. Hidden entirely on the Chat tab.
+  // Whether the right-hand chat dock is expanded (vs collapsed to a slim rail), and its
+  // dragged width. Owned here so the shell grid can size its column to match; the width
+  // persists like a real editor panel.
   const [chatOpen, setChatOpen] = useState(true);
+  const [chatWidth, setChatWidth] = useState<number>(loadChatDockWidth);
   // Bridge settings are owned here so the run screen can read the workspace
   // allowlist the operator edits in Bridge settings. The backend allowlist is
   // seeded from the persisted provider selection.
@@ -372,7 +382,7 @@ export function App({ client }: AppProps = {}) {
       <button
         key={item.view}
         type="button"
-        className="nav-item"
+        className={item.mobileOnly === true ? "nav-item nav-item-mobile" : "nav-item"}
         aria-pressed={view === item.view}
         onClick={() => setView(item.view)}
       >
@@ -404,14 +414,19 @@ export function App({ client }: AppProps = {}) {
     );
   }
 
-  // The chat sidebar shows on every page except the dedicated Chat tab (where it would
-  // double the chat). The shell grid grows a third column for it when shown.
+  // On desktop the chat dock is THE chat surface, shown on every page (the Chat page
+  // is a small-screen affordance, and the dock hides itself there via CSS). The shell
+  // grid's third column follows the dock's expanded/collapsed state and dragged width.
+  // The dock also hides on the Chat page itself so a phone never doubles the chat.
   const chatHidden = view === "run";
   const chatColumnClass = chatOpen ? "chat-open" : "chat-collapsed";
   const shellClass = chatHidden ? "app-shell" : `app-shell ${chatColumnClass}`;
 
   return (
-    <div className={shellClass}>
+    <div
+      className={shellClass}
+      style={{ "--chat-dock-w": `${chatWidth}px` } as CSSProperties}
+    >
       <aside className="sidebar" aria-label="HoneyHub navigation">
         <div className="sidebar-brand">
           <span className="brand-mark" aria-hidden="true">
@@ -470,6 +485,8 @@ export function App({ client }: AppProps = {}) {
             />
           </div>
 
+          {/* The Chat PAGE is the small-screen chat (the dock does not fit a phone);
+              desktop reaches chat via the dock and never sees this tab in the nav. */}
           <div hidden={view !== "run"}>
             <RunScreen
               client={wireClient}
@@ -608,13 +625,17 @@ export function App({ client }: AppProps = {}) {
         </div>
       </main>
 
-      {/* Right-hand chat sidebar: the full chat (history, model picker, attachments) on
-          every page. Always mounted (so the conversation survives a collapse or a tab
-          switch), hidden on the full Chat tab where it would just double up. */}
+      {/* Right-hand chat dock: THE chat surface (history, model picker, attachments)
+          on every page. Always mounted, so the conversation survives a collapse or a
+          tab switch; drag its left edge to resize. */}
       <ChatSidebar
         hidden={chatHidden}
         open={chatOpen}
         onToggle={() => setChatOpen((prev) => !prev)}
+        onResize={(width) => {
+          setChatWidth(width);
+          saveChatDockWidth(width);
+        }}
         run={{
           client: wireClient,
           workspaceRoots: settings.workspaceRoots,

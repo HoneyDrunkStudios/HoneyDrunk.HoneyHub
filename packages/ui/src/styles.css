@@ -266,14 +266,24 @@ body {
   min-height: 100vh;
 }
 
-/* When the right-hand chat sidebar is shown, the shell grows a third column sized to
-   the panel (expanded) or a slim rail (collapsed). On the Chat tab the sidebar is
-   removed entirely (no modifier → two columns). */
+/* When the right-hand chat dock is shown, the shell grows a third column sized to
+   the panel (expanded, at its dragged width) or a slim rail (collapsed). On the
+   small-screen Chat page the dock is removed entirely (no modifier → two columns). */
 .app-shell.chat-open {
-  grid-template-columns: var(--sidebar-w) minmax(0, 1fr) 380px;
+  grid-template-columns: var(--sidebar-w) minmax(0, 1fr) var(--chat-dock-w, 380px);
 }
 .app-shell.chat-collapsed {
   grid-template-columns: var(--sidebar-w) minmax(0, 1fr) 52px;
+}
+
+/* The Chat nav item exists for small screens (the dock does not fit there, and is
+   display:none'd in the 860px media block below); on wide screens the dock IS the
+   chat, so the tab hides. The two breakpoints must stay in lockstep, or a window
+   width would exist with no chat surface (or two). */
+@media (min-width: 861px) {
+  .nav-item-mobile {
+    display: none;
+  }
 }
 
 .sidebar {
@@ -6106,10 +6116,27 @@ button:focus-visible,
   display: none;
 }
 .chat-sidebar-panel {
+  position: relative;
   display: flex;
   flex-direction: column;
   height: 100%;
   min-height: 0;
+}
+/* Drag handle on the dock's left edge: an invisible grab strip that lights up on
+   hover/drag. touch-action none keeps pointer events flowing during the drag. */
+.chat-sidebar-resizer {
+  position: absolute;
+  left: -3px;
+  top: 0;
+  bottom: 0;
+  width: 7px;
+  cursor: col-resize;
+  touch-action: none;
+  z-index: 5;
+}
+.chat-sidebar-resizer:hover,
+.chat-sidebar-resizer:active {
+  background: linear-gradient(90deg, transparent, var(--neon-blue-line), transparent);
 }
 .chat-sidebar-panel[hidden] {
   display: none;
@@ -6148,8 +6175,10 @@ button:focus-visible,
 .chat-sidebar-body {
   flex: 1 1 auto;
   min-height: 0;
-  overflow-y: auto;
-  padding: 12px 14px 18px;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  padding: 0 14px 12px;
 }
 /* The collapsed rail: a slim launcher column. */
 .chat-sidebar-rail {
@@ -6168,29 +6197,89 @@ button:focus-visible,
   color: var(--neon-pink);
 }
 
-/* Compact RunScreen variant used inside the sidebar: single column, no details aside,
-   left-aligned and a touch tighter. */
+/* Compact RunScreen variant used inside the dock: single column, no details aside,
+   shaped like an editor chat panel — history in the middle, the composer pinned to
+   the bottom, controls in one tight row. */
 .chat--sidebar {
   min-height: 0;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
 }
 .chat--sidebar .chat-start {
   width: 100%;
+  height: 100%;
+  min-height: 0;
   justify-content: flex-start;
-  gap: 12px;
-  padding-top: 4px;
+  gap: 10px;
+  padding-top: 10px;
+  overflow: hidden;
 }
+/* Bottom-anchored composer, editor-panel style: the (randomized) heading sits over
+   the history area; the composer + its cost/routing lines dock at the bottom. */
 .chat--sidebar .chat-heading {
-  font-size: 1.15rem;
-  text-align: left;
+  order: 0;
+  font-size: 1.05rem;
+  text-align: center;
+  color: var(--text-muted);
+  margin: 6px 0 0;
+}
+.chat--sidebar .recent-chats {
+  order: 1;
+  width: 100%;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  align-content: start;
+}
+.chat--sidebar .synced-history {
+  order: 2;
+  flex: 0 1 auto;
+  max-height: 30%;
+  overflow-y: auto;
+}
+.chat--sidebar .composer {
+  order: 3;
+  margin-top: auto;
+  padding: 10px 12px 8px;
+  border-radius: 14px;
+}
+.chat--sidebar .routing-rationale,
+.chat--sidebar .cost-estimate {
+  order: 4;
+  margin: 0;
 }
 .chat--sidebar .chat-active {
   grid-template-columns: minmax(0, 1fr);
 }
+/* One tight control row: compact chips, send pinned to the right like an editor
+   panel's submit. */
 .chat--sidebar .composer-bar {
   flex-wrap: wrap;
+  gap: 6px;
+  padding-top: 6px;
 }
-.chat--sidebar .recent-chats {
-  width: 100%;
+.chat--sidebar .composer-controls {
+  gap: 6px;
+  flex: 1 1 auto;
+}
+.chat--sidebar .composer-controls .chip-select {
+  max-width: 132px;
+  font-size: 0.75rem;
+}
+.chat--sidebar .cost-mode .seg {
+  padding: 4px 9px;
+  font-size: 0.72rem;
+}
+.chat--sidebar .composer-send {
+  width: 32px;
+  height: 32px;
+  margin-left: auto;
+  align-self: flex-end;
+}
+.chat--sidebar .composer-input {
+  min-height: 44px;
+  font-size: 0.92rem;
 }
 
 /* Attachment chips (shared by the composer + the follow-up box). */
