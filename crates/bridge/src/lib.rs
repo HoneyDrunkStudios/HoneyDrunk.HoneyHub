@@ -44,9 +44,9 @@ pub use artifact::{ArtifactKind, DispatchArtifact};
 pub use attachments::{append_attachment_refs, attachment_dir, write_attachments};
 pub use backend_catalog::{
     codex_rate_table, detect_default_backends, detect_one, parse_codex_rates, program_on_path,
-    BackendCapability, BackendModel, ModelPricing, ModelSource,
+    resolve_program, BackendCapability, BackendModel, ModelPricing, ModelSource,
 };
-pub use checks::{run_check, CheckOutcome};
+pub use checks::{parse_extra_checks, resolve_check, run_check, CheckDisposition, CheckOutcome};
 pub use coaching::{coach, CoachingSnapshot};
 pub use core::{BridgeRuntime, ManagedRun, ReplyOutcome};
 pub use environment::{detect_environment, BackendVersion, EnvironmentInfo};

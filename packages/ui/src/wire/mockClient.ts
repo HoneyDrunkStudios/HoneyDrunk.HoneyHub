@@ -782,17 +782,19 @@ export class MockWireClient implements WireClient {
     return this.roadmap();
   }
 
-  async runCheck(root: string, command: string): Promise<void> {
+  async runCheck(root: string, checkId: string): Promise<void> {
     // The mock doesn't run a process; script a passing check so the Groups "Run checks"
     // flow is exercisable offline.
     this.emitDevice({
       kind: "check_result",
       result: {
         root,
-        command,
+        check: checkId,
+        command: checkId,
         ok: true,
+        disposition: "ran",
         exitCode: 0,
-        output: `(demo) ${command} passed`,
+        output: `(demo) ${checkId} passed`,
         truncated: false
       }
     });

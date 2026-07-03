@@ -16,10 +16,11 @@ import {
 } from "./groupsModel";
 import {
   applyCheckOutcome,
-  checkCommandFor,
-  loadCheckCommands,
-  saveCheckCommands,
-  setCheckCommand,
+  checkIdFor,
+  KNOWN_CHECKS,
+  loadCheckIds,
+  saveCheckIds,
+  setCheckId,
   startCheck,
   summarizeChecks,
   type CheckState,
@@ -60,9 +61,9 @@ export function GroupsView({
   const [showAll, setShowAll] = useState(false);
   // The combined diff for the expanded group: one patch per member repo root.
   const [diffs, setDiffs] = useState<Record<string, GitDiff>>({});
-  // Live check runs keyed by repo root, and the user's per-repo check commands (persisted).
+  // Live check runs keyed by repo root, and the user's per-repo check picks (persisted).
   const [checks, setChecks] = useState<ChecksState>({});
-  const [commands, setCommands] = useState<Record<string, string>>(() => loadCheckCommands());
+  const [picks, setPicks] = useState<Record<string, string>>(() => loadCheckIds());
 
   const refresh = useCallback(() => {
     if (workspaceRoots.length === 0) {
@@ -124,11 +125,11 @@ export function GroupsView({
     return orderGroups(groupByBranch(merged, runs));
   }, [overviews, runs]);
 
-  const visible = useMemo(
-    () => (showAll ? groups : groups.filter(isInterestingGroup)),
-    [groups, showAll]
-  );
-  const hiddenCount = groups.length - visible.length;
+  const interesting = useMemo(() => groups.filter(isInterestingGroup), [groups]);
+  const visible = showAll ? groups : interesting;
+  // Independent of showAll, so the toggle stays available after "Show N baseline"
+  // (otherwise "Hide baseline" would disappear the moment everything is visible).
+  const baselineCount = groups.length - interesting.length;
 
   // Expand a group → request a whole-repo diff for each member so the combined view fills in.
   const toggleGroup = (group: ChangeGroup) => {
@@ -145,29 +146,42 @@ export function GroupsView({
     }
   };
 
-  // Persist a repo's check command as the user edits it (blank reverts to the default).
-  const onCommandChange = (root: string, value: string) => {
-    setCommands((prev) => {
-      const next = setCheckCommand(prev, root, value);
-      saveCheckCommands(next);
+  // Persist a repo's picked check as the user changes it (the default clears the pick).
+  const onCheckChange = (root: string, checkId: string) => {
+    setPicks((prev) => {
+      const next = setCheckId(prev, root, checkId);
+      saveCheckIds(next);
       return next;
     });
   };
 
-  // Run every member repo's declared check — the "test the group" action. Each is marked
-  // running immediately; the bridge answers with a `check_result` per repo.
+  // Run every member repo's picked named check — the "test the group" action. Each is
+  // marked running immediately; the bridge answers with a `check_result` per repo.
+  // Repos already running are skipped (the host would refuse the overlap anyway; the
+  // client-side skip keeps the denial from clobbering the live running state).
   const runChecks = (group: ChangeGroup) => {
     for (const member of group.repos) {
       const root = member.status.root;
-      const command = checkCommandFor(commands, root);
-      setChecks((prev) => startCheck(prev, { root, command }));
-      client.runCheck(root, command).catch(() =>
+      if (checks[root]?.phase === "running") {
+        continue;
+      }
+      const checkId = checkIdFor(picks, root);
+      setChecks((prev) => startCheck(prev, { root, command: checkId }));
+      client.runCheck(root, checkId).catch((error: unknown) =>
         setChecks((prev) =>
           applyCheckOutcome(prev, {
             root,
-            command,
+            check: checkId,
+            command: checkId,
             ok: false,
-            output: "could not start the check",
+            // A dispatch rejection means the request never reached the runner (dead
+            // socket, allowlist refusal) — surface the transport reason, not a fake
+            // spawn failure.
+            disposition: "denied",
+            output:
+              error instanceof Error && error.message.length > 0
+                ? `could not start the check: ${error.message}`
+                : "could not start the check",
             truncated: false
           })
         )
@@ -197,9 +211,9 @@ export function GroupsView({
           <h2>Change groups</h2>
         </div>
         <div className="groups-actions">
-          {hiddenCount > 0 && (
+          {baselineCount > 0 && (
             <button type="button" className="git-link" onClick={() => setShowAll((v) => !v)}>
-              {showAll ? "Hide baseline" : `Show ${hiddenCount} baseline`}
+              {showAll ? "Hide baseline" : `Show ${baselineCount} baseline`}
             </button>
           )}
           <button type="button" onClick={refresh} disabled={loading}>
@@ -234,8 +248,8 @@ export function GroupsView({
                   group={group}
                   diffs={diffs}
                   checks={checks}
-                  commands={commands}
-                  onCommandChange={onCommandChange}
+                  picks={picks}
+                  onCheckChange={onCheckChange}
                   onRunChecks={() => runChecks(group)}
                 />
               )}
@@ -285,19 +299,19 @@ interface GroupDetailProps {
   group: ChangeGroup;
   diffs: Record<string, GitDiff>;
   checks: ChecksState;
-  commands: Record<string, string>;
-  onCommandChange: (root: string, value: string) => void;
+  picks: Record<string, string>;
+  onCheckChange: (root: string, checkId: string) => void;
   onRunChecks: () => void;
 }
 
 /** The expanded group: a "run checks" bar, each member repo with its change count, attributed
-    runs, declared check command + result, and the combined diff across all member repos. */
+    runs, picked named check + result, and the combined diff across all member repos. */
 function GroupDetail({
   group,
   diffs,
   checks,
-  commands,
-  onCommandChange,
+  picks,
+  onCheckChange,
   onRunChecks
 }: Readonly<GroupDetailProps>): ReactElement {
   const combinedStat = useMemo(() => {
@@ -322,7 +336,12 @@ function GroupDetail({
   return (
     <div className="group-detail">
       <div className="group-checks-bar">
-        <button type="button" className="group-run-checks" onClick={onRunChecks}>
+        <button
+          type="button"
+          className="group-run-checks"
+          onClick={onRunChecks}
+          disabled={summary.running > 0}
+        >
           {summary.running > 0 ? "Running…" : "Run checks"}
         </button>
         {summary.total > 0 && (
@@ -340,8 +359,8 @@ function GroupDetail({
             key={member.status.root}
             member={member}
             runs={group.runs.filter((run) => runInRepo(run, member.status.root))}
-            command={commands[member.status.root] ?? ""}
-            onCommandChange={(value) => onCommandChange(member.status.root, value)}
+            checkId={checkIdFor(picks, member.status.root)}
+            onCheckChange={(value) => onCheckChange(member.status.root, value)}
             check={checks[member.status.root]}
           />
         ))}
@@ -378,16 +397,16 @@ function runInRepo(run: RunSummary, repoRoot: string): boolean {
 interface GroupMemberProps {
   member: GroupRepo;
   runs: RunSummary[];
-  command: string;
-  onCommandChange: (value: string) => void;
+  checkId: string;
+  onCheckChange: (checkId: string) => void;
   check: CheckState | undefined;
 }
 
 function GroupMember({
   member,
   runs,
-  command,
-  onCommandChange,
+  checkId,
+  onCheckChange,
   check
 }: Readonly<GroupMemberProps>): ReactElement {
   const name = basename(member.status.root);
@@ -411,13 +430,20 @@ function GroupMember({
         </ul>
       )}
       <div className="group-member-check">
-        <input
+        {/* Named checks only: the option set mirrors the bridge's host-owned
+            definitions — the client never sends a command line. */}
+        <select
           className="group-check-command"
-          aria-label={`Check command for ${name}`}
-          value={command}
-          placeholder="npm test"
-          onChange={(event) => onCommandChange(event.target.value)}
-        />
+          aria-label={`Check for ${name}`}
+          value={checkId}
+          onChange={(event) => onCheckChange(event.target.value)}
+        >
+          {KNOWN_CHECKS.map((known) => (
+            <option key={known.id} value={known.id}>
+              {known.command}
+            </option>
+          ))}
+        </select>
         {check !== undefined && <CheckResultView check={check} />}
       </div>
     </div>

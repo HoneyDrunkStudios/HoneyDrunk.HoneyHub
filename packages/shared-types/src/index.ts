@@ -870,13 +870,23 @@ export interface GitOpResult {
   message?: string;
 }
 
-/** The outcome of running one declared check command (a repo's build/test) in a repo root —
-    the "test a change group" action. The command is run shell-free by the bridge; a spawn
-    failure or empty command surfaces as `ok: false` with the reason in `output`. */
+/** How a check request was disposed of — explicit, so denied/timed-out runs are
+    observable states rather than indistinguishable failures. */
+export type CheckDisposition = "ran" | "denied" | "spawn_failed" | "timed_out";
+
+/** The outcome of running one **named, host-owned** check (a repo's build/test) in a
+    repo root — the "test a change group" action. The client sends only a check id;
+    the host resolves it against its own definitions and refuses anything else. Argv
+    is spawned shell-free with a timeout; a refusal, spawn failure, or timeout
+    surfaces as `ok: false` with its disposition and the reason in `output`. */
 export interface CheckOutcome {
   root: string;
+  /** The check id as requested (echoed for correlation). */
+  check: string;
+  /** The resolved command line (display only). */
   command: string;
   ok: boolean;
+  disposition: CheckDisposition;
   /** The process exit code, when one was returned (absent on signal/spawn failure). */
   exitCode?: number;
   /** Combined stdout + stderr, trimmed and clamped. */
@@ -1002,7 +1012,7 @@ export type ClientCommand =
   | { kind: "roadmap" }
   | { kind: "scaffold_architecture"; name?: string; location?: string }
   | { kind: "pull_architecture" }
-  | { kind: "run_check"; root: string; command: string };
+  | { kind: "run_check"; root: string; check: string };
 
 export interface ReconnectRequest {
   sessionId: string;

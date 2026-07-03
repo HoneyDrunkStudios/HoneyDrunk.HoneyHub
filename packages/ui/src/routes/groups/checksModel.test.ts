@@ -2,18 +2,28 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { CheckOutcome } from "@honeydrunk/honeyhub-types";
 import {
   applyCheckOutcome,
-  checkCommandFor,
-  DEFAULT_CHECK_COMMAND,
-  loadCheckCommands,
-  saveCheckCommands,
-  setCheckCommand,
+  checkIdFor,
+  DEFAULT_CHECK_ID,
+  KNOWN_CHECKS,
+  loadCheckIds,
+  saveCheckIds,
+  setCheckId,
   startCheck,
   summarizeChecks,
   type ChecksState
 } from "./checksModel";
 
 function outcome(root: string, ok: boolean, over: Partial<CheckOutcome> = {}): CheckOutcome {
-  return { root, command: "npm test", ok, output: ok ? "ok" : "boom", truncated: false, ...over };
+  return {
+    root,
+    check: "npm-test",
+    command: "npm test",
+    ok,
+    disposition: "ran",
+    output: ok ? "ok" : "boom",
+    truncated: false,
+    ...over
+  };
 }
 
 // The runtime's localStorage varies by Node version (absent without --localstorage-file on
@@ -42,51 +52,68 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-describe("command selection", () => {
-  it("falls back to the default for unknown or blank entries", () => {
-    expect(checkCommandFor({}, "/a")).toBe(DEFAULT_CHECK_COMMAND);
-    expect(checkCommandFor({ "/a": "   " }, "/a")).toBe(DEFAULT_CHECK_COMMAND);
-    expect(checkCommandFor({ "/a": "cargo test" }, "/a")).toBe("cargo test");
+describe("check selection", () => {
+  it("falls back to the default when a repo has no pick", () => {
+    expect(checkIdFor({}, "/a")).toBe(DEFAULT_CHECK_ID);
+    expect(checkIdFor({ "/a": "cargo-test" }, "/a")).toBe("cargo-test");
   });
 
-  it("sets and clears a per-repo command", () => {
-    const set = setCheckCommand({}, "/a", "cargo test");
-    expect(set["/a"]).toBe("cargo test");
-    const cleared = setCheckCommand(set, "/a", "  ");
-    expect(cleared["/a"]).toBeUndefined();
+  it("sets and clears a per-repo pick (default id clears the override)", () => {
+    const set = setCheckId({}, "/a", "cargo-test");
+    expect(set["/a"]).toBe("cargo-test");
+    expect(setCheckId(set, "/a", DEFAULT_CHECK_ID)["/a"]).toBeUndefined();
+  });
+
+  it("offers only named checks (no free command lines)", () => {
+    expect(KNOWN_CHECKS.length).toBeGreaterThan(0);
+    expect(KNOWN_CHECKS.some((check) => check.id === DEFAULT_CHECK_ID)).toBe(true);
+    for (const check of KNOWN_CHECKS) {
+      expect(check.id).not.toContain(" ");
+    }
   });
 });
 
 describe("persistence", () => {
-  it("round-trips through storage and tolerates garbage", () => {
-    saveCheckCommands({ "/a": "cargo test", "/b": "npm run ci" });
-    expect(loadCheckCommands()).toEqual({ "/a": "cargo test", "/b": "npm run ci" });
+  it("round-trips known ids and tolerates garbage", () => {
+    saveCheckIds({ "/a": "cargo-test", "/b": "pytest" });
+    expect(loadCheckIds()).toEqual({ "/a": "cargo-test", "/b": "pytest" });
 
-    globalThis.localStorage?.setItem("honeyhub.groupChecks.v1", "not json");
-    expect(loadCheckCommands()).toEqual({});
+    globalThis.localStorage?.setItem("honeyhub.groupChecks.v2", "not json");
+    expect(loadCheckIds()).toEqual({});
 
-    globalThis.localStorage?.setItem("honeyhub.groupChecks.v1", JSON.stringify(["nope"]));
-    expect(loadCheckCommands()).toEqual({});
+    globalThis.localStorage?.setItem("honeyhub.groupChecks.v2", JSON.stringify(["nope"]));
+    expect(loadCheckIds()).toEqual({});
   });
 
-  it("drops non-string command values", () => {
+  it("drops unknown ids and non-string values, mapping recognizable command lines", () => {
+    globalThis.localStorage?.setItem(
+      "honeyhub.groupChecks.v2",
+      JSON.stringify({ "/a": "cargo-test", "/b": "npm test", "/c": 42, "/d": "evil; rm -rf" })
+    );
+    // "npm test" maps onto its named check; garbage is dropped.
+    expect(loadCheckIds()).toEqual({ "/a": "cargo-test", "/b": "npm-test" });
+  });
+
+  it("migrates v1 free-text commands to named checks once, then removes the old key", () => {
     globalThis.localStorage?.setItem(
       "honeyhub.groupChecks.v1",
-      JSON.stringify({ "/a": "npm test", "/b": 42 })
+      JSON.stringify({ "/rust": "cargo test --workspace", "/py": "pytest", "/odd": "./run.sh" })
     );
-    expect(loadCheckCommands()).toEqual({ "/a": "npm test" });
+    expect(loadCheckIds()).toEqual({ "/rust": "cargo-test", "/py": "pytest" });
+    expect(globalThis.localStorage?.getItem("honeyhub.groupChecks.v1")).toBeNull();
+    expect(globalThis.localStorage?.getItem("honeyhub.groupChecks.v2")).not.toBeNull();
   });
 
   it("does not throw when storage is unavailable", () => {
     vi.stubGlobal("localStorage", undefined);
-    expect(() => saveCheckCommands({ "/a": "npm test" })).not.toThrow();
-    expect(loadCheckCommands()).toEqual({});
+    expect(() => saveCheckIds({ "/a": "cargo-test" })).not.toThrow();
+    expect(loadCheckIds()).toEqual({});
   });
 });
 
 describe("run state", () => {
   it("starts a check as running then folds its outcome", () => {
-    let state: ChecksState = startCheck({}, { root: "/a", command: "npm test" });
+    let state: ChecksState = startCheck({}, { root: "/a", command: "npm-test" });
     expect(state["/a"]!.phase).toBe("running");
 
     state = applyCheckOutcome(state, outcome("/a", true, { exitCode: 0 }));
@@ -97,6 +124,15 @@ describe("run state", () => {
     state = applyCheckOutcome(state, outcome("/a", false, { exitCode: 1, truncated: true }));
     expect(state["/a"]!.phase).toBe("failed");
     expect(state["/a"]!.truncated).toBe(true);
+  });
+
+  it("folds refusals (denied / timed out) as failures with the reason", () => {
+    const state = applyCheckOutcome(
+      {},
+      outcome("/a", false, { disposition: "denied", output: "not an allowed check" })
+    );
+    expect(state["/a"]!.phase).toBe("failed");
+    expect(state["/a"]!.output).toBe("not an allowed check");
   });
 
   it("records an outcome for a repo we never started", () => {

@@ -487,14 +487,21 @@ pub enum ClientCommand {
     /// Fast-forward (`git pull --ff-only`) the Architecture repo, then re-read it. Answers
     /// with a [`BridgeEventPayload::Roadmap`] of the refreshed repo (or a git error).
     PullArchitecture,
-    /// **Run** (confirmation-gated in the UI): run a declared check command (the repo's
-    /// build/test) in a repo root — the "test a change group" action. Crosses the read-only
-    /// boundary like a git write, so the host gates `root` against the allowlist. The command
-    /// is run shell-free (tokenized; no metacharacter interpretation). The host answers with a
-    /// single [`BridgeEventPayload::CheckResult`].
+    /// **Run**: run a **named, host-owned** check (the repo's build/test) in a repo root —
+    /// the "test a change group" action. The client sends only a check id; the host resolves
+    /// it against its own definitions (built-ins + `HONEYHUB_EXTRA_CHECKS`) and refuses
+    /// anything else, gates `root` against the workspace allowlist, rejects overlapping runs
+    /// per root, and kills the process after a timeout. Argv is spawned directly (no shell).
+    /// The host answers with a single [`BridgeEventPayload::CheckResult`] carrying an
+    /// explicit disposition (ran / denied / spawn_failed / timed_out).
     RunCheck {
         root: String,
-        command: String,
+        /// The named check id. `alias = "command"` lets a stale pre-rename client
+        /// degrade gracefully: its free-text command line arrives here, fails the
+        /// id allowlist, and comes back as an explicit `denied` outcome instead of
+        /// an opaque bad-frame error.
+        #[serde(alias = "command")]
+        check: String,
     },
 }
 
@@ -1608,6 +1615,34 @@ mod tests {
     }
 
     #[test]
+    fn parses_run_check_and_tolerates_the_legacy_command_field() {
+        let current: ClientCommand = serde_json::from_value(
+            json!({ "kind": "run_check", "root": "C:/work", "check": "npm-test" }),
+        )
+        .expect("current shape parses");
+        assert_eq!(
+            current,
+            ClientCommand::RunCheck {
+                root: "C:/work".to_string(),
+                check: "npm-test".to_string(),
+            }
+        );
+        // A stale pre-rename client sends `command`; the alias maps it onto `check`
+        // so the request degrades into an id-allowlist denial, not a bad frame.
+        let legacy: ClientCommand = serde_json::from_value(
+            json!({ "kind": "run_check", "root": "C:/work", "command": "npm test" }),
+        )
+        .expect("legacy shape parses");
+        assert_eq!(
+            legacy,
+            ClientCommand::RunCheck {
+                root: "C:/work".to_string(),
+                check: "npm test".to_string(),
+            }
+        );
+    }
+
+    #[test]
     fn round_trips_wire_frames_and_payload_variants() {
         let created_at = "2026-06-07T12:00:00Z";
         let message = DispatchMessage {
@@ -2496,8 +2531,10 @@ mod tests {
                 at,
                 from_json!(CheckOutcome, {
                     "root": "C:/work",
+                    "check": "npm-test",
                     "command": "npm test",
                     "ok": true,
+                    "disposition": "ran",
                     "exitCode": 0,
                     "output": "all good",
                     "truncated": false

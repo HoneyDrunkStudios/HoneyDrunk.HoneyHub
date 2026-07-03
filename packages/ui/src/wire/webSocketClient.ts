@@ -569,7 +569,7 @@ export class WebSocketWireClient implements WireClient {
     await this.dispatch({ kind: "pull_architecture" });
   }
 
-  async runCheck(root: string, command: string): Promise<void> {
-    await this.dispatch({ kind: "run_check", root, command });
+  async runCheck(root: string, checkId: string): Promise<void> {
+    await this.dispatch({ kind: "run_check", root, check: checkId });
   }
 }

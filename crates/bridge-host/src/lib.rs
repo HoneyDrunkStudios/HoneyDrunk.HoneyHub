@@ -46,6 +46,9 @@ pub const DEFAULT_POLL_INTERVAL: Duration = Duration::from_millis(80);
 struct Host {
     runtime: Mutex<honeyhub_bridge::BridgeRuntime>,
     active_runs: Mutex<std::collections::HashSet<String>>,
+    /// Roots with a group check currently in flight — overlapping requests for the
+    /// same root are refused so repeated clicks can't stack subprocesses.
+    active_checks: Mutex<std::collections::HashSet<String>>,
     events: broadcast::Sender<BridgeEvent>,
     /// The live filesystem watcher (the recommended OS-native backend) plus the roots it is
     /// currently watching. Re-pointed whenever the workspace allowlist changes. `None` until
@@ -87,6 +90,7 @@ pub async fn serve(
     let host = Arc::new(Host {
         runtime: Mutex::new(runtime),
         active_runs: Mutex::new(std::collections::HashSet::new()),
+        active_checks: Mutex::new(std::collections::HashSet::new()),
         events: events_tx,
         watcher: Mutex::new(None),
     });
@@ -792,16 +796,16 @@ async fn handle_command(
                 honeyhub_bridge::pull_architecture(&roots)
                     .map(|snapshot| one(BridgeEvent::roadmap(new_id(), now_rfc3339(), snapshot)))
             }
-            ClientCommand::RunCheck { root, command } => {
-                // Running a declared check (build/test) crosses the read-only boundary like a
-                // git write, so gate the repo to the allowlist first; `run_check` itself never
-                // errors (a spawn failure becomes an `ok: false` outcome surfaced inline).
+            ClientCommand::RunCheck { root, check } => {
+                // Running a named check (build/test) crosses the read-only boundary like a
+                // git write, so gate the repo to the allowlist first. The check id resolves
+                // against host-owned definitions inside `run_check` (unknown ids come back
+                // as explicit `denied` outcomes). The subprocess runs OFF the runtime lock
+                // on a blocking thread — a slow test suite must not wedge the bridge — and
+                // overlapping checks for the same root are refused while one is in flight.
                 require(runtime.workspace_allows(&root), "check root").map(|()| {
-                    one(BridgeEvent::check_result(
-                        new_id(),
-                        now_rfc3339(),
-                        honeyhub_bridge::run_check(&root, &command),
-                    ))
+                    spawn_check(host, root, check);
+                    None
                 })
             }
             ClientCommand::Resume { .. } => Err(BridgeError::new(
@@ -854,6 +858,52 @@ async fn send_frame(
 
 fn new_id() -> String {
     uuid::Uuid::new_v4().to_string()
+}
+
+/// Run a named check without holding the runtime lock: reserve the per-root
+/// in-flight slot (refusing overlaps with an explicit `denied` outcome), execute on
+/// a blocking thread (the runner itself enforces the id allowlist, the timeout with
+/// a process-tree kill, and output caps), and **broadcast** the `check_result` so
+/// every connected cockpit sees it — including one that reconnected mid-check, as
+/// long as it is connected when the check finishes.
+fn spawn_check(host: &Arc<Host>, root: String, check: String) {
+    let host = Arc::clone(host);
+    tokio::spawn(async move {
+        let publish = |outcome: honeyhub_bridge::CheckOutcome| {
+            let _ = host
+                .events
+                .send(BridgeEvent::check_result(new_id(), now_rfc3339(), outcome));
+        };
+        // Key the guard on the canonical path, so two spellings of the same repo
+        // ("C:/work" vs "C:\work\.") cannot stack subprocesses in one working tree.
+        let guard_key = std::fs::canonicalize(&root)
+            .map(|path| path.to_string_lossy().into_owned())
+            .unwrap_or_else(|_| root.clone());
+        if !host.active_checks.lock().await.insert(guard_key.clone()) {
+            publish(honeyhub_bridge::CheckOutcome::denied(
+                &root,
+                &check,
+                "a check is already running in this repo",
+            ));
+            return;
+        }
+
+        let run_root = root.clone();
+        let run_check_id = check.clone();
+        let outcome = tokio::task::spawn_blocking(move || {
+            honeyhub_bridge::run_check(&run_root, &run_check_id)
+        })
+        .await
+        .unwrap_or_else(|_| {
+            honeyhub_bridge::CheckOutcome::denied(
+                &root,
+                &check,
+                "the check task panicked or was cancelled",
+            )
+        });
+        host.active_checks.lock().await.remove(&guard_key);
+        publish(outcome);
+    });
 }
 
 /// Gate a command on an allowlisted workspace root, yielding a uniform error

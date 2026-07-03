@@ -301,36 +301,42 @@ pub fn detect_default_backends() -> Vec<BackendCapability> {
         .collect()
 }
 
-/// Resolve whether an executable named `program` exists on `PATH`. A name that
-/// already contains a path separator (or is absolute) is checked directly. On
-/// Windows the `PATHEXT` extensions are tried in addition to the bare name.
-pub fn program_on_path(program: &str) -> bool {
+/// Resolve `program` to the concrete file to launch. A name that already contains a
+/// path separator (or is absolute) is checked directly; otherwise `PATH` is walked,
+/// trying the bare name plus the Windows `PATHEXT` extensions — so `npm` resolves to
+/// `npm.cmd` and spawns correctly on Windows.
+pub fn resolve_program(program: &str) -> Option<std::path::PathBuf> {
     if program.is_empty() {
-        return false;
+        return None;
     }
     let direct = std::path::Path::new(program);
     if direct.is_absolute() || program.contains('/') || program.contains('\\') {
-        return direct.is_file();
+        return direct.is_file().then(|| direct.to_path_buf());
     }
 
-    let Some(path) = std::env::var_os("PATH") else {
-        return false;
-    };
+    let path = std::env::var_os("PATH")?;
     let extensions = windows_path_extensions();
     for dir in std::env::split_paths(&path) {
         if dir.as_os_str().is_empty() {
             continue;
         }
-        if dir.join(program).is_file() {
-            return true;
+        let bare = dir.join(program);
+        if bare.is_file() {
+            return Some(bare);
         }
         for ext in &extensions {
-            if dir.join(format!("{program}{ext}")).is_file() {
-                return true;
+            let with_ext = dir.join(format!("{program}{ext}"));
+            if with_ext.is_file() {
+                return Some(with_ext);
             }
         }
     }
-    false
+    None
+}
+
+/// Whether an executable named `program` exists on `PATH` (see [`resolve_program`]).
+pub fn program_on_path(program: &str) -> bool {
+    resolve_program(program).is_some()
 }
 
 /// The executable extensions to try on Windows (from `PATHEXT`), or none elsewhere.
