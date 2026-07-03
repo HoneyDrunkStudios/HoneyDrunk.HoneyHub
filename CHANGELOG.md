@@ -24,6 +24,10 @@ user-centered Jobs page.
 - **Chat dock**: the right-hand chat sidebar is THE desktop chat surface (the Chat page remains
   on small screens only) and is resizable by dragging its left edge or focusing the divider and
   using the arrow keys; the width is clamped and persisted.
+- **Chat threads**: past conversations are now manageable threads. Search them by name or task
+  text, rename them (the original task stays searchable), pin favorites to the top (pinned
+  threads also survive the 100-chat history cap), and delete with a two-click confirm. A
+  rename or pin set on a thread survives later saves from a live run.
 - **Jobs page**: centered on YOUR jobs (your probe patterns and agent-related scheduled tasks)
   with a local start/stop history per job; the curated built-in rows and the raw process table
   moved behind a Diagnostics toggle.

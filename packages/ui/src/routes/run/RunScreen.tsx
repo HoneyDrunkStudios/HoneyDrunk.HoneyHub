@@ -32,7 +32,12 @@ import { WorkspacePicker } from "./WorkspacePicker";
 import { ModelMenu, type ModelOption } from "./ModelMenu";
 import {
   getChat,
+  chatTitle,
+  deleteChat,
   loadChatSummaries,
+  renameChat,
+  searchChatSummaries,
+  setChatPinned,
   saveChat,
   type ChatRecord,
   type ChatSummary
@@ -297,7 +302,9 @@ export function RunScreen({
   // both surfaces without re-parsing the whole store on every keystroke.
   // The deps are refresh TRIGGERS, not inputs: saveChat fires on run updates, so a
   // run starting/ending re-reads the store and both surfaces stay current.
-  const chatSummaries = useMemo(() => loadChatSummaries(), [runId, runState]);
+  // historyVersion bumps on rename/delete/pin so those mutations refresh the list too.
+  const [historyVersion, setHistoryVersion] = useState(0);
+  const chatSummaries = useMemo(() => loadChatSummaries(), [runId, runState, historyVersion]);
   // Pre-send cost signal for the composer: "included in your plan" on a flat sub
   // (only for a resolved, non-metered model — usage-credit models bill regardless),
   // else an input floor from the catalog's rates plus a median/p90 projection from
@@ -1073,7 +1080,11 @@ export function RunScreen({
           </p>
           {costHint !== undefined && <p className="cost-estimate">{costHint}</p>}
 
-          <RecentChats summaries={chatSummaries} onOpen={setOpenedChat} />
+          <RecentChats
+            summaries={chatSummaries}
+            onOpen={setOpenedChat}
+            onMutated={() => setHistoryVersion((version) => version + 1)}
+          />
 
           <SyncedHistory sessions={syncedSessions} onOpen={openSyncedSession} />
     </div>
@@ -1235,37 +1246,145 @@ interface RecentChatsProps {
   summaries: ChatSummary[];
   /** Open a past chat read-only. The id is resolved to its full record here. */
   onOpen: (chat: ChatRecord | undefined) => void;
+  /** The store changed (rename/delete/pin) — the parent re-reads the summaries. */
+  onMutated: () => void;
 }
 
-/** Locally-saved recent chats (top 8). A flat module-scope component so the click
-    handler is not a deeply nested callback inside the composer render. Renders nothing
-    when there is no local history. */
-function RecentChats({ summaries, onOpen }: Readonly<RecentChatsProps>): ReactElement | null {
-  const recents = summaries.slice(0, 8);
-  if (recents.length === 0) {
+/** How many threads show without a search (pinned always show; search shows all hits). */
+const RECENT_CHATS_LIMIT = 8;
+
+/** Locally-saved chat threads: searchable, pinnable, renamable, deletable. A flat
+    module-scope component so the handlers are not deeply nested callbacks inside the
+    composer render. Renders nothing when there is no local history at all. */
+function RecentChats({ summaries, onOpen, onMutated }: Readonly<RecentChatsProps>): ReactElement | null {
+  const [query, setQuery] = useState("");
+  // The row being renamed (id + draft), and the row whose delete awaits a second click.
+  const [renaming, setRenaming] = useState<{ id: string; draft: string } | undefined>(undefined);
+  const [confirmingDelete, setConfirmingDelete] = useState<string | undefined>(undefined);
+
+  if (summaries.length === 0) {
     return null;
   }
+  const searching = query.trim() !== "";
+  const matches = searchChatSummaries(summaries, query);
+  // Without a search: pinned always show, plus the newest unpinned up to the limit.
+  // With one: every match shows (the store caps at 100, so this stays bounded).
+  const threads = searching
+    ? matches
+    : matches.filter((chat, index) => chat.pinned === true || index < RECENT_CHATS_LIMIT);
+
+  const commitRename = () => {
+    if (renaming !== undefined) {
+      renameChat(renaming.id, renaming.draft);
+      setRenaming(undefined);
+      onMutated();
+    }
+  };
+
   return (
     <div className="recent-chats">
-      <p className="eyebrow">Recent chats</p>
-      <ul aria-label="Recent chats">
-        {recents.map((chat) => (
-          <li key={chat.id}>
-            <button
-              type="button"
-              className="recent-chat"
-              onClick={() => onOpen(getChat(chat.id))}
-            >
-              <span className="recent-task">{chat.task}</span>
-              <span className="recent-meta">
-                {chat.backend === undefined ? "-" : backendLabel(chat.backend)}
-                {chat.model === undefined ? "" : ` · ${chat.model}`}
-                {` · $${chat.totalUsd.toFixed(4)}`}
-              </span>
-            </button>
-          </li>
-        ))}
-      </ul>
+      <div className="recent-chats-head">
+        <p className="eyebrow">Chats</p>
+        <input
+          className="recent-search"
+          type="search"
+          aria-label="Search chats"
+          placeholder="Search chats…"
+          value={query}
+          onChange={(event) => setQuery(event.target.value)}
+        />
+      </div>
+      {threads.length === 0 ? (
+        <p className="recent-empty">No chats match “{query}”.</p>
+      ) : (
+        <ul aria-label="Chats">
+          {threads.map((chat) => (
+            <li key={chat.id} className="recent-row">
+              {renaming?.id === chat.id ? (
+                <input
+                  className="recent-rename"
+                  type="text"
+                  aria-label="Chat name"
+                  value={renaming.draft}
+                  autoFocus
+                  onChange={(event) => setRenaming({ id: chat.id, draft: event.target.value })}
+                  onBlur={commitRename}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter") {
+                      commitRename();
+                    } else if (event.key === "Escape") {
+                      setRenaming(undefined);
+                    }
+                  }}
+                />
+              ) : (
+                <>
+                  <button
+                    type="button"
+                    className="recent-chat"
+                    onClick={() => onOpen(getChat(chat.id))}
+                  >
+                    <span className="recent-task">
+                      {chat.pinned === true && (
+                        <span className="recent-pin-mark" aria-label="Pinned">
+                          ★{" "}
+                        </span>
+                      )}
+                      {chatTitle(chat)}
+                    </span>
+                    <span className="recent-meta">
+                      {chat.backend === undefined ? "-" : backendLabel(chat.backend)}
+                      {chat.model === undefined ? "" : ` · ${chat.model}`}
+                      {` · $${chat.totalUsd.toFixed(4)}`}
+                    </span>
+                  </button>
+                  <span className="recent-actions">
+                    <button
+                      type="button"
+                      className="recent-action"
+                      aria-label={chat.pinned === true ? "Unpin chat" : "Pin chat"}
+                      title={chat.pinned === true ? "Unpin" : "Pin to top"}
+                      onClick={() => {
+                        setChatPinned(chat.id, chat.pinned !== true);
+                        onMutated();
+                      }}
+                    >
+                      {chat.pinned === true ? "★" : "☆"}
+                    </button>
+                    <button
+                      type="button"
+                      className="recent-action"
+                      aria-label="Rename chat"
+                      title="Rename"
+                      onClick={() => setRenaming({ id: chat.id, draft: chatTitle(chat) })}
+                    >
+                      ✎
+                    </button>
+                    <button
+                      type="button"
+                      className={`recent-action${confirmingDelete === chat.id ? " is-danger" : ""}`}
+                      aria-label={confirmingDelete === chat.id ? "Confirm delete" : "Delete chat"}
+                      title={confirmingDelete === chat.id ? "Click again to delete" : "Delete"}
+                      onClick={() => {
+                        if (confirmingDelete === chat.id) {
+                          deleteChat(chat.id);
+                          setConfirmingDelete(undefined);
+                          onMutated();
+                        } else {
+                          setConfirmingDelete(chat.id);
+                        }
+                      }}
+                      onBlur={() => setConfirmingDelete(undefined)}
+                    >
+                      {confirmingDelete === chat.id ? "✔" : "✕"}
+                    </button>
+                  </span>
+                </>
+              )}
+            </li>
+          ))}
+        </ul>
+      )}
     </div>
   );
 }

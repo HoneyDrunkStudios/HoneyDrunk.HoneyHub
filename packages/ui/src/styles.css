@@ -3972,6 +3972,93 @@ h2 {
   gap: 4px;
 }
 
+.recent-chats-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.recent-search {
+  flex: 0 1 200px;
+  min-width: 0;
+  padding: 5px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--panel-2);
+  color: var(--text);
+  font: inherit;
+  font-size: 0.8rem;
+}
+
+.recent-empty {
+  margin: 0;
+  color: var(--text-dim);
+  font-size: 0.8rem;
+}
+
+/* A thread row: the open button fills the row; pin/rename/delete reveal on hover. */
+.recent-row {
+  position: relative;
+  display: flex;
+  align-items: stretch;
+  gap: 4px;
+}
+
+.recent-row .recent-chat {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.recent-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  opacity: 0;
+  transition: opacity 120ms ease;
+}
+
+.recent-row:hover .recent-actions,
+.recent-row:focus-within .recent-actions {
+  opacity: 1;
+}
+
+.recent-action {
+  padding: 4px 7px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-dim);
+  font-size: 0.82rem;
+  cursor: pointer;
+}
+
+.recent-action:hover {
+  border-color: var(--border);
+  background: var(--panel-2);
+  color: var(--text);
+}
+
+.recent-action.is-danger {
+  border-color: var(--danger, #e5484d);
+  color: var(--danger, #e5484d);
+}
+
+.recent-pin-mark {
+  color: var(--neon-blue);
+}
+
+.recent-rename {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 9px 12px;
+  border: 1px solid var(--neon-blue-line);
+  border-radius: var(--radius-sm);
+  background: var(--panel-2);
+  color: var(--text);
+  font: inherit;
+}
+
 .recent-chat {
   display: flex;
   align-items: baseline;
