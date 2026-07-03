@@ -553,6 +553,18 @@ export class WebSocketWireClient implements WireClient {
     await this.dispatch({ kind: "session_detail", sessionId });
   }
 
+  async renameSession(sessionId: string, title: string): Promise<void> {
+    await this.dispatch({ kind: "rename_session", sessionId, title });
+  }
+
+  async deleteSession(sessionId: string): Promise<void> {
+    await this.dispatch({ kind: "delete_session", sessionId });
+  }
+
+  async pinSession(sessionId: string, pinned: boolean): Promise<void> {
+    await this.dispatch({ kind: "pin_session", sessionId, pinned });
+  }
+
   async roadmap(): Promise<void> {
     await this.dispatch({ kind: "roadmap" });
   }

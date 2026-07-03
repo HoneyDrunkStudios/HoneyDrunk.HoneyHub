@@ -783,6 +783,7 @@ mod tests {
         );
         let request = StartRunRequest {
             session: crate::session::DispatchSession {
+                pinned: false,
                 id: "s1".to_string(),
                 backend: AgentBackend::ClaudeLocal,
                 title: "t".to_string(),

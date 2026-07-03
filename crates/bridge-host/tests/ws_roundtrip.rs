@@ -118,6 +118,7 @@ fn runtime() -> BridgeRuntime {
 
 fn session() -> DispatchSession {
     DispatchSession {
+        pinned: false,
         id: "session-1".to_string(),
         backend: AgentBackend::ClaudeLocal,
         title: "host test".to_string(),

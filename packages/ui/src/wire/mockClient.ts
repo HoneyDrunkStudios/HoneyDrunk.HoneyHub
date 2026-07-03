@@ -6,6 +6,7 @@ import type {
   BridgeEventPayload,
   DirListing,
   DispatchRunState,
+  DispatchSession,
   FileContents,
   ExpiringObject,
   JobProbe,
@@ -589,22 +590,46 @@ export class MockWireClient implements WireClient {
     this.emitGitWrite(root, "delete-branch", `(demo) deleted ${name}`, false);
   }
 
+  // The mock's durable session list, mutable so rename/delete/pin are exercisable
+  // offline exactly like the real host's store-backed thread management.
+  private mockSessions: DispatchSession[] = [
+    {
+      id: "sess-past-1",
+      backend: "claude.local",
+      title: "Wire the deploy triggers",
+      workspaceRoot: "/demo/HoneyHub",
+      createdAt: this.createdAt,
+      updatedAt: this.createdAt
+    }
+  ];
+
+  private emitSessionList(): void {
+    this.emitDevice({ kind: "session_list", sessions: [...this.mockSessions] });
+  }
+
   async listSessions(): Promise<void> {
     // The real host reads the LocalStore; the mock scripts one durable past session so the
     // synced-history surface is exercisable offline.
-    this.emitDevice({
-      kind: "session_list",
-      sessions: [
-        {
-          id: "sess-past-1",
-          backend: "claude.local",
-          title: "Wire the deploy triggers",
-          workspaceRoot: "/demo/HoneyHub",
-          createdAt: this.createdAt,
-          updatedAt: this.createdAt
-        }
-      ]
-    });
+    this.emitSessionList();
+  }
+
+  async renameSession(sessionId: string, title: string): Promise<void> {
+    this.mockSessions = this.mockSessions.map((session) =>
+      session.id === sessionId ? { ...session, title } : session
+    );
+    this.emitSessionList();
+  }
+
+  async deleteSession(sessionId: string): Promise<void> {
+    this.mockSessions = this.mockSessions.filter((session) => session.id !== sessionId);
+    this.emitSessionList();
+  }
+
+  async pinSession(sessionId: string, pinned: boolean): Promise<void> {
+    this.mockSessions = this.mockSessions.map((session) =>
+      session.id === sessionId ? { ...session, pinned } : session
+    );
+    this.emitSessionList();
   }
 
   async sessionDetail(sessionId: string): Promise<void> {

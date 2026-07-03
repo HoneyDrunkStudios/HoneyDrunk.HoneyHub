@@ -470,6 +470,24 @@ pub enum ClientCommand {
     SessionDetail {
         session_id: String,
     },
+    /// Rename a persisted session (thread management). The host applies the rename to
+    /// its store and answers with a refreshed [`BridgeEventPayload::SessionList`].
+    RenameSession {
+        session_id: String,
+        title: String,
+    },
+    /// Delete a persisted session (record + transcripts), answering with a refreshed
+    /// [`BridgeEventPayload::SessionList`].
+    DeleteSession {
+        session_id: String,
+    },
+    /// Pin/unpin a persisted session (sorts first; a pinned session's transcript is
+    /// exempt from retention pruning), answering with a refreshed
+    /// [`BridgeEventPayload::SessionList`].
+    PinSession {
+        session_id: String,
+        pinned: bool,
+    },
     /// Read the roadmap snapshot from the Architecture repo's `initiatives/current-focus.md`
     /// (control-hub #6). A read-only query carrying no fields; the host answers with a single
     /// [`BridgeEventPayload::Roadmap`] (`found: false` when no repo is present).
@@ -1693,6 +1711,7 @@ mod tests {
                 ClientCommand::Start {
                     request: Box::new(StartRunRequest {
                         session: DispatchSession {
+                            pinned: false,
                             id: "session-1".to_string(),
                             backend: AgentBackend::ClaudeLocal,
                             title: "Bridge".to_string(),

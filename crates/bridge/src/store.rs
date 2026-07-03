@@ -73,6 +73,10 @@ struct StoredSession {
     session: DispatchSession,
     #[serde(default)]
     pinned: bool,
+    /// Set when the operator renamed the session; a live-run upsert (which carries
+    /// the adapter's task-derived title) must not clobber the chosen name.
+    #[serde(default)]
+    renamed: bool,
     #[serde(default)]
     runs: BTreeMap<String, StoredRun>,
 }
@@ -177,13 +181,22 @@ impl LocalStore {
 
     pub fn upsert_session(&mut self, session: &DispatchSession) -> Result<(), StoreError> {
         match self.data.sessions.get_mut(&session.id) {
-            Some(stored) => stored.session = session.clone(),
+            Some(stored) => {
+                // An operator rename outlives live-run updates (which carry the
+                // adapter's task-derived title).
+                let kept_title = stored.renamed.then(|| stored.session.title.clone());
+                stored.session = session.clone();
+                if let Some(title) = kept_title {
+                    stored.session.title = title;
+                }
+            }
             None => {
                 self.data.sessions.insert(
                     session.id.clone(),
                     StoredSession {
                         session: session.clone(),
                         pinned: false,
+                        renamed: false,
                         runs: BTreeMap::new(),
                     },
                 );
@@ -310,12 +323,47 @@ impl LocalStore {
             .collect()
     }
 
+    /// The stored sessions, each stamped with its live pin state (the store wrapper
+    /// owns pinning, so a live-run `upsert_session` can never clear a pin).
     pub fn sessions(&self) -> Vec<DispatchSession> {
         self.data
             .sessions
             .values()
-            .map(|stored| stored.session.clone())
+            .map(|stored| {
+                let mut session = stored.session.clone();
+                session.pinned = stored.pinned;
+                session
+            })
             .collect()
+    }
+
+    /// Rename a session (the cockpit's thread rename). An empty title is refused —
+    /// the title is the only human handle a durable session has.
+    pub fn rename_session(&mut self, session_id: &str, title: &str) -> Result<(), StoreError> {
+        let trimmed = title.trim();
+        if trimmed.is_empty() {
+            return Err(StoreError::new("invalid_title", "title must not be empty"));
+        }
+        let stored =
+            self.data.sessions.get_mut(session_id).ok_or_else(|| {
+                StoreError::new("session_not_found", format!("session {session_id}"))
+            })?;
+        stored.session.title = trimmed.to_string();
+        stored.renamed = true;
+        self.save()
+    }
+
+    /// Delete a session outright: its structured record AND its runs' transcript
+    /// files (best-effort on the files — a missing one is already gone).
+    pub fn delete_session(&mut self, session_id: &str) -> Result<(), StoreError> {
+        let stored =
+            self.data.sessions.remove(session_id).ok_or_else(|| {
+                StoreError::new("session_not_found", format!("session {session_id}"))
+            })?;
+        for run_id in stored.runs.keys() {
+            let _ = fs::remove_file(self.transcript_path(run_id));
+        }
+        self.save()
     }
 
     pub fn runs(&self, session_id: &str) -> Vec<DispatchRun> {
@@ -431,6 +479,7 @@ mod tests {
 
     fn session(id: &str) -> DispatchSession {
         DispatchSession {
+            pinned: false,
             id: id.to_string(),
             backend: AgentBackend::ClaudeLocal,
             title: "Store test".to_string(),
@@ -613,6 +662,45 @@ mod tests {
         let pruned = store.prune("2026-06-01T00:00:00.000Z").expect("prunes");
         assert_eq!(pruned, 0);
         assert_eq!(store.read_transcript("r1").expect("reads").len(), 1);
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn thread_management_renames_pins_and_deletes_sessions() {
+        let root = temp_root();
+        let mut store = LocalStore::open(&root).expect("opens");
+        store.upsert_session(&session("s1")).expect("session");
+        store
+            .put_run(&terminal_run("s1", "r1", "2026-06-01T01:00:00.000Z"))
+            .expect("run");
+        store
+            .append_transcript(&message("s1", "r1", "hello"))
+            .expect("transcript");
+
+        // Rename sticks, survives a live-run upsert, and refuses an empty title.
+        store
+            .rename_session("s1", "  My thread  ")
+            .expect("renames");
+        assert_eq!(store.sessions()[0].title, "My thread");
+        store.upsert_session(&session("s1")).expect("re-upserts");
+        assert_eq!(store.sessions()[0].title, "My thread");
+        assert!(store.rename_session("s1", "   ").is_err());
+        assert!(store.rename_session("missing", "x").is_err());
+
+        // Pin state is stamped onto the listed session.
+        store.set_pinned("s1", true).expect("pins");
+        assert!(store.sessions()[0].pinned);
+        store.upsert_session(&session("s1")).expect("re-upserts");
+        assert!(store.sessions()[0].pinned, "pin survives a live upsert");
+
+        // Delete removes the record AND the transcript file.
+        let transcript = store.transcript_path("r1");
+        assert!(transcript.exists());
+        store.delete_session("s1").expect("deletes");
+        assert!(store.sessions().is_empty());
+        assert!(!transcript.exists());
+        assert!(store.delete_session("s1").is_err());
 
         let _ = fs::remove_dir_all(&root);
     }

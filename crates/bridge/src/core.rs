@@ -694,6 +694,54 @@ impl BridgeRuntime {
             .unwrap_or_default()
     }
 
+    /// Rename a persisted session (thread rename from the cockpit). Errors surface as
+    /// a normal `BridgeError` (no store configured / unknown session / empty title).
+    pub fn rename_stored_session(
+        &mut self,
+        session_id: &str,
+        title: &str,
+    ) -> Result<(), BridgeError> {
+        match &mut self.store {
+            Some(store) => store
+                .rename_session(session_id, title)
+                .map_err(|error| BridgeError::new(error.code, error.message)),
+            None => Err(BridgeError::new(
+                "no_store",
+                "no session store is configured",
+            )),
+        }
+    }
+
+    /// Delete a persisted session (structured record + transcript files).
+    pub fn delete_stored_session(&mut self, session_id: &str) -> Result<(), BridgeError> {
+        match &mut self.store {
+            Some(store) => store
+                .delete_session(session_id)
+                .map_err(|error| BridgeError::new(error.code, error.message)),
+            None => Err(BridgeError::new(
+                "no_store",
+                "no session store is configured",
+            )),
+        }
+    }
+
+    /// Pin or unpin a persisted session (sorts first; exempt from transcript pruning).
+    pub fn pin_stored_session(
+        &mut self,
+        session_id: &str,
+        pinned: bool,
+    ) -> Result<(), BridgeError> {
+        match &mut self.store {
+            Some(store) => store
+                .set_pinned(session_id, pinned)
+                .map_err(|error| BridgeError::new(error.code, error.message)),
+            None => Err(BridgeError::new(
+                "no_store",
+                "no session store is configured",
+            )),
+        }
+    }
+
     /// A persisted session's runs plus its concatenated transcript (across runs, in run
     /// order), for reopening a past chat. Empty when no store or unknown session.
     pub fn stored_session_detail(
@@ -1476,6 +1524,7 @@ mod tests {
 
     fn session(workspace_root: &str) -> DispatchSession {
         DispatchSession {
+            pinned: false,
             id: "session-1".to_string(),
             backend: AgentBackend::ClaudeLocal,
             title: "Bridge core".to_string(),

@@ -41,6 +41,8 @@ export interface DispatchSession {
   createdAt: string;
   updatedAt: string;
   currentRunId?: string;
+  /** Pinned in the cockpit's history (sorts first; exempt from transcript pruning). */
+  pinned?: boolean;
 }
 
 export interface DispatchRun {
@@ -1017,6 +1019,9 @@ export type ClientCommand =
   | { kind: "git_delete_branch"; root: string; name: string; force?: boolean }
   | { kind: "list_sessions" }
   | { kind: "session_detail"; sessionId: string }
+  | { kind: "rename_session"; sessionId: string; title: string }
+  | { kind: "delete_session"; sessionId: string }
+  | { kind: "pin_session"; sessionId: string; pinned: boolean }
   | { kind: "roadmap" }
   | { kind: "scaffold_architecture"; name?: string; location?: string }
   | { kind: "pull_architecture" }

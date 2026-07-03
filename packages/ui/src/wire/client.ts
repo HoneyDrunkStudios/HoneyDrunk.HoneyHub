@@ -206,6 +206,15 @@ export interface WireClient {
   /** Read a persisted session's runs + transcript, to reopen it. The answer arrives as a
       `session_detail` event via `subscribe` (correlate by `sessionId`). */
   sessionDetail(sessionId: string): Promise<void>;
+  /** **Write**: rename a persisted session (thread rename). The host answers with a
+      refreshed `session_list` event. */
+  renameSession(sessionId: string, title: string): Promise<void>;
+  /** **Write**: delete a persisted session (record + transcripts); answers with a
+      refreshed `session_list` event. */
+  deleteSession(sessionId: string): Promise<void>;
+  /** **Write**: pin/unpin a persisted session (sorts first; exempt from transcript
+      pruning); answers with a refreshed `session_list` event. */
+  pinSession(sessionId: string, pinned: boolean): Promise<void>;
   /** Read the roadmap snapshot (parsed from the Architecture repo's initiatives). The
       answer arrives as a `roadmap` event via `subscribe` (`found:false` = no repo). */
   roadmap(): Promise<void>;

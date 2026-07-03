@@ -775,6 +775,35 @@ async fn handle_command(
                     transcript,
                 )]))
             }
+            // Thread management on the durable store. Each op answers with a refreshed
+            // session_list so the requesting cockpit's view updates in one round trip.
+            ClientCommand::RenameSession { session_id, title } => runtime
+                .rename_stored_session(&session_id, &title)
+                .map(|()| {
+                    Some(vec![BridgeEvent::session_list(
+                        new_id(),
+                        now_rfc3339(),
+                        runtime.stored_sessions(),
+                    )])
+                }),
+            ClientCommand::DeleteSession { session_id } => {
+                runtime.delete_stored_session(&session_id).map(|()| {
+                    Some(vec![BridgeEvent::session_list(
+                        new_id(),
+                        now_rfc3339(),
+                        runtime.stored_sessions(),
+                    )])
+                })
+            }
+            ClientCommand::PinSession { session_id, pinned } => {
+                runtime.pin_stored_session(&session_id, pinned).map(|()| {
+                    Some(vec![BridgeEvent::session_list(
+                        new_id(),
+                        now_rfc3339(),
+                        runtime.stored_sessions(),
+                    )])
+                })
+            }
             ClientCommand::Roadmap => {
                 // Resolve a sibling Architecture repo from the workspace roots (or the env
                 // override inside read_roadmap) and parse its initiatives; found:false guides

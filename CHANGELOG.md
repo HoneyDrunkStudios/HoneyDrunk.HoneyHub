@@ -28,6 +28,14 @@ user-centered Jobs page.
   text, rename them (the original task stays searchable), pin favorites to the top (pinned
   threads also survive the 100-chat history cap), and delete with a two-click confirm. A
   rename or pin set on a thread survives later saves from a live run.
+- **Threads across devices**: the bridge-backed session history gets the same treatment. One
+  search box covers both lists ("This device" and "All devices"); renaming, pinning, and
+  deleting a synced thread happens on the bridge host's store, so every paired device sees
+  the change. A pinned synced thread also keeps its transcript out of retention pruning.
+  Wire: additive `rename_session` / `delete_session` / `pin_session` commands, each answered
+  with a refreshed `session_list`; `DispatchSession` gains a `pinned` flag.
+- The composer's routing/cost note is one compact line now (lead clause + cost hint,
+  ellipsized); hover it for the full rationale and rate provenance.
 - **Jobs page**: centered on YOUR jobs (your probe patterns and agent-related scheduled tasks)
   with a local start/stop history per job; the curated built-in rows and the raw process table
   moved behind a Diagnostics toggle.

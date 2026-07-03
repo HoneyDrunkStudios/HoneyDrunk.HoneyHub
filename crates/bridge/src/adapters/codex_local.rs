@@ -894,6 +894,7 @@ mod tests {
         let adapter = CodexLocalAdapter::new("codex", test_clock());
         let request = StartRunRequest {
             session: crate::session::DispatchSession {
+                pinned: false,
                 id: "s1".to_string(),
                 backend: AgentBackend::CodexLocal,
                 title: "t".to_string(),
@@ -962,6 +963,7 @@ mod tests {
             CodexLocalAdapter::new("definitely-not-a-real-codex-binary-xyz", test_clock());
         let request = StartRunRequest {
             session: crate::session::DispatchSession {
+                pinned: false,
                 id: "s1".to_string(),
                 backend: AgentBackend::CodexLocal,
                 title: "t".to_string(),

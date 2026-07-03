@@ -305,6 +305,21 @@ export function RunScreen({
   // historyVersion bumps on rename/delete/pin so those mutations refresh the list too.
   const [historyVersion, setHistoryVersion] = useState(0);
   const chatSummaries = useMemo(() => loadChatSummaries(), [runId, runState, historyVersion]);
+  // One search box governs BOTH thread lists (local + synced), so the history reads as
+  // one surface. Without a query: pinned threads always show plus the newest few; with
+  // one: every match shows.
+  const [threadQuery, setThreadQuery] = useState("");
+  const localThreads = useMemo(() => {
+    const matches = searchChatSummaries(chatSummaries, threadQuery);
+    if (threadQuery.trim() !== "") {
+      return matches;
+    }
+    return matches.filter((chat, index) => chat.pinned === true || index < RECENT_CHATS_LIMIT);
+  }, [chatSummaries, threadQuery]);
+  const syncedThreads = useMemo(
+    () => filterSyncedSessions(syncedSessions, threadQuery),
+    [syncedSessions, threadQuery]
+  );
   // Pre-send cost signal for the composer: "included in your plan" on a flat sub
   // (only for a resolved, non-metered model — usage-credit models bill regardless),
   // else an input floor from the catalog's rates plus a median/p90 projection from
@@ -1066,27 +1081,53 @@ export function RunScreen({
               </button>
             </div>
           </div>
-          <p className="routing-rationale">
+          {/* One compact status line: the rationale's lead clause plus the cost hint,
+              with the full explanation (and rate provenance) on hover — the multi-line
+              paragraph ate composer space. */}
+          <p
+            className="routing-rationale"
+            title={
+              costMode === "optimize"
+                ? `${recommendation.rationale}${
+                    recommendation.snapshotSource === "bundled-default" ? " (rates: bundled)" : ""
+                  }${costHint === undefined ? "" : ` · ${costHint}`}`
+                : undefined
+            }
+          >
             {costMode === "optimize" ? (
-              <>
-                {recommendation.rationale}
-                {recommendation.snapshotSource === "bundled-default" && (
-                  <span className="routing-source"> · rates: bundled</span>
-                )}
-              </>
+              <>{recommendation.rationale.split(";")[0]}</>
             ) : (
               <>Launching {backendLabel(provider)}{model === undefined ? "" : ` · ${model}`}.</>
             )}
+            {costHint !== undefined && <span className="routing-cost"> · {costHint}</span>}
           </p>
-          {costHint !== undefined && <p className="cost-estimate">{costHint}</p>}
 
+          {(chatSummaries.length > 0 || syncedSessions.length > 0) && (
+            <div className="recent-chats-head">
+              <p className="eyebrow">Chats</p>
+              <input
+                className="recent-search"
+                type="search"
+                aria-label="Search chats"
+                placeholder="Search chats…"
+                value={threadQuery}
+                onChange={(event) => setThreadQuery(event.target.value)}
+              />
+            </div>
+          )}
           <RecentChats
-            summaries={chatSummaries}
+            threads={localThreads}
             onOpen={setOpenedChat}
             onMutated={() => setHistoryVersion((version) => version + 1)}
           />
 
-          <SyncedHistory sessions={syncedSessions} onOpen={openSyncedSession} />
+          <SyncedHistory
+            sessions={syncedThreads}
+            onOpen={openSyncedSession}
+            onRename={(id, title) => void client.renameSession(id, title).catch(() => undefined)}
+            onDelete={(id) => void client.deleteSession(id).catch(() => undefined)}
+            onPin={(id, pinned) => void client.pinSession(id, pinned).catch(() => undefined)}
+          />
     </div>
   );
 
@@ -1243,7 +1284,7 @@ function IconPaperclip(): ReactElement {
 interface RecentChatsProps {
   /** The saved chat summaries, provided by the parent so the store is parsed once
       and shared with the pre-send cost estimator (not re-read every keystroke). */
-  summaries: ChatSummary[];
+  threads: ChatSummary[];
   /** Open a past chat read-only. The id is resolved to its full record here. */
   onOpen: (chat: ChatRecord | undefined) => void;
   /** The store changed (rename/delete/pin) — the parent re-reads the summaries. */
@@ -1253,25 +1294,35 @@ interface RecentChatsProps {
 /** How many threads show without a search (pinned always show; search shows all hits). */
 const RECENT_CHATS_LIMIT = 8;
 
-/** Locally-saved chat threads: searchable, pinnable, renamable, deletable. A flat
-    module-scope component so the handlers are not deeply nested callbacks inside the
-    composer render. Renders nothing when there is no local history at all. */
-function RecentChats({ summaries, onOpen, onMutated }: Readonly<RecentChatsProps>): ReactElement | null {
-  const [query, setQuery] = useState("");
+/** Filter + order the bridge-backed sessions the same way the local threads are:
+    title match on the query, pinned first, then newest activity. */
+function filterSyncedSessions(sessions: DispatchSession[], query: string): DispatchSession[] {
+  const needle = query.trim().toLowerCase();
+  const matches =
+    needle === ""
+      ? sessions
+      : sessions.filter((session) => session.title.toLowerCase().includes(needle));
+  return [...matches].sort((a, b) => {
+    const pinA = a.pinned === true ? 1 : 0;
+    const pinB = b.pinned === true ? 1 : 0;
+    if (pinA !== pinB) {
+      return pinB - pinA;
+    }
+    return a.updatedAt < b.updatedAt ? 1 : -1;
+  });
+}
+
+/** Locally-saved chat threads (this device): pinnable, renamable, deletable; the parent
+    owns the shared search box and passes the already-filtered list. A flat module-scope
+    component so the handlers are not deeply nested inside the composer render. */
+function RecentChats({ threads, onOpen, onMutated }: Readonly<RecentChatsProps>): ReactElement | null {
   // The row being renamed (id + draft), and the row whose delete awaits a second click.
   const [renaming, setRenaming] = useState<{ id: string; draft: string } | undefined>(undefined);
   const [confirmingDelete, setConfirmingDelete] = useState<string | undefined>(undefined);
 
-  if (summaries.length === 0) {
+  if (threads.length === 0) {
     return null;
   }
-  const searching = query.trim() !== "";
-  const matches = searchChatSummaries(summaries, query);
-  // Without a search: pinned always show, plus the newest unpinned up to the limit.
-  // With one: every match shows (the store caps at 100, so this stays bounded).
-  const threads = searching
-    ? matches
-    : matches.filter((chat, index) => chat.pinned === true || index < RECENT_CHATS_LIMIT);
 
   const commitRename = () => {
     if (renaming !== undefined) {
@@ -1283,22 +1334,9 @@ function RecentChats({ summaries, onOpen, onMutated }: Readonly<RecentChatsProps
 
   return (
     <div className="recent-chats">
-      <div className="recent-chats-head">
-        <p className="eyebrow">Chats</p>
-        <input
-          className="recent-search"
-          type="search"
-          aria-label="Search chats"
-          placeholder="Search chats…"
-          value={query}
-          onChange={(event) => setQuery(event.target.value)}
-        />
-      </div>
-      {threads.length === 0 ? (
-        <p className="recent-empty">No chats match “{query}”.</p>
-      ) : (
-        <ul aria-label="Chats">
-          {threads.map((chat) => (
+      <p className="eyebrow">This device</p>
+      <ul aria-label="Chats">
+        {threads.map((chat) => (
             <li key={chat.id} className="recent-row">
               {renaming?.id === chat.id ? (
                 <input
@@ -1383,35 +1421,123 @@ function RecentChats({ summaries, onOpen, onMutated }: Readonly<RecentChatsProps
               )}
             </li>
           ))}
-        </ul>
-      )}
+      </ul>
     </div>
   );
 }
 
 interface SyncedHistoryProps {
-  /** Durable, bridge-backed past sessions. */
+  /** Durable, bridge-backed past sessions (already filtered/sorted by the parent). */
   sessions: DispatchSession[];
   /** Request a session's detail by id (reopened read-only when it arrives). */
   onOpen: (id: string) => void;
+  /** Thread management on the host store; the host answers with a fresh session_list. */
+  onRename: (id: string, title: string) => void;
+  onDelete: (id: string) => void;
+  onPin: (id: string, pinned: boolean) => void;
 }
 
-/** Durable synced history list. A flat module-scope component so its click handler is not
-    a deeply nested callback inside the composer render. Renders nothing when empty. */
-function SyncedHistory({ sessions, onOpen }: Readonly<SyncedHistoryProps>): ReactElement | null {
+/** Durable bridge-backed threads (every device that pairs with this bridge sees the
+    same list): the same pin/rename/delete row treatment as the local list, executed
+    host-side over the wire. Renders nothing when empty. */
+function SyncedHistory({
+  sessions,
+  onOpen,
+  onRename,
+  onDelete,
+  onPin
+}: Readonly<SyncedHistoryProps>): ReactElement | null {
+  const [renaming, setRenaming] = useState<{ id: string; draft: string } | undefined>(undefined);
+  const [confirmingDelete, setConfirmingDelete] = useState<string | undefined>(undefined);
+
   if (sessions.length === 0) {
     return null;
   }
+
+  const commitRename = () => {
+    if (renaming !== undefined) {
+      if (renaming.draft.trim() !== "") {
+        onRename(renaming.id, renaming.draft.trim());
+      }
+      setRenaming(undefined);
+    }
+  };
+
   return (
     <div className="recent-chats synced-history">
-      <p className="eyebrow">Synced history</p>
-      <ul aria-label="Synced history">
+      <p className="eyebrow">All devices</p>
+      <ul aria-label="Synced chats">
         {sessions.map((session) => (
-          <li key={session.id}>
-            <button type="button" className="recent-chat" onClick={() => onOpen(session.id)}>
-              <span className="recent-task">{session.title}</span>
-              <span className="recent-meta">{backendLabel(session.backend)}</span>
-            </button>
+          <li key={session.id} className="recent-row">
+            {renaming?.id === session.id ? (
+              <input
+                className="recent-rename"
+                type="text"
+                aria-label="Chat name"
+                value={renaming.draft}
+                autoFocus
+                onChange={(event) => setRenaming({ id: session.id, draft: event.target.value })}
+                onBlur={commitRename}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter") {
+                    commitRename();
+                  } else if (event.key === "Escape") {
+                    setRenaming(undefined);
+                  }
+                }}
+              />
+            ) : (
+              <>
+                <button type="button" className="recent-chat" onClick={() => onOpen(session.id)}>
+                  <span className="recent-task">
+                    {session.pinned === true && (
+                      <span className="recent-pin-mark" aria-label="Pinned">
+                        ★{" "}
+                      </span>
+                    )}
+                    {session.title}
+                  </span>
+                  <span className="recent-meta">{backendLabel(session.backend)}</span>
+                </button>
+                <span className="recent-actions">
+                  <button
+                    type="button"
+                    className="recent-action"
+                    aria-label={session.pinned === true ? "Unpin chat" : "Pin chat"}
+                    title={session.pinned === true ? "Unpin" : "Pin to top"}
+                    onClick={() => onPin(session.id, session.pinned !== true)}
+                  >
+                    {session.pinned === true ? "★" : "☆"}
+                  </button>
+                  <button
+                    type="button"
+                    className="recent-action"
+                    aria-label="Rename chat"
+                    title="Rename"
+                    onClick={() => setRenaming({ id: session.id, draft: session.title })}
+                  >
+                    ✎
+                  </button>
+                  <button
+                    type="button"
+                    className={`recent-action${confirmingDelete === session.id ? " is-danger" : ""}`}
+                    aria-label={confirmingDelete === session.id ? "Confirm delete" : "Delete chat"}
+                    title={confirmingDelete === session.id ? "Click again to delete" : "Delete"}
+                    onClick={() => {
+                      if (confirmingDelete === session.id) {
+                        onDelete(session.id);
+                        setConfirmingDelete(undefined);
+                      } else {
+                        setConfirmingDelete(session.id);
+                      }
+                    }}
+                    onBlur={() => setConfirmingDelete(undefined)}
+                  >
+                    {confirmingDelete === session.id ? "✔" : "✕"}
+                  </button>
+                </span>
+              </>
+            )}
           </li>
         ))}
       </ul>

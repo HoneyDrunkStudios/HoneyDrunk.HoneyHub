@@ -746,10 +746,19 @@ h2 {
   padding-left: 18px;
 }
 
+/* One compact status line under the composer (lead clause + cost hint); the full
+   rationale lives in the title tooltip. Single line, ellipsized, quiet. */
 .routing-rationale {
   margin: 2px 0 0;
+  color: var(--text-dim);
+  font-size: 0.74rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.routing-cost {
   color: var(--text-muted);
-  font-size: 0.82rem;
 }
 
 .routing-source {
