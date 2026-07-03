@@ -141,11 +141,24 @@ describe("run state", () => {
       running,
       outcome("/a", false, {
         disposition: "denied",
+        denial: "overlap",
         output: "a check is already running in this repo"
       })
     );
     expect(state).toBe(running);
     expect(state["/a"]!.phase).toBe("running");
+  });
+
+  it("recognizes an overlap denial from an old host by message when the typed code is absent", () => {
+    const running = startCheck({}, { root: "/a", command: "npm-test" });
+    const state = applyCheckOutcome(
+      running,
+      outcome("/a", false, {
+        disposition: "denied",
+        output: "a check is already running in this repo"
+      })
+    );
+    expect(state).toBe(running);
   });
 
   it("lands a NON-overlap denial of a running check as failed (it is the final answer)", () => {
@@ -154,11 +167,27 @@ describe("run state", () => {
       running,
       outcome("/a", false, {
         disposition: "denied",
+        denial: "unknown_check",
         output: "`nope-check` is not an allowed check"
       })
     );
     expect(state["/a"]!.phase).toBe("failed");
     expect(state["/a"]!.output).toContain("not an allowed check");
+  });
+
+  it("trusts the typed denial code over the message text when both are present", () => {
+    const running = startCheck({}, { root: "/a", command: "npm-test" });
+    // A message that HAPPENS to mention the overlap phrase must not resurrect the
+    // substring heuristic once the host speaks the typed code.
+    const state = applyCheckOutcome(
+      running,
+      outcome("/a", false, {
+        disposition: "denied",
+        denial: "task_failed",
+        output: "task failed while a check is already running elsewhere"
+      })
+    );
+    expect(state["/a"]!.phase).toBe("failed");
   });
 
   it("records an outcome for a repo we never started", () => {

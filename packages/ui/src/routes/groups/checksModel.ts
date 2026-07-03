@@ -147,10 +147,19 @@ export function startCheck(
   };
 }
 
-/** The host's per-root overlap refusal (bridge-host `spawn_check`); the one denial that
-    is NOT the terminal answer to a running check — the in-flight run's real outcome is
-    still coming. Kept in lockstep with the host string (both ends live in this repo). */
+/** The host's per-root overlap refusal message (bridge-host `spawn_check`) — the
+    fallback signal for hosts predating the typed `denial` field. Kept in lockstep
+    with the host string (both ends live in this repo). */
 const OVERLAP_DENIAL = "a check is already running";
+
+/** True when a denial is the host's OVERLAP refusal: keyed on the typed reason code,
+    falling back to the message only for hosts that predate the field. */
+function isOverlapDenial(outcome: CheckOutcome): boolean {
+  if (outcome.denial !== undefined) {
+    return outcome.denial === "overlap";
+  }
+  return outcome.output.includes(OVERLAP_DENIAL);
+}
 
 /** Fold a finished `check_result` outcome into the state: passed/failed with its output.
     An outcome for a repo we never started is still recorded (the host is the source of
@@ -162,7 +171,7 @@ export function applyCheckOutcome(state: ChecksState, outcome: CheckOutcome): Ch
   if (
     outcome.disposition === "denied" &&
     state[outcome.root]?.phase === "running" &&
-    outcome.output.includes(OVERLAP_DENIAL)
+    isOverlapDenial(outcome)
   ) {
     return state;
   }

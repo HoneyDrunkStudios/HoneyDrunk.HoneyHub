@@ -874,6 +874,11 @@ export interface GitOpResult {
     observable states rather than indistinguishable failures. */
 export type CheckDisposition = "ran" | "denied" | "spawn_failed" | "timed_out";
 
+/** WHY a request was denied — typed, so clients fold denials on a stable code
+    instead of matching the human-readable message. Only `overlap` is non-terminal
+    for a requester (the in-flight run's real outcome is still coming). */
+export type CheckDenialReason = "overlap" | "unknown_check" | "task_failed";
+
 /** The outcome of running one **named, host-owned** check (a repo's build/test) in a
     repo root — the "test a change group" action. The client sends only a check id;
     the host resolves it against its own definitions and refuses anything else. Argv
@@ -889,6 +894,9 @@ export interface CheckOutcome {
   disposition: CheckDisposition;
   /** The process exit code, when one was returned (absent on signal/spawn failure). */
   exitCode?: number;
+  /** The typed reason when `disposition` is `denied`; absent otherwise (and absent
+      from hosts predating the field, where clients fall back to the message). */
+  denial?: CheckDenialReason;
   /** Combined stdout + stderr, trimmed and clamped. */
   output: string;
   /** True when `output` was clamped. */

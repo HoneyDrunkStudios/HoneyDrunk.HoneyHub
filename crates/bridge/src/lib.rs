@@ -46,7 +46,9 @@ pub use backend_catalog::{
     detect_default_backends, detect_one, model_rate_table, parse_model_rates, program_on_path,
     resolve_program, BackendCapability, BackendModel, ModelPricing, ModelSource,
 };
-pub use checks::{parse_extra_checks, resolve_check, run_check, CheckDisposition, CheckOutcome};
+pub use checks::{
+    parse_extra_checks, resolve_check, run_check, CheckDenialReason, CheckDisposition, CheckOutcome,
+};
 pub use coaching::{coach, CoachingSnapshot};
 pub use core::{BridgeRuntime, ManagedRun, ReplyOutcome};
 pub use environment::{detect_environment, BackendVersion, EnvironmentInfo};

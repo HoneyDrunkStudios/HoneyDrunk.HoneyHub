@@ -88,6 +88,16 @@ export function GroupsView({
   const rootsRef = useRef(workspaceRoots);
   rootsRef.current = workspaceRoots;
 
+  // When the operator edits the workspace-roots setting, prune state that belonged to
+  // removed roots — otherwise stale groups stay visible (and runnable) until reload.
+  // Overviews are keyed by the workspace root itself; diffs/checks by repo roots UNDER one.
+  useEffect(() => {
+    const keepRepo = (path: string) => workspaceRoots.some((root) => isWithin(path, root));
+    setOverviews((prev) => pruneKeys(prev, (root) => workspaceRoots.includes(root)));
+    setDiffs((prev) => pruneKeys(prev, keepRepo));
+    setChecks((prev) => pruneKeys(prev, keepRepo));
+  }, [workspaceRoots]);
+
   useEffect(() => {
     const unsubscribe = client.subscribe((event) => {
       const payload = event.payload;
@@ -265,6 +275,20 @@ export function GroupsView({
 /** True when any changed path lands inside one of the scanned workspace roots. */
 function touchesRoots(paths: string[], roots: string[]): boolean {
   return paths.some((path) => roots.some((root) => isWithin(path, root)));
+}
+
+/** Drop entries whose key fails `keep`, returning the SAME reference when nothing was
+    dropped (so the state updaters it feeds skip a re-render). */
+function pruneKeys<T>(map: Record<string, T>, keep: (key: string) => boolean): Record<string, T> {
+  const stale = Object.keys(map).filter((key) => !keep(key));
+  if (stale.length === 0) {
+    return map;
+  }
+  const next = { ...map };
+  for (const key of stale) {
+    delete next[key];
+  }
+  return next;
 }
 
 /** The collapsed group row: branch, member-repo count, combined changes, run/ahead/behind. */

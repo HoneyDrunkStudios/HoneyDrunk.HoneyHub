@@ -68,6 +68,21 @@ pub enum CheckDisposition {
     TimedOut,
 }
 
+/// WHY a request was denied — typed, so clients fold denials on a stable code
+/// instead of matching the human-readable message. Only `Overlap` is non-terminal
+/// for a requester (the in-flight run's real outcome is still coming); every other
+/// reason is the request's final answer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CheckDenialReason {
+    /// A check is already running in this (canonical) repo root.
+    Overlap,
+    /// The requested id is not in the host's check table.
+    UnknownCheck,
+    /// The host-side runner task failed (panicked/cancelled) before an outcome.
+    TaskFailed,
+}
+
 /// The outcome of running one named check in a repo root.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -85,6 +100,9 @@ pub struct CheckOutcome {
     /// The process exit code, when one was returned.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub exit_code: Option<i32>,
+    /// The typed reason when `disposition` is `denied`; absent otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub denial: Option<CheckDenialReason>,
     /// Combined stdout + stderr, trimmed and clamped to [`MAX_OUTPUT_CHARS`].
     pub output: String,
     /// True when `output` was clamped (wire clamp or stream cap).
@@ -108,14 +126,22 @@ impl CheckOutcome {
             ok: false,
             disposition,
             exit_code: None,
+            denial: None,
             output: reason.into(),
             truncated: false,
         }
     }
 
-    /// A denied request (unknown check id, overlapping run).
-    pub fn denied(root: &str, check: &str, reason: impl Into<String>) -> Self {
-        Self::not_run(root, check, check, CheckDisposition::Denied, reason)
+    /// A denied request, carrying the typed reason alongside the display message.
+    pub fn denied(
+        root: &str,
+        check: &str,
+        why: CheckDenialReason,
+        reason: impl Into<String>,
+    ) -> Self {
+        let mut outcome = Self::not_run(root, check, check, CheckDisposition::Denied, reason);
+        outcome.denial = Some(why);
+        outcome
     }
 }
 
@@ -255,6 +281,7 @@ pub fn run_check(root: &str, check: &str) -> CheckOutcome {
         return CheckOutcome::denied(
             root,
             check,
+            CheckDenialReason::UnknownCheck,
             format!(
                 "`{check}` is not an allowed check; allowed: {}",
                 allowed.join(", ")
@@ -397,6 +424,7 @@ fn run_argv(root: &str, check: &str, argv: &[String], timeout: Duration) -> Chec
         root: root.to_string(),
         check: check.to_string(),
         command: display,
+        denial: None,
         ok: disposition == CheckDisposition::Ran
             && status
                 .as_ref()
@@ -428,6 +456,7 @@ mod tests {
         let outcome = run_check(".", "definitely-not-a-check; rm -rf /");
         assert!(!outcome.ok);
         assert_eq!(outcome.disposition, CheckDisposition::Denied);
+        assert_eq!(outcome.denial, Some(CheckDenialReason::UnknownCheck));
         assert_eq!(outcome.exit_code, None);
         assert!(outcome.output.contains("not an allowed check"));
         assert!(outcome.output.contains("npm-test"));

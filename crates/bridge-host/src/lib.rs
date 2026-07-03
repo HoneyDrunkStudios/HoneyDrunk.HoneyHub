@@ -883,6 +883,7 @@ fn spawn_check(host: &Arc<Host>, root: String, check: String) {
             publish(honeyhub_bridge::CheckOutcome::denied(
                 &root,
                 &check,
+                honeyhub_bridge::CheckDenialReason::Overlap,
                 "a check is already running in this repo",
             ));
             return;
@@ -898,6 +899,7 @@ fn spawn_check(host: &Arc<Host>, root: String, check: String) {
             honeyhub_bridge::CheckOutcome::denied(
                 &root,
                 &check,
+                honeyhub_bridge::CheckDenialReason::TaskFailed,
                 "the check task panicked or was cancelled",
             )
         });
