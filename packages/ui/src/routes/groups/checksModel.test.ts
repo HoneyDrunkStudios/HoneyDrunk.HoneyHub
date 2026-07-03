@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { CheckOutcome } from "@honeydrunk/honeyhub-types";
 import {
   applyCheckOutcome,
@@ -16,8 +16,30 @@ function outcome(root: string, ok: boolean, over: Partial<CheckOutcome> = {}): C
   return { root, command: "npm test", ok, output: ok ? "ok" : "boom", truncated: false, ...over };
 }
 
+// The runtime's localStorage varies by Node version (absent without --localstorage-file on
+// newer Nodes), so stub a fresh in-memory Storage per test, like chatHistory.test.ts does.
+class MemoryStorage {
+  private map = new Map<string, string>();
+  getItem(key: string): string | null {
+    return this.map.has(key) ? (this.map.get(key) as string) : null;
+  }
+  setItem(key: string, value: string): void {
+    this.map.set(key, value);
+  }
+  removeItem(key: string): void {
+    this.map.delete(key);
+  }
+  clear(): void {
+    this.map.clear();
+  }
+}
+
+beforeEach(() => {
+  vi.stubGlobal("localStorage", new MemoryStorage());
+});
+
 afterEach(() => {
-  globalThis.localStorage?.clear();
+  vi.unstubAllGlobals();
 });
 
 describe("command selection", () => {
@@ -53,6 +75,12 @@ describe("persistence", () => {
       JSON.stringify({ "/a": "npm test", "/b": 42 })
     );
     expect(loadCheckCommands()).toEqual({ "/a": "npm test" });
+  });
+
+  it("does not throw when storage is unavailable", () => {
+    vi.stubGlobal("localStorage", undefined);
+    expect(() => saveCheckCommands({ "/a": "npm test" })).not.toThrow();
+    expect(loadCheckCommands()).toEqual({});
   });
 });
 

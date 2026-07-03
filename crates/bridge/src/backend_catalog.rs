@@ -8,7 +8,7 @@
 //! Provenance note: where a CLI exposes its own model list we read THAT (so the
 //! list is real and current), and tag it so the UI is honest about the source:
 //! - Codex caches its models at `~/.codex/models_cache.json` → [`ModelSource::CliCache`].
-//! - Claude's selectable set is its canonical aliases (`opus`/`sonnet`/`haiku`),
+//! - Claude's selectable set is its canonical aliases (`fable`/`opus`/`sonnet`/`haiku`),
 //!   the same ones its `/model` picker uses → [`ModelSource::CliAlias`].
 //!
 //! A small bridge-known seed ([`ModelSource::BridgeKnown`]) is only the fallback when
@@ -55,7 +55,7 @@ impl BackendModel {
 pub enum ModelSource {
     /// Read from the CLI's own on-disk model cache (e.g. Codex's `models_cache.json`).
     CliCache,
-    /// The CLI's canonical model aliases (e.g. Claude's `opus`/`sonnet`/`haiku`).
+    /// The CLI's canonical model aliases (e.g. Claude's `fable`/`opus`/`sonnet`/`haiku`).
     CliAlias,
     /// A curated, bridge-known fallback (used only when a real source can't be read).
     BridgeKnown,
@@ -98,11 +98,14 @@ pub fn default_program(backend: AgentBackend) -> &'static str {
 fn models_for(backend: AgentBackend) -> (Vec<BackendModel>, ModelSource) {
     match backend {
         // Claude's selectable set is its canonical aliases (latest of each family).
+        // Order matters: the cockpit defaults to the FIRST entry when the user hasn't
+        // picked, so `opus` stays first; `fable` (usage-credit billed) is opt-in only.
         AgentBackend::ClaudeLocal => (
             vec![
                 BackendModel::new("opus", "Claude Opus 4.8"),
-                BackendModel::new("sonnet", "Claude Sonnet 4.6"),
+                BackendModel::new("sonnet", "Claude Sonnet 5"),
                 BackendModel::new("haiku", "Claude Haiku 4.5"),
+                BackendModel::new("fable", "Claude Fable 5"),
             ],
             ModelSource::CliAlias,
         ),

@@ -336,8 +336,9 @@ export class MockWireClient implements WireClient {
         capabilities: defaultClaudeCapabilities,
         models: [
           { id: "opus", label: "Claude Opus 4.8" },
-          { id: "sonnet", label: "Claude Sonnet 4.6" },
-          { id: "haiku", label: "Claude Haiku 4.5" }
+          { id: "sonnet", label: "Claude Sonnet 5" },
+          { id: "haiku", label: "Claude Haiku 4.5" },
+          { id: "fable", label: "Claude Fable 5" }
         ],
         modelSource: "cli_alias"
       },

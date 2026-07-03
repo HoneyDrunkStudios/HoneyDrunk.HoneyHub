@@ -124,16 +124,25 @@ mod tests {
     fn parses_program_and_args() {
         assert_eq!(
             parse_command("cargo test --workspace"),
-            Some(("cargo".to_string(), vec!["test".to_string(), "--workspace".to_string()]))
+            Some((
+                "cargo".to_string(),
+                vec!["test".to_string(), "--workspace".to_string()]
+            ))
         );
-        assert_eq!(parse_command("npm  test"), Some(("npm".to_string(), vec!["test".to_string()])));
+        assert_eq!(
+            parse_command("npm  test"),
+            Some(("npm".to_string(), vec!["test".to_string()]))
+        );
         assert_eq!(parse_command("   "), None);
         assert_eq!(parse_command(""), None);
     }
 
     #[test]
     fn clamps_and_appends_streams() {
-        assert_eq!(clamp_output("out", "err", 100), ("out\nerr".to_string(), false));
+        assert_eq!(
+            clamp_output("out", "err", 100),
+            ("out\nerr".to_string(), false)
+        );
         assert_eq!(clamp_output("  out  ", "", 100), ("out".to_string(), false));
         assert_eq!(clamp_output("", "  err ", 100), ("err".to_string(), false));
 

@@ -105,8 +105,7 @@ export function GroupsView({
         setChecks((prev) => applyCheckOutcome(prev, payload.result));
       } else if (payload.kind === "fs_changed") {
         // A file changed under one of our roots → re-scan (silent refresh).
-        const roots = rootsRef.current;
-        if (activeRef.current && payload.paths.some((p) => roots.some((r) => isWithin(p, r)))) {
+        if (activeRef.current && touchesRoots(payload.paths, rootsRef.current)) {
           refreshRef.current();
         }
       }
@@ -218,8 +217,8 @@ export function GroupsView({
 
       {visible.length === 0 ? (
         <p className="groups-empty">
-          No grouped changes yet. Start work in worktrees that share a branch name (e.g.
-          <code> claude/feature-x</code>) across repos and they&apos;ll cluster here.
+          No grouped changes yet. Start work in worktrees that share a branch name (e.g.{" "}
+          <code>claude/feature-x</code>) across repos and they&apos;ll cluster here.
         </p>
       ) : (
         <ul className="groups-list" aria-label="Group list">
@@ -246,6 +245,11 @@ export function GroupsView({
       )}
     </section>
   );
+}
+
+/** True when any changed path lands inside one of the scanned workspace roots. */
+function touchesRoots(paths: string[], roots: string[]): boolean {
+  return paths.some((path) => roots.some((root) => isWithin(path, root)));
 }
 
 /** The collapsed group row: branch, member-repo count, combined changes, run/ahead/behind. */
@@ -420,16 +424,23 @@ function GroupMember({
   );
 }
 
+/** The status-pill text for a check: running/passed, or failed with the exit code when known. */
+function checkPhaseLabel(check: CheckState): string {
+  if (check.phase === "running") {
+    return "running…";
+  }
+  if (check.phase === "passed") {
+    return "passed";
+  }
+  return check.exitCode === undefined ? "failed" : `failed (exit ${check.exitCode})`;
+}
+
 /** A member's check result: a phase pill and, once finished, a collapsible output block. */
 function CheckResultView({ check }: Readonly<{ check: CheckState }>): ReactElement {
   return (
     <div className={`group-check-result phase-${check.phase}`}>
       <span className="group-check-pill" aria-label="Check status">
-        {check.phase === "running"
-          ? "running…"
-          : check.phase === "passed"
-            ? "passed"
-            : `failed${check.exitCode === undefined ? "" : ` (exit ${check.exitCode})`}`}
+        {checkPhaseLabel(check)}
       </span>
       {check.output !== undefined && check.output.length > 0 && (
         <details className="group-check-output">
@@ -460,23 +471,28 @@ function RepoDiff({
     });
   }, [diffLines]);
 
+  let body: ReactElement;
+  if (diff === undefined) {
+    body = <p className="groups-loading">Loading diff…</p>;
+  } else if (diff.patch.trim().length === 0) {
+    body = <p className="groups-empty">No diff (changes may be untracked or staged only).</p>;
+  } else {
+    body = (
+      <pre className="diff-view" aria-label={`Diff for ${name}`}>
+        {keys.map(({ key, line }) => (
+          <span key={key} className={`diff-line diff-${line.kind}`}>
+            {line.text}
+            {"\n"}
+          </span>
+        ))}
+      </pre>
+    );
+  }
+
   return (
     <div className="group-repo-diff">
       <p className="group-repo-diff-name">{name}</p>
-      {diff === undefined ? (
-        <p className="groups-loading">Loading diff…</p>
-      ) : diff.patch.trim().length === 0 ? (
-        <p className="groups-empty">No diff (changes may be untracked or staged only).</p>
-      ) : (
-        <pre className="diff-view" aria-label={`Diff for ${name}`}>
-          {keys.map(({ key, line }) => (
-            <span key={key} className={`diff-line diff-${line.kind}`}>
-              {line.text}
-              {"\n"}
-            </span>
-          ))}
-        </pre>
-      )}
+      {body}
       {diff?.truncated === true && <p className="git-truncated">Diff truncated (very large change).</p>}
     </div>
   );
