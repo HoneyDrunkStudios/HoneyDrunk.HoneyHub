@@ -3889,6 +3889,13 @@ h2 {
   box-shadow: 0 12px 40px rgba(0, 0, 0, 0.45);
 }
 
+/* Flipped placement when the composer sits near the bottom of the window — the list
+   opens upward instead of clipping at the viewport edge. */
+.model-popover.drop-up {
+  top: auto;
+  bottom: calc(100% + 8px);
+}
+
 .model-option {
   display: flex;
   flex-direction: column;
