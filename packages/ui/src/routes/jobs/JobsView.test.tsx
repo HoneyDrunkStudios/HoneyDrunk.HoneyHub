@@ -8,25 +8,32 @@ describe("JobsView", () => {
     vi.unstubAllGlobals();
   });
 
-  it("snapshots known jobs and processes when active", async () => {
+  it("centers on the user's jobs; built-ins and processes live behind Diagnostics", async () => {
     const client = new MockWireClient();
     render(<JobsView client={client} active />);
 
-    // The mock scripts Claude up, Codex down, and two processes.
-    expect(await screen.findByText("Claude Code")).toBeTruthy();
+    // Scheduled tasks (user-owned) surface by default, including a failed one.
+    expect(await screen.findByText("grid-agent-runner")).toBeTruthy();
+    expect(screen.getByText("last: error 1")).toBeTruthy();
+    // With no user probes, the page prompts to add one instead of listing built-ins.
+    expect(screen.getByText(/haven’t declared any jobs yet/i)).toBeTruthy();
+    expect(screen.queryByText("Claude Code")).toBeNull();
+    expect(screen.queryByText("claude.exe")).toBeNull();
+
+    // The curated rows + process table are diagnostics, behind the toggle.
+    fireEvent.click(
+      screen.getByRole("button", { name: "Show built-in jobs & processes" })
+    );
+    expect(screen.getByText("Claude Code")).toBeTruthy();
     expect(screen.getByText("Codex")).toBeTruthy();
-    expect(screen.getByText("1/2 up")).toBeTruthy();
     expect(screen.getByText("claude.exe")).toBeTruthy();
     expect(screen.getByText("node.exe")).toBeTruthy();
-    // Scheduled tasks surface too, including a failed one (non-zero last result).
-    expect(screen.getByText("grid-agent-runner")).toBeTruthy();
-    expect(screen.getByText("last: error 1")).toBeTruthy();
   });
 
   it("toggles the onboarding help with setup guidance", async () => {
     const client = new MockWireClient();
     render(<JobsView client={client} active />);
-    await screen.findByText("Claude Code");
+    await screen.findByText("grid-agent-runner");
     expect(screen.queryByText(/Add a scheduled background job/i)).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "How it works" }));
     expect(screen.getByText(/Add a scheduled background job/i)).toBeTruthy();
@@ -55,7 +62,7 @@ describe("JobsView", () => {
     };
 
     render(<JobsView client={client} active />);
-    await screen.findByText("Claude Code");
+    await screen.findByText("grid-agent-runner");
 
     fireEvent.click(screen.getByRole("button", { name: "How it works" }));
     fireEvent.change(screen.getByPlaceholderText("My worker"), {

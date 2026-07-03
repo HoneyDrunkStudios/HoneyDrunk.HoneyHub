@@ -10,7 +10,7 @@
 //!
 //! Repo discovery makes the screen "smart": people add a *folder* of repos as a workspace
 //! root, which has no `.git` of its own, so [`discover_repos`] returns the folder itself
-//! when it is a repo, otherwise each immediate child that is one.
+//! when it is a repo, otherwise every repo found by a bounded recursive walk below it.
 
 use crate::adapter::BridgeError;
 use serde::{Deserialize, Serialize};
@@ -142,26 +142,59 @@ pub fn diff(root: &str, path: Option<&str>) -> Result<GitDiff, BridgeError> {
     })
 }
 
+/// How deep [`discover_repos`] walks below the selected folder, so a repo nested a few
+/// levels down (e.g. `clients/<name>/<repo>`) is still found without scanning the world.
+const DISCOVER_MAX_DEPTH: usize = 5;
+/// Directories the walk never descends into: build output and dependency trees are both
+/// huge and never contain the user's own repos. Dot-directories are skipped separately.
+const DISCOVER_SKIP_DIRS: &[&str] = &["node_modules", "target", "dist", "vendor", "bin", "obj"];
+
 /// Discover the git repos under a selected folder. If the folder is itself a repo (has a
-/// `.git`), it is the only result; otherwise each immediate subdirectory that is a repo is
-/// returned, sorted by path. This is what lets the user add a *folder of repos* as a
-/// workspace root and still see every repo.
+/// `.git`), it is the only result; otherwise the folder is walked **recursively** (to
+/// [`DISCOVER_MAX_DEPTH`], skipping dot- and build/dependency directories, and never
+/// descending into a found repo), returned sorted by path. This is what lets the user add
+/// a *folder of repos* as a workspace root — however the repos are nested — and still see
+/// every repo. A `.git` FILE also counts, so linked worktrees are discovered too.
 pub fn discover_repos(root: &str) -> Vec<String> {
     let base = Path::new(root);
     if base.join(".git").exists() {
         return vec![root.to_string()];
     }
     let mut repos = Vec::new();
-    if let Ok(entries) = std::fs::read_dir(base) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_dir() && path.join(".git").exists() {
-                repos.push(path.to_string_lossy().to_string());
-            }
-        }
-    }
+    walk_for_repos(base, DISCOVER_MAX_DEPTH, &mut repos);
     repos.sort();
     repos
+}
+
+fn walk_for_repos(dir: &Path, depth: usize, repos: &mut Vec<String>) {
+    if depth == 0 {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name.starts_with('.')
+            || DISCOVER_SKIP_DIRS
+                .iter()
+                .any(|skip| name.eq_ignore_ascii_case(skip))
+        {
+            continue;
+        }
+        if path.join(".git").exists() {
+            // A repo bounds the walk: submodules and nested checkouts inside it are its
+            // own business, not separate workspace repos.
+            repos.push(path.to_string_lossy().to_string());
+            continue;
+        }
+        walk_for_repos(&path, depth - 1, repos);
+    }
 }
 
 /// The status of every repo discovered under `root` (the multi-repo dashboard). Repos whose
@@ -492,5 +525,30 @@ mod tests {
         let dir = tempfile::tempdir().expect("temp dir");
         std::fs::create_dir(dir.path().join("plain")).expect("mk plain dir");
         assert!(discover_repos(&dir.path().to_string_lossy()).is_empty());
+    }
+
+    #[test]
+    fn discover_repos_walks_nested_folders_but_not_into_repos_or_noise() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        // Nested two levels down: clients/acme/site is a repo.
+        std::fs::create_dir_all(dir.path().join("clients/acme/site/.git")).expect("nested repo");
+        // A repo bounds the walk: an embedded checkout inside it is not listed separately.
+        std::fs::create_dir_all(dir.path().join("clients/acme/site/embedded/.git"))
+            .expect("embedded repo");
+        // Dependency/build trees and dot-dirs are never scanned.
+        std::fs::create_dir_all(dir.path().join("node_modules/dep/.git")).expect("dep repo");
+        std::fs::create_dir_all(dir.path().join(".cache/tool/.git")).expect("dot repo");
+        // A linked worktree marker is a `.git` FILE, not a directory.
+        std::fs::create_dir_all(dir.path().join("worktrees/feature-x")).expect("worktree dir");
+        std::fs::write(
+            dir.path().join("worktrees/feature-x/.git"),
+            "gitdir: elsewhere",
+        )
+        .expect("worktree marker");
+
+        let repos = discover_repos(&dir.path().to_string_lossy());
+        assert_eq!(repos.len(), 2, "found: {repos:?}");
+        assert!(repos.iter().any(|repo| repo.ends_with("site")));
+        assert!(repos.iter().any(|repo| repo.ends_with("feature-x")));
     }
 }

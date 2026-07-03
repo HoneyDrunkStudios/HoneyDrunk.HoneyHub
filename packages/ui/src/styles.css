@@ -1395,6 +1395,40 @@ h2 {
   border: 1px solid var(--border);
   border-radius: 8px;
   background: var(--surface);
+  flex-wrap: wrap;
+}
+
+/* Per-job local history: a collapsible transitions list on the user's own jobs. */
+.job-history {
+  flex-basis: 100%;
+}
+.job-history summary {
+  cursor: pointer;
+  font-size: 0.75rem;
+  color: var(--text-dim);
+}
+.job-history-list {
+  list-style: none;
+  margin: 6px 0 0;
+  padding: 0 0 0 14px;
+  display: grid;
+  gap: 3px;
+  font-size: 0.76rem;
+  font-variant-numeric: tabular-nums;
+}
+.job-history-list li {
+  display: flex;
+  gap: 10px;
+  color: var(--text-muted);
+}
+.job-history-list li.is-up .job-history-state {
+  color: var(--neon-blue);
+}
+.job-history-list li.is-down .job-history-state {
+  color: var(--text-dim);
+}
+.job-history-at {
+  color: var(--text-dim);
 }
 
 .known-dot {

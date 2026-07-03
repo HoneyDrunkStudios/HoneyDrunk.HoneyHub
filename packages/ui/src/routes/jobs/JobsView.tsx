@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import type { ReactElement, SyntheticEvent } from "react";
-import type { JobProbe, JobSnapshot } from "@honeydrunk/honeyhub-types";
+import type { JobProbe, JobSnapshot, KnownJob } from "@honeydrunk/honeyhub-types";
 import type { WireClient } from "../../wire/client";
-import { filterProcesses, formatMemoryKb, runningCount } from "./jobsModel";
+import { filterProcesses, formatMemoryKb } from "./jobsModel";
+import { loadJobHistory, recordJobHistory, type JobHistoryEntry } from "./jobHistory";
 import { addProbe, loadJobPatterns, removeProbe, saveJobPatterns } from "./jobPatterns";
 
 export interface JobsViewProps {
@@ -12,12 +13,13 @@ export interface JobsViewProps {
 }
 
 /**
- * Local Jobs (control-hub roadmap #7): a read-only, **agent-focused** snapshot — the curated
- * dev tools + local runner ("known jobs"), the processes that belong to them, and the
- * agent-related Windows Scheduled Tasks (not every system process/task). Matched by image
- * name + command line, so the Grid runner is recognized by its script even under PowerShell.
- * A "How it works" panel onboards a new user. Asks the host to snapshot when the tab becomes
- * active and listens for the `job_snapshot` event.
+ * Local Jobs (control-hub roadmap #7): a read-only snapshot centered on the jobs the USER
+ * declared — their own probes and their agent-related Windows Scheduled Tasks — with a
+ * local history per job (state transitions recorded on every refresh). The curated
+ * built-in dev-tool rows and the raw process table are still available behind a toggle,
+ * as diagnostics rather than the default. Matched by image name + command line, so the
+ * Grid runner is recognized by its script even under PowerShell. Asks the host to
+ * snapshot when the tab becomes active and listens for the `job_snapshot` event.
  */
 export function JobsView({ client, active }: Readonly<JobsViewProps>): ReactElement {
   const [snapshot, setSnapshot] = useState<JobSnapshot | undefined>(undefined);
@@ -25,9 +27,14 @@ export function JobsView({ client, active }: Readonly<JobsViewProps>): ReactElem
   const [loading, setLoading] = useState(false);
   const [query, setQuery] = useState("");
   const [showHelp, setShowHelp] = useState(false);
+  // Diagnostics: the curated built-in rows + the process table, off by default — the
+  // page is about the user's own jobs.
+  const [showBuiltins, setShowBuiltins] = useState(false);
   // The user's configurable job patterns (persisted locally, merged onto the built-ins by
   // the host on every snapshot request).
   const [userProbes, setUserProbes] = useState<JobProbe[]>(() => loadJobPatterns());
+  // Per-job local history (state transitions), refreshed whenever a snapshot lands.
+  const [history, setHistory] = useState(() => loadJobHistory());
 
   const refresh = useCallback(() => {
     setLoading(true);
@@ -66,6 +73,27 @@ export function JobsView({ client, active }: Readonly<JobsViewProps>): ReactElem
     [snapshot, query]
   );
 
+  // Split the host's merged known-jobs list into the user's own jobs (their probes, by
+  // label) and the curated built-ins (diagnostics, behind the toggle).
+  const userLabels = useMemo(() => new Set(userProbes.map((probe) => probe.label)), [userProbes]);
+  const userJobs = useMemo(
+    () => (snapshot === undefined ? [] : snapshot.known.filter((job) => userLabels.has(job.label))),
+    [snapshot, userLabels]
+  );
+  const builtinJobs = useMemo(
+    () =>
+      snapshot === undefined ? [] : snapshot.known.filter((job) => !userLabels.has(job.label)),
+    [snapshot, userLabels]
+  );
+
+  // Fold each snapshot into the per-job history (state transitions only), so a job row
+  // can answer "when did this last start/stop?".
+  useEffect(() => {
+    if (userJobs.length > 0) {
+      setHistory((prev) => recordJobHistory(prev, userJobs, new Date().toISOString()));
+    }
+  }, [userJobs]);
+
   return (
     <section className="jobs" aria-label="Jobs">
       <header className="jobs-header">
@@ -80,9 +108,9 @@ export function JobsView({ client, active }: Readonly<JobsViewProps>): ReactElem
         </div>
       </header>
       <p className="jobs-scope">
-        Your agent jobs: the dev tools and runner HoneyHub watches, not every process on the
-        machine. Read-only; matched by program name + command line, so the Grid runner is
-        recognized by its script even when it runs under PowerShell.
+        Your jobs: the processes and scheduled tasks YOU told HoneyHub to watch, with a local
+        history of when each started and stopped. Read-only; matched by program name + command
+        line, so a job is recognized by what it runs even under a generic host like PowerShell.
       </p>
 
       {showHelp && (
@@ -103,35 +131,29 @@ export function JobsView({ client, active }: Readonly<JobsViewProps>): ReactElem
         <p className="jobs-empty">{loading ? "Reading local jobs…" : "No snapshot yet."}</p>
       ) : (
         <>
-          {runningCount(snapshot) === 0 && snapshot.scheduled.length === 0 && (
-            <p className="jobs-empty-hint">
-              No agent jobs are running right now. New here?{" "}
-              <button type="button" className="link-button" onClick={() => setShowHelp(true)}>
-                See how it works
-              </button>{" "}
-              to set them up.
-            </p>
-          )}
           <div className="jobs-known-head">
-            <h3>Known jobs</h3>
-            <span className="jobs-tally">
-              {runningCount(snapshot)}/{snapshot.known.length} up
-            </span>
+            <h3>Your jobs</h3>
+            {userJobs.length > 0 && (
+              <span className="jobs-tally">
+                {userJobs.filter((job) => job.running).length}/{userJobs.length} up
+              </span>
+            )}
           </div>
-          <ul className="jobs-known">
-            {snapshot.known.map((job) => (
-              <li key={job.label} className={`known-job ${job.running ? "is-up" : "is-down"}`}>
-                <span className="known-dot" aria-hidden="true" />
-                <span className="known-label">{job.label}</span>
-                <span className="known-status">{job.running ? "Running" : "Not running"}</span>
-                {job.running && (
-                  <span className="known-meta">
-                    {job.instances}× · {formatMemoryKb(job.memoryKb)}
-                  </span>
-                )}
-              </li>
-            ))}
-          </ul>
+          {userJobs.length === 0 ? (
+            <p className="jobs-empty-hint">
+              You haven&rsquo;t declared any jobs yet.{" "}
+              <button type="button" className="link-button" onClick={() => setShowHelp(true)}>
+                Add a job pattern
+              </button>{" "}
+              to watch your own workers here, with a start/stop history per job.
+            </p>
+          ) : (
+            <ul className="jobs-known">
+              {userJobs.map((job) => (
+                <UserJobRow key={job.label} job={job} history={history[job.label] ?? []} />
+              ))}
+            </ul>
+          )}
 
           {snapshot.scheduled.length > 0 && (
             <>
@@ -166,49 +188,119 @@ export function JobsView({ client, active }: Readonly<JobsViewProps>): ReactElem
             </>
           )}
 
-          <div className="jobs-proc-head">
-            <h3>Agent processes</h3>
-            <input
-              className="jobs-search"
-              type="search"
-              aria-label="Filter processes"
-              value={query}
-              onChange={(event) => setQuery(event.target.value)}
-              placeholder="Filter by name…"
-            />
+          {/* Diagnostics: the curated dev-tool rows + raw agent processes, off by
+              default — this page is about YOUR jobs, not everything on the machine. */}
+          <div className="jobs-known-head">
+            <h3>Diagnostics</h3>
+            <button type="button" className="link-button" onClick={() => setShowBuiltins((open) => !open)}>
+              {showBuiltins ? "Hide built-in jobs & processes" : "Show built-in jobs & processes"}
+            </button>
           </div>
-          <table className="jobs-table">
-            <thead>
-              <tr>
-                <th scope="col">Process</th>
-                <th scope="col">PID</th>
-                <th scope="col">Memory</th>
-                <th scope="col">Command</th>
-              </tr>
-            </thead>
-            <tbody>
-              {processes.map((process) => (
-                <tr key={`${process.pid}-${process.name}`}>
-                  <td>{process.name}</td>
-                  <td className="jobs-pid">{process.pid}</td>
-                  <td className="jobs-mem">{formatMemoryKb(process.memoryKb)}</td>
-                  <td className="jobs-cmd" title={process.command ?? ""}>
-                    {process.command ?? "-"}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-          {processes.length === 0 && (
-            <p className="jobs-empty">
-              {query.trim() === ""
-                ? "No agent processes are running right now."
-                : `No agent processes match “${query}”.`}
-            </p>
+          {showBuiltins && (
+            <>
+              <ul className="jobs-known">
+                {builtinJobs.map((job) => (
+                  <li key={job.label} className={`known-job ${job.running ? "is-up" : "is-down"}`}>
+                    <span className="known-dot" aria-hidden="true" />
+                    <span className="known-label">{job.label}</span>
+                    <span className="known-status">{job.running ? "Running" : "Not running"}</span>
+                    {job.running && (
+                      <span className="known-meta">
+                        {job.instances}× · {formatMemoryKb(job.memoryKb)}
+                      </span>
+                    )}
+                  </li>
+                ))}
+              </ul>
+
+              <div className="jobs-proc-head">
+                <h3>Agent processes</h3>
+                <input
+                  className="jobs-search"
+                  type="search"
+                  aria-label="Filter processes"
+                  value={query}
+                  onChange={(event) => setQuery(event.target.value)}
+                  placeholder="Filter by name…"
+                />
+              </div>
+              <table className="jobs-table">
+                <thead>
+                  <tr>
+                    <th scope="col">Process</th>
+                    <th scope="col">PID</th>
+                    <th scope="col">Memory</th>
+                    <th scope="col">Command</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {processes.map((process) => (
+                    <tr key={`${process.pid}-${process.name}`}>
+                      <td>{process.name}</td>
+                      <td className="jobs-pid">{process.pid}</td>
+                      <td className="jobs-mem">{formatMemoryKb(process.memoryKb)}</td>
+                      <td className="jobs-cmd" title={process.command ?? ""}>
+                        {process.command ?? "-"}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              {processes.length === 0 && (
+                <p className="jobs-empty">
+                  {query.trim() === ""
+                    ? "No agent processes are running right now."
+                    : `No agent processes match “${query}”.`}
+                </p>
+              )}
+            </>
           )}
         </>
       )}
     </section>
+  );
+}
+
+interface UserJobRowProps {
+  job: KnownJob;
+  history: JobHistoryEntry[];
+}
+
+/** One of the user's own jobs: the live status row plus an expandable start/stop
+    history (state transitions recorded locally on each refresh, newest first). */
+function UserJobRow({ job, history }: Readonly<UserJobRowProps>): ReactElement {
+  const newestFirst = [...history].reverse();
+  return (
+    <li className={`known-job ${job.running ? "is-up" : "is-down"}`}>
+      <span className="known-dot" aria-hidden="true" />
+      <span className="known-label">{job.label}</span>
+      <span className="known-status">{job.running ? "Running" : "Not running"}</span>
+      {job.running && (
+        <span className="known-meta">
+          {job.instances}× · {formatMemoryKb(job.memoryKb)}
+        </span>
+      )}
+      {newestFirst.length > 0 && (
+        <details className="job-history">
+          <summary>history</summary>
+          <ul className="job-history-list">
+            {newestFirst.map((entry) => (
+              <li key={entry.at} className={entry.running ? "is-up" : "is-down"}>
+                <span className="job-history-at">
+                  {entry.at.slice(0, 16).replace("T", " ")}
+                </span>
+                <span className="job-history-state">
+                  {entry.running ? `started (${entry.instances}×)` : "stopped"}
+                </span>
+                {entry.running && (
+                  <span className="job-history-mem">{formatMemoryKb(entry.memoryKb)}</span>
+                )}
+              </li>
+            ))}
+          </ul>
+        </details>
+      )}
+    </li>
   );
 }
 
