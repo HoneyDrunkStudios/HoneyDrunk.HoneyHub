@@ -305,6 +305,9 @@ export function RunScreen({
   // historyVersion bumps on rename/delete/pin so those mutations refresh the list too.
   const [historyVersion, setHistoryVersion] = useState(0);
   const chatSummaries = useMemo(() => loadChatSummaries(), [runId, runState, historyVersion]);
+  // The composer's config drop-up (source/mode/agent/model + routing rationale) —
+  // one chip instead of two rows of controls plus a note.
+  const [configOpen, setConfigOpen] = useState(false);
   // One search box governs BOTH thread lists (local + synced), so the history reads as
   // one surface. Without a query: pinned threads always show plus the newest few; with
   // one: every match shows.
@@ -497,6 +500,8 @@ export function RunScreen({
       setCostMode("optimize");
     } else if (command.id === "model") {
       setCostMode("manual");
+      // The model picker lives in the config drop-up; open it so /model shows it.
+      setConfigOpen(true);
     } else if (command.id.startsWith("effort:")) {
       setCostMode("manual");
       setEffortPick(command.id.slice("effort:".length));
@@ -829,6 +834,13 @@ export function RunScreen({
   }, [runId, messages, usage, runState, task, runBackend, model, latestUsage, runStartedAt]);
 
   // The model/cost controls shared by the composer (compact toolbar form).
+  // The config chip's at-a-glance label: the routed backend in optimize mode, the
+  // pinned model in manual mode.
+  const configLabel =
+    costMode === "optimize"
+      ? `Optimize · ${backendLabel(recommendation.backend)}`
+      : `${backendLabel(provider)} · ${model ?? "custom"}`;
+
   const modelControls = (
     <>
       <div className="cost-mode" aria-label="Model selection mode">
@@ -1043,21 +1055,72 @@ export function RunScreen({
             {attachmentChips}
             <div className="composer-bar">
               <div className="composer-controls">
-                <WorkspacePicker
-                  client={client}
-                  roots={workspaceRoots}
-                  value={workspaceRoot}
-                  onSelect={setWorkspaceRoot}
-                  onAddRoots={onAddWorkspaceRoots ?? (() => undefined)}
-                  {...(defaultWorkspaceRoot === undefined
-                    ? {}
-                    : { defaultRoot: defaultWorkspaceRoot })}
-                  {...(onSetDefaultWorkspaceRoot === undefined
-                    ? {}
-                    : { onSetDefault: onSetDefaultWorkspaceRoot })}
-                />
+                {/* One config chip (VS Code extension pattern): the essentials at a
+                    glance; everything else lives in the drop-up panel. */}
+                <button
+                  type="button"
+                  className="chip-button composer-config"
+                  aria-label="Configure run"
+                  aria-haspopup="dialog"
+                  aria-expanded={configOpen}
+                  onClick={() => setConfigOpen((open) => !open)}
+                >
+                  <span className="chip-text">{configLabel}</span>
+                  <span className="chip-caret" aria-hidden="true">
+                    ▴
+                  </span>
+                </button>
                 {attachButton}
-                {modelControls}
+                {configOpen && (
+                  <>
+                    <button
+                      type="button"
+                      className="ws-backdrop"
+                      aria-label="Close run configuration"
+                      onClick={() => setConfigOpen(false)}
+                    />
+                    <div className="composer-panel" role="dialog" aria-label="Run configuration">
+                      <div className="panel-row">
+                        <span className="panel-label">Source</span>
+                        <WorkspacePicker
+                          client={client}
+                          roots={workspaceRoots}
+                          value={workspaceRoot}
+                          onSelect={setWorkspaceRoot}
+                          onAddRoots={onAddWorkspaceRoots ?? (() => undefined)}
+                          {...(defaultWorkspaceRoot === undefined
+                            ? {}
+                            : { defaultRoot: defaultWorkspaceRoot })}
+                          {...(onSetDefaultWorkspaceRoot === undefined
+                            ? {}
+                            : { onSetDefault: onSetDefaultWorkspaceRoot })}
+                        />
+                      </div>
+                      <div className="panel-row">
+                        <span className="panel-label">Model</span>
+                        <div className="panel-controls">{modelControls}</div>
+                      </div>
+                      <p className="panel-rationale">
+                        {costMode === "optimize" ? (
+                          <>
+                            {recommendation.rationale}
+                            {recommendation.snapshotSource === "bundled-default" && (
+                              <span className="routing-source"> · rates: bundled</span>
+                            )}
+                          </>
+                        ) : (
+                          <>
+                            Launching {backendLabel(provider)}
+                            {model === undefined ? "" : ` · ${model}`}.
+                          </>
+                        )}
+                        {costHint !== undefined && (
+                          <span className="routing-cost"> · {costHint}</span>
+                        )}
+                      </p>
+                    </div>
+                  </>
+                )}
               </div>
               <button
                 type="button"
@@ -1081,26 +1144,8 @@ export function RunScreen({
               </button>
             </div>
           </div>
-          {/* One compact status line: the rationale's lead clause plus the cost hint,
-              with the full explanation (and rate provenance) on hover — the multi-line
-              paragraph ate composer space. */}
-          <p
-            className="routing-rationale"
-            title={
-              costMode === "optimize"
-                ? `${recommendation.rationale}${
-                    recommendation.snapshotSource === "bundled-default" ? " (rates: bundled)" : ""
-                  }${costHint === undefined ? "" : ` · ${costHint}`}`
-                : undefined
-            }
-          >
-            {costMode === "optimize" ? (
-              <>{recommendation.rationale.split(";")[0]}</>
-            ) : (
-              <>Launching {backendLabel(provider)}{model === undefined ? "" : ` · ${model}`}.</>
-            )}
-            {costHint !== undefined && <span className="routing-cost"> · {costHint}</span>}
-          </p>
+          {/* No status note under the composer: the rationale + cost hint live in the
+              config drop-up, where you look when you care. */}
 
           {(chatSummaries.length > 0 || syncedSessions.length > 0) && (
             <div className="recent-chats-head">

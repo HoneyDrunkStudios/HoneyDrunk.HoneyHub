@@ -61,8 +61,17 @@ function startRun(task = "Add a feature") {
   fireEvent.click(screen.getByRole("button", { name: "Start session" }));
 }
 
-/** Switch the run screen into manual ("Pick model") mode. */
+/** Open the composer's config drop-up (idempotent: opens it if closed). */
+function openConfigPanel() {
+  const trigger = screen.getByRole("button", { name: "Configure run" });
+  if (trigger.getAttribute("aria-expanded") !== "true") {
+    fireEvent.click(trigger);
+  }
+}
+
+/** Switch the run screen into manual ("Pick model") mode (inside the config panel). */
 function pickModelMode() {
+  openConfigPanel();
   fireEvent.click(screen.getByRole("button", { name: "Pick model" }));
 }
 
@@ -137,10 +146,12 @@ describe("RunScreen", () => {
     // Optimize is the default: there is no provider/model select, just the rationale.
     expect(screen.queryByLabelText("Provider")).toBeNull();
 
-    // A complex task routes to the most capable backend (Claude).
+    // A complex task routes to the most capable backend (Claude). The rationale lives
+    // in the config drop-up now, so open it to read the routing explanation.
     fireEvent.change(screen.getByLabelText("Task"), {
       target: { value: "Refactor the concurrency model and debug the race condition" }
     });
+    openConfigPanel();
     expect(screen.getByText(/Complex task/)).toBeTruthy();
     // "Claude Code" also appears in synced history; assert the routing rationale names it.
     expect(screen.getAllByText(/Claude Code/).length).toBeGreaterThan(0);
