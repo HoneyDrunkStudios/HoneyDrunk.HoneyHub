@@ -488,6 +488,13 @@ pub enum ClientCommand {
         session_id: String,
         pinned: bool,
     },
+    /// Probe one backend's plan-usage meters (the TUI-only `/usage` / `/status`
+    /// panels) via a hidden host-owned PTY. Answered with a single
+    /// [`BridgeEventPayload::UsageProbe`]; supervised and one-shot (see
+    /// `usage_probe` module docs).
+    ProbeUsage {
+        backend: AgentBackend,
+    },
     /// Read the roadmap snapshot from the Architecture repo's `initiatives/current-focus.md`
     /// (control-hub #6). A read-only query carrying no fields; the host answers with a single
     /// [`BridgeEventPayload::Roadmap`] (`found: false` when no repo is present).
@@ -1304,6 +1311,23 @@ impl BridgeEvent {
         }
     }
 
+    /// A device-wide usage-probe result (one backend's plan meters). Host-only, like
+    /// the other device-wide events: empty ids, `sequence = 0`.
+    pub fn usage_probe(
+        id: impl Into<String>,
+        created_at: impl Into<String>,
+        report: crate::usage_probe::UsageProbeReport,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            session_id: String::new(),
+            run_id: String::new(),
+            sequence: 0,
+            created_at: created_at.into(),
+            payload: BridgeEventPayload::UsageProbe { report },
+        }
+    }
+
     /// A device-wide roadmap snapshot (parsed Architecture initiatives). Not scoped to a run
     /// or session, so `session_id`/`run_id` are empty and `sequence` is `0`.
     pub fn roadmap(
@@ -1459,6 +1483,10 @@ pub enum BridgeEventPayload {
         /// cost view. Absent when the session recorded no usage signals (additive).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         usage: Option<UsageSummary>,
+    },
+    /// The result of one backend's plan-usage probe (host-synthesized, device-wide).
+    UsageProbe {
+        report: crate::usage_probe::UsageProbeReport,
     },
     Roadmap {
         roadmap: RoadmapSnapshot,

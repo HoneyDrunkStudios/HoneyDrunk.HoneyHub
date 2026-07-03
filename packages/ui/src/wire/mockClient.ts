@@ -632,6 +632,25 @@ export class MockWireClient implements WireClient {
     this.emitSessionList();
   }
 
+  async probeUsage(backend: AgentBackend): Promise<void> {
+    // The real host scrapes the vendor TUI's usage panel; the mock scripts one so the
+    // Usage flow is exercisable offline.
+    this.emitDevice({
+      kind: "usage_probe",
+      report: {
+        backend,
+        ok: true,
+        windows: [
+          { line: "Current session (5h): 34% used · resets 6:00 PM", usedPercent: 34 },
+          { line: "Current week (all models): 61% used · resets Tue", usedPercent: 61 },
+          { line: "Current week (Opus): 12% used", usedPercent: 12 }
+        ],
+        raw: "(demo) usage panel capture",
+        capturedAt: this.createdAt
+      }
+    });
+  }
+
   async sessionDetail(sessionId: string): Promise<void> {
     this.emitDevice({
       kind: "session_detail",

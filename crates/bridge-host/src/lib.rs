@@ -838,6 +838,19 @@ async fn handle_command(
                     None
                 })
             }
+            ClientCommand::ProbeUsage { backend } => {
+                // The plan-usage probe drives the vendor TUI in a hidden PTY for up
+                // to ~25s, so it runs OFF the runtime lock on a blocking thread and
+                // broadcasts its report when done. Runs in the first workspace root
+                // (a directory the CLIs already trust).
+                let cwd = runtime
+                    .workspace_roots()
+                    .first()
+                    .cloned()
+                    .unwrap_or_else(|| ".".to_string());
+                spawn_usage_probe(host, backend, cwd);
+                Ok(None)
+            }
             ClientCommand::Resume { .. } => Err(BridgeError::new(
                 "unsupported_command",
                 "resume is not driven by the host runtime yet",
@@ -896,6 +909,40 @@ fn new_id() -> String {
 /// a process-tree kill, and output caps), and **broadcast** the `check_result` so
 /// every connected cockpit sees it — including one that reconnected mid-check, as
 /// long as it is connected when the check finishes.
+/// Run a plan-usage probe without holding the runtime lock: resolve the backend's
+/// CLI program (honoring the same env overrides the adapters use), execute the PTY
+/// probe on a blocking thread, and **broadcast** the report so every connected
+/// cockpit sees the refreshed meters.
+fn spawn_usage_probe(host: &Arc<Host>, backend: honeyhub_bridge::AgentBackend, cwd: String) {
+    let host = Arc::clone(host);
+    tokio::spawn(async move {
+        let program = match backend {
+            honeyhub_bridge::AgentBackend::ClaudeLocal => {
+                std::env::var("HONEYHUB_CLAUDE_PROGRAM").unwrap_or_else(|_| "claude".to_string())
+            }
+            honeyhub_bridge::AgentBackend::CodexLocal => {
+                std::env::var("HONEYHUB_CODEX_PROGRAM").unwrap_or_else(|_| "codex".to_string())
+            }
+            honeyhub_bridge::AgentBackend::CopilotLocal => "copilot".to_string(),
+        };
+        let captured_at = now_rfc3339();
+        let report = tokio::task::spawn_blocking(move || {
+            honeyhub_bridge::probe_usage(backend, &program, &cwd, captured_at)
+        })
+        .await
+        .unwrap_or_else(|_| honeyhub_bridge::UsageProbeReport {
+            backend,
+            ok: false,
+            windows: Vec::new(),
+            raw: "the probe task panicked or was cancelled".to_string(),
+            captured_at: now_rfc3339(),
+        });
+        let _ = host
+            .events
+            .send(BridgeEvent::usage_probe(new_id(), now_rfc3339(), report));
+    });
+}
+
 fn spawn_check(host: &Arc<Host>, root: String, check: String) {
     let host = Arc::clone(host);
     tokio::spawn(async move {

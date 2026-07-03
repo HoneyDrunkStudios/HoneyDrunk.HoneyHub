@@ -75,6 +75,7 @@ class FakeClient implements WireClient {
   async renameSession(): Promise<void> {}
   async deleteSession(): Promise<void> {}
   async pinSession(): Promise<void> {}
+  async probeUsage(): Promise<void> {}
   async roadmap(): Promise<void> {}
   async scaffoldArchitecture(): Promise<void> {}
   async pullArchitecture(): Promise<void> {}

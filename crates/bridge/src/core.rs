@@ -1380,6 +1380,13 @@ fn validate_stream_payload(
                 "a backend stream must not emit device-wide check results",
             ));
         }
+        BridgeEventPayload::UsageProbe { .. } => {
+            // Device-wide, host-synthesized plan-usage probe — never streamed.
+            return Err(BridgeError::new(
+                "event_unexpected_usage_probe",
+                "a backend stream must not emit device-wide usage probes",
+            ));
+        }
     }
 
     Ok(())

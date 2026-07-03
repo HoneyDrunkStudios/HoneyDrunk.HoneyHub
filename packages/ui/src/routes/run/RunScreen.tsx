@@ -18,6 +18,7 @@ import type {
   DispatchRunState,
   DispatchSession,
   StartRunRequest,
+  UsageProbeReport,
   UsageSignal,
   UsageSummary
 } from "@honeydrunk/honeyhub-types";
@@ -309,6 +310,10 @@ export function RunScreen({
   // The composer's config drop-up (source/mode/agent/model + routing rationale) —
   // one chip instead of two rows of controls plus a note.
   const [configOpen, setConfigOpen] = useState(false);
+  // Plan-usage probe reports per backend (the Usage section of the drop-up), plus
+  // which backends have a probe in flight (cleared when its report lands).
+  const [usageReports, setUsageReports] = useState<Record<string, UsageProbeReport>>({});
+  const [probing, setProbing] = useState<Record<string, boolean>>({});
   // One search box governs BOTH thread lists (local + synced), so the history reads as
   // one surface. Without a query: pinned threads always show plus the newest few; with
   // one: every match shows.
@@ -440,6 +445,10 @@ export function RunScreen({
     const unsubscribe = client.subscribe((event) => {
       if (event.payload.kind === "session_list") {
         setSyncedSessions(event.payload.sessions);
+      } else if (event.payload.kind === "usage_probe") {
+        const { report } = event.payload;
+        setUsageReports((prev) => ({ ...prev, [report.backend]: report }));
+        setProbing((prev) => ({ ...prev, [report.backend]: false }));
       } else if (event.payload.kind === "session_detail") {
         const { sessionId, runs: detailRuns, transcript, usage } = event.payload;
         reopenSyncedSession({
@@ -1160,6 +1169,67 @@ export function RunScreen({
                           <span className="routing-cost"> · {costHint}</span>
                         )}
                       </p>
+                      {/* Plan-usage meters: click-to-refresh probes of the vendor
+                          CLIs' own /usage · /status panels (Copilot exposes none). */}
+                      <div className="panel-row">
+                        <span className="panel-label">Usage</span>
+                        <div className="panel-controls">
+                          {routableBackends
+                            .filter((backend) => backend !== "copilot.local")
+                            .map((backend) => (
+                              <button
+                                key={backend}
+                                type="button"
+                                className="chip-button"
+                                disabled={probing[backend] === true}
+                                onClick={() => {
+                                  setProbing((prev) => ({ ...prev, [backend]: true }));
+                                  void client.probeUsage(backend).catch(() =>
+                                    setProbing((prev) => ({ ...prev, [backend]: false }))
+                                  );
+                                }}
+                              >
+                                {probing[backend] === true
+                                  ? `Checking ${backendLabel(backend)}…`
+                                  : `Check ${backendLabel(backend)}`}
+                              </button>
+                            ))}
+                        </div>
+                      </div>
+                      {Object.values(usageReports).map((report) => (
+                        <div key={report.backend} className="usage-report">
+                          <p className="usage-report-head">
+                            {backendLabel(report.backend)} · as of{" "}
+                            {report.capturedAt.slice(11, 16) || "now"}
+                          </p>
+                          {report.windows.length > 0 ? (
+                            <ul className="usage-windows">
+                              {report.windows.map((window, index) => (
+                                <li key={`${report.backend}-${index}`}>
+                                  {window.usedPercent !== undefined && (
+                                    <span className="usage-meter" aria-hidden="true">
+                                      <span
+                                        className="usage-meter-fill"
+                                        style={{
+                                          width: `${Math.min(100, window.usedPercent)}%`
+                                        }}
+                                      />
+                                    </span>
+                                  )}
+                                  <span className="usage-line">{window.line}</span>
+                                </li>
+                              ))}
+                            </ul>
+                          ) : (
+                            <details className="usage-raw">
+                              <summary>
+                                {report.ok ? "raw capture (layout not recognized)" : "probe failed"}
+                              </summary>
+                              <pre>{report.raw}</pre>
+                            </details>
+                          )}
+                        </div>
+                      ))}
                     </div>
                   </>
                 )}

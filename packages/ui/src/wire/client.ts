@@ -1,4 +1,9 @@
-import type { BridgeEvent, JobProbe, StartRunRequest } from "@honeydrunk/honeyhub-types";
+import type {
+  AgentBackend,
+  BridgeEvent,
+  JobProbe,
+  StartRunRequest
+} from "@honeydrunk/honeyhub-types";
 
 // The PWA's view of the packet-04 wire protocol. The run screen depends only on
 // this seam, so the same UI drives a mock (tests / offline demo) and, once the
@@ -215,6 +220,9 @@ export interface WireClient {
   /** **Write**: pin/unpin a persisted session (sorts first; exempt from transcript
       pruning); answers with a refreshed `session_list` event. */
   pinSession(sessionId: string, pinned: boolean): Promise<void>;
+  /** Probe one backend's plan-usage meters (host drives the vendor TUI's /usage or
+      /status in a hidden PTY). The answer arrives as a `usage_probe` event. */
+  probeUsage(backend: AgentBackend): Promise<void>;
   /** Read the roadmap snapshot (parsed from the Architecture repo's initiatives). The
       answer arrives as a `roadmap` event via `subscribe` (`found:false` = no repo). */
   roadmap(): Promise<void>;
