@@ -261,6 +261,13 @@ export interface StartRunRequest {
   attachments?: ChatAttachment[];
 }
 
+/** Per-model USD pricing (per million tokens), when the bridge knows an authoritative
+    rate. Powers pre-send estimates and derived cost; absent = unknown, never guessed. */
+export interface ModelPricing {
+  inputUsdPerMtok: number;
+  outputUsdPerMtok: number;
+}
+
 /** One model a backend can run, offered in the model picker. `id` is the value the
     CLI receives (e.g. `--model <id>`); `label` is human-facing. */
 export interface BackendModel {
@@ -271,6 +278,11 @@ export interface BackendModel {
   reasoningLevels?: string[];
   /** The CLI's default reasoning level for this model, when known. */
   defaultReasoning?: string;
+  /** Known per-token pricing; absent when the bridge has no authoritative rate. */
+  pricing?: ModelPricing;
+  /** True when running this model bills real dollars even on a flat subscription
+      (usage credits / API metering) — never treat it as included-in-plan. */
+  metered?: boolean;
 }
 
 /** How a backend's model list was sourced, so the UI is honest about provenance.

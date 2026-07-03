@@ -334,11 +334,19 @@ export class MockWireClient implements WireClient {
         program: "claude",
         available: true,
         capabilities: defaultClaudeCapabilities,
+        // Mirrors the bridge's curated Claude catalog (crates/bridge/src/
+        // backend_catalog.rs models_for) — labels, rates, and metering must
+        // track that source of truth.
         models: [
-          { id: "opus", label: "Claude Opus 4.8" },
-          { id: "sonnet", label: "Claude Sonnet 5" },
-          { id: "haiku", label: "Claude Haiku 4.5" },
-          { id: "fable", label: "Claude Fable 5" }
+          { id: "opus", label: "Claude Opus 4.8", pricing: { inputUsdPerMtok: 5, outputUsdPerMtok: 25 } },
+          { id: "sonnet", label: "Claude Sonnet 5", pricing: { inputUsdPerMtok: 3, outputUsdPerMtok: 15 } },
+          { id: "haiku", label: "Claude Haiku 4.5", pricing: { inputUsdPerMtok: 1, outputUsdPerMtok: 5 } },
+          {
+            id: "fable",
+            label: "Claude Fable 5",
+            pricing: { inputUsdPerMtok: 10, outputUsdPerMtok: 50 },
+            metered: true
+          }
         ],
         modelSource: "cli_alias"
       },

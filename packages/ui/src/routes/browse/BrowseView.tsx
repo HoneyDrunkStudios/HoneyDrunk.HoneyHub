@@ -524,14 +524,16 @@ function BrowseDiffView({ diff }: Readonly<{ diff: GitDiff | undefined }>): Reac
       {diff.patch.trim().length === 0 ? (
         <p className="browse-hint">No diff (the change may be untracked or staged only).</p>
       ) : (
-        <pre className="diff-view" aria-label="Diff">
-          {diffKeys.map(({ key, line }) => (
-            <span key={key} className={`diff-line diff-${line.kind}`}>
-              {line.text}
-              {"\n"}
-            </span>
-          ))}
-        </pre>
+        <figure className="diff-figure" aria-label="Diff">
+          <pre className="diff-view">
+            {diffKeys.map(({ key, line }) => (
+              <span key={key} className={`diff-line diff-${line.kind}`}>
+                {line.text}
+                {"\n"}
+              </span>
+            ))}
+          </pre>
+        </figure>
       )}
       {diff.truncated && <p className="git-truncated">Diff truncated (very large change).</p>}
     </div>

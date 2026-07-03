@@ -23,13 +23,20 @@ import type {
 import { UsageBadge } from "../../components/UsageBadge";
 import { backendLabel } from "../../backends";
 import { resolveDefaultWorkspaceRoot } from "../../settingsModel";
-import type { Plans } from "../../plans";
+import { getPlan, type Plans } from "../../plans";
+import { describeEstimate, estimateRunCost, resolveCatalogModel } from "./costEstimate";
 import { recommendBackend } from "../routing/router";
 import { loadRoutingSnapshot } from "../routing/routingSnapshot";
 import { SessionDiagnostics } from "./SessionDiagnostics";
 import { WorkspacePicker } from "./WorkspacePicker";
 import { ModelMenu, type ModelOption } from "./ModelMenu";
-import { getChat, loadChatSummaries, saveChat, type ChatRecord } from "../../chatHistory";
+import {
+  getChat,
+  loadChatSummaries,
+  saveChat,
+  type ChatRecord,
+  type ChatSummary
+} from "../../chatHistory";
 import {
   formatBytes,
   MAX_ATTACHMENT_BYTES,
@@ -284,6 +291,31 @@ export function RunScreen({
     ? modelsForProvider[0]?.id
     : undefined;
   const model: string | undefined = costMode === "manual" ? manualModel : autoModel;
+
+  // Saved chat summaries, shared by the pre-send estimator and RecentChats. Keyed on
+  // the run lifecycle so a chat saved this session (saveChat on run end) refreshes
+  // both surfaces without re-parsing the whole store on every keystroke.
+  // The deps are refresh TRIGGERS, not inputs: saveChat fires on run updates, so a
+  // run starting/ending re-reads the store and both surfaces stay current.
+  const chatSummaries = useMemo(() => loadChatSummaries(), [runId, runState]);
+  // Pre-send cost signal for the composer: "included in your plan" on a flat sub
+  // (only for a resolved, non-metered model — usage-credit models bill regardless),
+  // else an input floor from the catalog's rates plus a median/p90 projection from
+  // similar past chats. Honest by construction — when nothing is known, nothing is
+  // shown; real spend still arrives as usage signals after the run.
+  const costHint = useMemo(
+    () =>
+      describeEstimate(
+        estimateRunCost({
+          task,
+          backend: provider,
+          model: resolveCatalogModel(allModelsForProvider, model),
+          plan: getPlan(plans, provider),
+          history: chatSummaries
+        })
+      ),
+    [task, provider, model, allModelsForProvider, plans, chatSummaries]
+  );
 
   // Reasoning-effort levels for the resolved model (Codex exposes these; Claude has no
   // effort flag). Only offered when a concrete model with levels is selected.
@@ -1039,8 +1071,9 @@ export function RunScreen({
               <>Launching {backendLabel(provider)}{model === undefined ? "" : ` · ${model}`}.</>
             )}
           </p>
+          {costHint !== undefined && <p className="cost-estimate">{costHint}</p>}
 
-          <RecentChats onOpen={setOpenedChat} />
+          <RecentChats summaries={chatSummaries} onOpen={setOpenedChat} />
 
           <SyncedHistory sessions={syncedSessions} onOpen={openSyncedSession} />
     </div>
@@ -1197,6 +1230,9 @@ function IconPaperclip(): ReactElement {
 }
 
 interface RecentChatsProps {
+  /** The saved chat summaries, provided by the parent so the store is parsed once
+      and shared with the pre-send cost estimator (not re-read every keystroke). */
+  summaries: ChatSummary[];
   /** Open a past chat read-only. The id is resolved to its full record here. */
   onOpen: (chat: ChatRecord | undefined) => void;
 }
@@ -1204,8 +1240,8 @@ interface RecentChatsProps {
 /** Locally-saved recent chats (top 8). A flat module-scope component so the click
     handler is not a deeply nested callback inside the composer render. Renders nothing
     when there is no local history. */
-function RecentChats({ onOpen }: Readonly<RecentChatsProps>): ReactElement | null {
-  const recents = loadChatSummaries().slice(0, 8);
+function RecentChats({ summaries, onOpen }: Readonly<RecentChatsProps>): ReactElement | null {
+  const recents = summaries.slice(0, 8);
   if (recents.length === 0) {
     return null;
   }

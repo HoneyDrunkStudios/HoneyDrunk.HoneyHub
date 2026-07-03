@@ -744,6 +744,14 @@ h2 {
   color: var(--text-dim);
 }
 
+/* The composer's pre-send cost hint (included-in-plan / ~$ range / floor). */
+.cost-estimate {
+  margin: 2px 0 0;
+  color: var(--text-dim);
+  font-size: 0.78rem;
+  font-variant-numeric: tabular-nums;
+}
+
 /* --------------------------------------------------------- diagnostics */
 
 .diagnostics {
@@ -2012,6 +2020,10 @@ h2 {
 }
 .stat-del {
   color: var(--neon-pink, #ff2a6d);
+}
+
+.diff-figure {
+  margin: 0;
 }
 
 .diff-view {
@@ -4490,7 +4502,8 @@ h2 {
     min-width: 0;
     gap: 4px;
     padding-bottom: 4px;
-    -webkit-overflow-scrolling: touch;
+    /* Hidden scrollbar: scrollbar-width for Chrome 121+/Firefox, with the
+       ::-webkit-scrollbar rule below covering Safari and older Chromium. */
     scrollbar-width: none;
   }
 

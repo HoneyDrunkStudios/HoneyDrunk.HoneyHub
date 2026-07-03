@@ -326,11 +326,11 @@ function GroupDetail({
           {summary.running > 0 ? "Running…" : "Run checks"}
         </button>
         {summary.total > 0 && (
-          <span className="group-checks-summary" aria-label="Check summary">
+          <output className="group-checks-summary" aria-label="Check summary">
             {summary.passed > 0 && <span className="checks-passed">{summary.passed} passed</span>}
             {summary.failed > 0 && <span className="checks-failed">{summary.failed} failed</span>}
             {summary.running > 0 && <span className="checks-running">{summary.running} running</span>}
-          </span>
+          </output>
         )}
       </div>
 
@@ -439,13 +439,14 @@ function checkPhaseLabel(check: CheckState): string {
 function CheckResultView({ check }: Readonly<{ check: CheckState }>): ReactElement {
   return (
     <div className={`group-check-result phase-${check.phase}`}>
-      <span className="group-check-pill" aria-label="Check status">
-        {checkPhaseLabel(check)}
-      </span>
+      {/* A plain span: the pill text is its own visible label, and 10 parallel checks
+          flipping phases must not each become a live region shouting over the
+          group-level summary (which IS an <output>). */}
+      <span className="group-check-pill">{checkPhaseLabel(check)}</span>
       {check.output !== undefined && check.output.length > 0 && (
         <details className="group-check-output">
           <summary>output</summary>
-          <pre aria-label="Check output">
+          <pre>
             {check.output}
             {check.truncated === true ? "\n… (truncated)" : ""}
           </pre>
@@ -478,14 +479,16 @@ function RepoDiff({
     body = <p className="groups-empty">No diff (changes may be untracked or staged only).</p>;
   } else {
     body = (
-      <pre className="diff-view" aria-label={`Diff for ${name}`}>
-        {keys.map(({ key, line }) => (
-          <span key={key} className={`diff-line diff-${line.kind}`}>
-            {line.text}
-            {"\n"}
-          </span>
-        ))}
-      </pre>
+      <figure className="diff-figure" aria-label={`Diff for ${name}`}>
+        <pre className="diff-view">
+          {keys.map(({ key, line }) => (
+            <span key={key} className={`diff-line diff-${line.kind}`}>
+              {line.text}
+              {"\n"}
+            </span>
+          ))}
+        </pre>
+      </figure>
     );
   }
 
