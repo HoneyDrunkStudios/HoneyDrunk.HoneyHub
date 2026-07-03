@@ -279,9 +279,11 @@ body {
 /* The Chat nav item exists for small screens (the dock does not fit there, and is
    display:none'd in the 860px media block below); on wide screens the dock IS the
    chat, so the tab hides. The two breakpoints must stay in lockstep, or a window
-   width would exist with no chat surface (or two). */
+   width would exist with no chat surface (or two). The compound selector out-ranks
+   the later `.nav-item { display: flex }` base rule, which would otherwise win the
+   equal-specificity source-order tie and keep the tab visible. */
 @media (min-width: 861px) {
-  .nav-item-mobile {
+  .nav-item.nav-item-mobile {
     display: none;
   }
 }
