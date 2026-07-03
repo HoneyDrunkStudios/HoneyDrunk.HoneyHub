@@ -1,5 +1,50 @@
 # Changelog
 
+## [Unreleased]
+
+Dogfooding round: smarter cost signals, hardened group checks, a resizable chat dock, and a
+user-centered Jobs page.
+
+- **Cost before and after**: the run screen now shows a cost hint before you send (flat-plan
+  models show "included"; metered/API models show a floor estimate plus your recent typical/high
+  spend for that model), and every reply keeps reporting what it actually cost with the existing
+  exact/derived/estimated fidelity markers. Rates are never hard-coded: the optional
+  `HONEYHUB_MODEL_RATES` env var is the only rate source, and models without a rate show
+  token counts instead of invented dollars.
+- **Group checks are named checks**: the cockpit no longer sends command lines over the wire.
+  You pick a named check per repo (`npm-test`, `cargo-test`, `dotnet-test`, ...) and the bridge
+  host resolves it against its own built-in table (operator-overridable via
+  `HONEYHUB_EXTRA_CHECKS`; extra-only ids are host-runnable but not yet offered by the
+  cockpit picker); anything else is refused. Check runs are supervised (own process
+  group, capped output capture, `HONEYHUB_CHECK_TIMEOUT_SECS` wall clock with a full
+  process-tree kill) and each spawn is logged on the host. Wire: `run_check` now carries a
+  check id; `check_result` reports the executed command, a disposition
+  (ran/denied/spawn-failed/timed-out), a typed denial reason
+  (overlap/unknown-check/task-failed), and truncation.
+- **Chat dock**: the right-hand chat sidebar is THE desktop chat surface (the Chat page remains
+  on small screens only) and is resizable by dragging its left edge or focusing the divider and
+  using the arrow keys; the width is clamped and persisted.
+- **Chat threads**: past conversations are now manageable threads. Search them by name or task
+  text, rename them (the original task stays searchable), pin favorites to the top (pinned
+  threads also survive the 100-chat history cap), and delete with a two-click confirm. A
+  rename or pin set on a thread survives later saves from a live run.
+- **Threads across devices**: the bridge-backed session history gets the same treatment. One
+  search box covers both lists ("This device" and "All devices"); renaming, pinning, and
+  deleting a synced thread happens on the bridge host's store, so every paired device sees
+  the change. A pinned synced thread also keeps its transcript out of retention pruning.
+  Wire: additive `rename_session` / `delete_session` / `pin_session` commands, each answered
+  with a refreshed `session_list`; `DispatchSession` gains a `pinned` flag.
+- The composer's routing/cost note is one compact line now (lead clause + cost hint,
+  ellipsized); hover it for the full rationale and rate provenance.
+- **Jobs page**: centered on YOUR jobs (your probe patterns and agent-related scheduled tasks)
+  with a local start/stop history per job; the curated built-in rows and the raw process table
+  moved behind a Diagnostics toggle.
+- **Repo discovery**: workspace roots are now walked recursively (bounded depth, noise folders
+  like `node_modules`/`target` skipped, no descent into a found repo), so repos nested in
+  subfolders are found.
+- Models: Claude Fable 5 joins the Claude picker (marked as usage-metered); model pricing/
+  metering now travels on the catalog wire shape.
+
 ## [0.21.0] - 2026-06-22
 
 Key Vault **expiry notifications** (the connector's third slice): get alerted when a secret, key, or

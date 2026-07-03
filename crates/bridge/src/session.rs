@@ -75,6 +75,10 @@ pub struct DispatchSession {
     pub updated_at: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub current_run_id: Option<String>,
+    /// Pinned in the cockpit's history (sorts first; exempt from transcript pruning).
+    /// Stamped from the store wrapper on listing — adapters never set it.
+    #[serde(default, skip_serializing_if = "core::ops::Not::not")]
+    pub pinned: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -424,6 +428,7 @@ mod tests {
     #[test]
     fn serializes_session_contract_with_frontend_wire_names() {
         let session = DispatchSession {
+            pinned: false,
             id: "session-1".to_string(),
             backend: AgentBackend::ClaudeLocal,
             title: "HoneyHub scaffold".to_string(),

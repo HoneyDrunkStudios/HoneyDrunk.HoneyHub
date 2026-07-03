@@ -155,8 +155,8 @@ describe("RunScreen", () => {
   it("lists synced history and reopens a past session read-only", async () => {
     render(<RunScreen client={new MockWireClient()} availableBackends={ALL_BACKENDS} />);
 
-    // The mock reports one durable past session in the Synced history list.
-    const history = await screen.findByRole("list", { name: "Synced history" });
+    // The mock reports one durable past session in the bridge-backed threads list.
+    const history = await screen.findByRole("list", { name: "Synced chats" });
     const entry = within(history).getByText("Wire the deploy triggers");
     fireEvent.click(entry);
 

@@ -87,20 +87,7 @@ impl ChildRun {
         // Put the child in its own process group so `stop` can signal the whole
         // tree (a CLI may spawn tool/MCP subprocesses), matching the Windows
         // `taskkill /T` behaviour.
-        #[cfg(unix)]
-        {
-            use std::os::unix::process::CommandExt;
-            // SAFETY: `setpgid(0, 0)` runs in the forked child before exec; it only
-            // sets the child's process group and is async-signal-safe.
-            unsafe {
-                command.pre_exec(|| {
-                    if libc::setpgid(0, 0) == -1 {
-                        return Err(std::io::Error::last_os_error());
-                    }
-                    Ok(())
-                });
-            }
-        }
+        put_in_own_process_group(&mut command);
 
         // Capture the program name before spawning so a launch failure names the
         // exact CLI (actionable when several local adapters coexist).
@@ -337,8 +324,32 @@ impl RunSlot {
     }
 }
 
+/// Put a to-be-spawned child in its own process group (unix), so a later
+/// [`kill_process_tree`] can signal the whole tree rather than the direct child
+/// only. A no-op on Windows, where `taskkill /T` walks the tree by pid.
+pub(crate) fn put_in_own_process_group(command: &mut Command) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        // SAFETY: `setpgid(0, 0)` runs in the forked child before exec; it only
+        // sets the child's process group and is async-signal-safe.
+        unsafe {
+            command.pre_exec(|| {
+                if libc::setpgid(0, 0) == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = command;
+    }
+}
+
 #[cfg(windows)]
-fn kill_process_tree(child: &mut Child) {
+pub(crate) fn kill_process_tree(child: &mut Child) {
     // `Child::kill` only kills the immediate process on Windows; `taskkill /T`
     // takes the whole tree the CLI may have spawned. Both are best-effort: an
     // already-exited process simply returns an error we ignore.
@@ -350,7 +361,7 @@ fn kill_process_tree(child: &mut Child) {
 }
 
 #[cfg(unix)]
-fn kill_process_tree(child: &mut Child) {
+pub(crate) fn kill_process_tree(child: &mut Child) {
     // The child leads its own process group (set via `pre_exec`), so signalling
     // the group id (equal to the child pid) tears down the whole tree rather than
     // just the direct child. Best-effort: an already-dead group yields ESRCH.
@@ -364,7 +375,7 @@ fn kill_process_tree(child: &mut Child) {
 }
 
 #[cfg(not(any(windows, unix)))]
-fn kill_process_tree(child: &mut Child) {
+pub(crate) fn kill_process_tree(child: &mut Child) {
     let _ = child.kill();
     let _ = child.wait();
 }

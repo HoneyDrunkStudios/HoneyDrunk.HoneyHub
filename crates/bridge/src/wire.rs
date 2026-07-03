@@ -3,6 +3,7 @@ use crate::adapter::{AgentBackend, BridgeError, StartRunRequest};
 use crate::agents::{AgentDefinition, AgentWriteOutcome};
 use crate::artifact::DispatchArtifact;
 use crate::backend_catalog::BackendCapability;
+use crate::checks::CheckOutcome;
 use crate::environment::EnvironmentInfo;
 use crate::fsbrowse::{DirListing, FileContents, SearchResults, WorkspaceFolders};
 use crate::git::{GitBranches, GitDiff, GitOpResult, GitOverview, GitStatus};
@@ -469,6 +470,24 @@ pub enum ClientCommand {
     SessionDetail {
         session_id: String,
     },
+    /// Rename a persisted session (thread management). The host applies the rename to
+    /// its store and answers with a refreshed [`BridgeEventPayload::SessionList`].
+    RenameSession {
+        session_id: String,
+        title: String,
+    },
+    /// Delete a persisted session (record + transcripts), answering with a refreshed
+    /// [`BridgeEventPayload::SessionList`].
+    DeleteSession {
+        session_id: String,
+    },
+    /// Pin/unpin a persisted session (sorts first; a pinned session's transcript is
+    /// exempt from retention pruning), answering with a refreshed
+    /// [`BridgeEventPayload::SessionList`].
+    PinSession {
+        session_id: String,
+        pinned: bool,
+    },
     /// Read the roadmap snapshot from the Architecture repo's `initiatives/current-focus.md`
     /// (control-hub #6). A read-only query carrying no fields; the host answers with a single
     /// [`BridgeEventPayload::Roadmap`] (`found: false` when no repo is present).
@@ -486,6 +505,22 @@ pub enum ClientCommand {
     /// Fast-forward (`git pull --ff-only`) the Architecture repo, then re-read it. Answers
     /// with a [`BridgeEventPayload::Roadmap`] of the refreshed repo (or a git error).
     PullArchitecture,
+    /// **Run**: run a **named, host-owned** check (the repo's build/test) in a repo root —
+    /// the "test a change group" action. The client sends only a check id; the host resolves
+    /// it against its own definitions (built-ins + `HONEYHUB_EXTRA_CHECKS`) and refuses
+    /// anything else, gates `root` against the workspace allowlist, rejects overlapping runs
+    /// per root, and kills the process after a timeout. Argv is spawned directly (no shell).
+    /// The host answers with a single [`BridgeEventPayload::CheckResult`] carrying an
+    /// explicit disposition (ran / denied / spawn_failed / timed_out).
+    RunCheck {
+        root: String,
+        /// The named check id. `alias = "command"` lets a stale pre-rename client
+        /// degrade gracefully: its free-text command line arrives here, fails the
+        /// id allowlist, and comes back as an explicit `denied` outcome instead of
+        /// an opaque bad-frame error.
+        #[serde(alias = "command")]
+        check: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1210,6 +1245,23 @@ impl BridgeEvent {
         }
     }
 
+    /// A device-wide group-check result (one declared command run in a repo root). Not scoped
+    /// to a run or session, so `session_id`/`run_id` are empty and `sequence` is `0`.
+    pub fn check_result(
+        id: impl Into<String>,
+        created_at: impl Into<String>,
+        result: CheckOutcome,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            session_id: String::new(),
+            run_id: String::new(),
+            sequence: 0,
+            created_at: created_at.into(),
+            payload: BridgeEventPayload::CheckResult { result },
+        }
+    }
+
     /// A device-wide persisted-session-list event. Not scoped to a run or session, so
     /// `session_id`/`run_id` are empty and `sequence` is `0`.
     pub fn session_list(
@@ -1405,6 +1457,9 @@ pub enum BridgeEventPayload {
     Roadmap {
         roadmap: RoadmapSnapshot,
     },
+    CheckResult {
+        result: CheckOutcome,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1578,6 +1633,34 @@ mod tests {
     }
 
     #[test]
+    fn parses_run_check_and_tolerates_the_legacy_command_field() {
+        let current: ClientCommand = serde_json::from_value(
+            json!({ "kind": "run_check", "root": "C:/work", "check": "npm-test" }),
+        )
+        .expect("current shape parses");
+        assert_eq!(
+            current,
+            ClientCommand::RunCheck {
+                root: "C:/work".to_string(),
+                check: "npm-test".to_string(),
+            }
+        );
+        // A stale pre-rename client sends `command`; the alias maps it onto `check`
+        // so the request degrades into an id-allowlist denial, not a bad frame.
+        let legacy: ClientCommand = serde_json::from_value(
+            json!({ "kind": "run_check", "root": "C:/work", "command": "npm test" }),
+        )
+        .expect("legacy shape parses");
+        assert_eq!(
+            legacy,
+            ClientCommand::RunCheck {
+                root: "C:/work".to_string(),
+                check: "npm test".to_string(),
+            }
+        );
+    }
+
+    #[test]
     fn round_trips_wire_frames_and_payload_variants() {
         let created_at = "2026-06-07T12:00:00Z";
         let message = DispatchMessage {
@@ -1628,6 +1711,7 @@ mod tests {
                 ClientCommand::Start {
                     request: Box::new(StartRunRequest {
                         session: DispatchSession {
+                            pinned: false,
                             id: "session-1".to_string(),
                             backend: AgentBackend::ClaudeLocal,
                             title: "Bridge".to_string(),
@@ -2459,6 +2543,23 @@ mod tests {
                 }),
             ),
             BridgeEventPayload::Roadmap { .. }
+        );
+        check!(
+            BridgeEvent::check_result(
+                "e",
+                at,
+                from_json!(CheckOutcome, {
+                    "root": "C:/work",
+                    "check": "npm-test",
+                    "command": "npm test",
+                    "ok": true,
+                    "disposition": "ran",
+                    "exitCode": 0,
+                    "output": "all good",
+                    "truncated": false
+                }),
+            ),
+            BridgeEventPayload::CheckResult { .. }
         );
     }
 }

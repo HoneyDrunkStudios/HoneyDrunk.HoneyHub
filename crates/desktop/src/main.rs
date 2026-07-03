@@ -115,7 +115,9 @@ fn start_bridge() -> Result<(String, SocketAddr), Box<dyn std::error::Error>> {
 
     let codex_program =
         std::env::var("HONEYHUB_CODEX_PROGRAM").unwrap_or_else(|_| "codex".to_string());
-    let codex = CodexLocalAdapter::new(codex_program, default_event_clock());
+    // Operator-owned model rates (HONEYHUB_MODEL_RATES) turn exact token counts into
+    // derived USD figures; without the table, Codex costs stay honestly absent.
+    let codex = CodexLocalAdapter::with_env_rates(codex_program, default_event_clock());
 
     let mut runtime =
         BridgeRuntime::new(claude, workspace_allowlist, backend_allowlist).with_adapter(codex);

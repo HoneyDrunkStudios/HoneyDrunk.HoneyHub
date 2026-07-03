@@ -36,8 +36,27 @@ export function ModelMenu({
   onSelect
 }: Readonly<ModelMenuProps>) {
   const [open, setOpen] = useState(false);
+  // Opens upward when the trigger sits low in the viewport (the composer lives at the
+  // bottom of the screen, so a downward list would clip at the window edge).
+  const [dropUp, setDropUp] = useState(false);
   const triggerRef = useRef<HTMLButtonElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
+
+  const toggle = () => {
+    setOpen((prev) => {
+      const next = !prev;
+      if (next) {
+        const rect = triggerRef.current?.getBoundingClientRect();
+        if (rect !== undefined) {
+          // Flip up when the list's max height (320px + margin) does not fit below
+          // and there is more room above.
+          const below = window.innerHeight - rect.bottom;
+          setDropUp(below < 340 && rect.top > below);
+        }
+      }
+      return next;
+    });
+  };
 
   const selected = options.find(
     (option) => option.backend === selectedBackend && option.id === selectedId
@@ -113,7 +132,7 @@ export function ModelMenu({
         aria-haspopup="listbox"
         aria-expanded={open}
         title={selected === undefined ? label : `${selected.label} · ${backendLabel(selected.backend)}`}
-        onClick={() => setOpen((prev) => !prev)}
+        onClick={toggle}
       >
         <span className="chip-text">{label}</span>
         <span className="chip-caret" aria-hidden="true">
@@ -131,7 +150,7 @@ export function ModelMenu({
           />
           <div
             ref={listRef}
-            className="model-popover"
+            className={`model-popover${dropUp ? " drop-up" : ""}`}
             role="listbox"
             aria-label="Select model"
             tabIndex={-1}

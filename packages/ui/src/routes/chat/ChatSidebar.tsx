@@ -1,21 +1,33 @@
-import type { ReactElement } from "react";
+import {
+  useRef,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type PointerEvent as ReactPointerEvent,
+  type ReactElement
+} from "react";
+import {
+  CHAT_DOCK_MAX_WIDTH,
+  CHAT_DOCK_MIN_WIDTH,
+  clampChatDockWidth
+} from "../../chatDock";
 import { RunScreen, type RunScreenProps } from "../run/RunScreen";
 
-// The right-hand chat sidebar. It is the same full-featured chat as the dedicated Chat
-// page (session history, model/provider picker, new chat, slash menu, agents, file +
-// image attachments) — it just renders the RunScreen in a compact, single-column
-// `sidebar` variant docked on the right of every page. It replaces the old floating
-// chat dock so a conversation can ride along while you browse Work / Observe / Plan.
+// The right-hand chat dock — THE chat surface on desktop. It renders the same
+// full-featured chat as the small-screen Chat page (session history, model/provider
+// picker, new chat, slash menu, agents, file + image attachments) in a compact,
+// single-column `sidebar` variant docked on the right of every page, resizable by
+// dragging its left edge (clamped, persisted).
 //
 // It stays mounted even when collapsed (visibility is CSS-toggled), so the conversation
-// survives both a collapse and a tab switch, exactly like the dock did.
+// survives both a collapse and a tab switch.
 
-/** The session id the sidebar's chat runs under — distinct from the full Chat page's, so
-    the two surfaces keep separate live runs even though they share local history. */
+/** The session id the dock's chat runs under — distinct from the small-screen Chat
+    page's, so the two surfaces keep separate live runs even though they share local
+    history. */
 export const SIDEBAR_SESSION_ID = "sidebar-session";
 
-/** The sidebar's layout-state class: hidden (off the Chat tab) wins, then expanded vs the
-    slim collapsed rail. Extracted so the JSX carries no nested ternary. */
+/** The dock's layout-state class: hidden (on the small-screen Chat page) wins, then
+    expanded vs the slim collapsed rail. Extracted so the JSX carries no nested
+    ternary. */
 function sidebarStateClass(hidden: boolean, open: boolean): string {
   if (hidden) {
     return "is-hidden";
@@ -24,30 +36,100 @@ function sidebarStateClass(hidden: boolean, open: boolean): string {
 }
 
 export interface ChatSidebarProps {
-  /** Hidden on the full Chat tab, where this would just double the chat. The component
-      stays mounted (so its conversation persists); CSS removes it from the layout. */
+  /** Hidden on the small-screen Chat page, where it would double the chat. The
+      component stays mounted (so its conversation persists); CSS removes it. */
   hidden: boolean;
   /** Expanded vs collapsed to a slim rail. Owned by App so the shell grid can size the
       column to match. */
   open: boolean;
   /** Toggle expanded/collapsed. */
   onToggle: () => void;
-  /** Everything RunScreen needs; the sidebar injects `variant` + `sessionId` itself. */
+  /** The current dock width (px), for the separator's value semantics + keyboard resize. */
+  width: number;
+  /** Report a new width (already clamped) so App can size the shell column. */
+  onResize: (width: number) => void;
+  /** Everything RunScreen needs; the dock injects `variant` + `sessionId` itself. */
   run: Omit<RunScreenProps, "variant" | "sessionId">;
 }
+
+/** How far one arrow-key press moves the dock edge (px). */
+const KEYBOARD_RESIZE_STEP = 16;
 
 export function ChatSidebar({
   hidden,
   open,
   onToggle,
+  width,
+  onResize,
   run
 }: Readonly<ChatSidebarProps>): ReactElement {
+  const dragging = useRef(false);
+  const draggedWidth = useRef<number | undefined>(undefined);
+
+  // Drag-to-resize: the dock is anchored to the right edge, so its width is the
+  // distance from the pointer to the window's right side. Pointer capture keeps the
+  // events flowing to the handle even when the pointer leaves it mid-drag. While
+  // dragging, the width is applied imperatively to the shell's CSS variable (a React
+  // state update per pointer-move would re-render the whole app ~100x/sec); the
+  // single `onResize` on release commits state + persistence.
+  const onResizeStart = (event: ReactPointerEvent<HTMLDivElement>) => {
+    dragging.current = true;
+    event.currentTarget.setPointerCapture(event.pointerId);
+    event.preventDefault();
+  };
+  const onResizeMove = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (!dragging.current) {
+      return;
+    }
+    const width = clampChatDockWidth(window.innerWidth - event.clientX);
+    draggedWidth.current = width;
+    const shell = event.currentTarget.closest<HTMLElement>(".app-shell");
+    shell?.style.setProperty("--chat-dock-w", `${width}px`);
+  };
+  const onResizeEnd = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (!dragging.current) {
+      return;
+    }
+    dragging.current = false;
+    event.currentTarget.releasePointerCapture(event.pointerId);
+    if (draggedWidth.current !== undefined) {
+      onResize(draggedWidth.current);
+      draggedWidth.current = undefined;
+    }
+  };
+  // Keyboard resize on the focused separator: the dock hangs off the right edge, so
+  // ArrowLeft widens it and ArrowRight narrows it. Each press commits through the
+  // same clamped `onResize` path as a drag release.
+  const onResizeKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>) => {
+    if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") {
+      return;
+    }
+    event.preventDefault();
+    const delta = event.key === "ArrowLeft" ? KEYBOARD_RESIZE_STEP : -KEYBOARD_RESIZE_STEP;
+    onResize(clampChatDockWidth(width + delta));
+  };
+
   const stateClass = sidebarStateClass(hidden, open);
   return (
     <aside className={`chat-sidebar ${stateClass}`} aria-hidden={hidden} aria-label="Chat">
       {/* The panel stays mounted while collapsed (hidden via the attribute) so the chat
           conversation is never reset by collapsing or switching tabs. */}
       <div className="chat-sidebar-panel" hidden={!open}>
+        <div
+          className="chat-sidebar-resizer"
+          role="separator"
+          tabIndex={0}
+          aria-orientation="vertical"
+          aria-label="Resize chat"
+          aria-valuenow={width}
+          aria-valuemin={CHAT_DOCK_MIN_WIDTH}
+          aria-valuemax={CHAT_DOCK_MAX_WIDTH}
+          onPointerDown={onResizeStart}
+          onPointerMove={onResizeMove}
+          onPointerUp={onResizeEnd}
+          onPointerCancel={onResizeEnd}
+          onKeyDown={onResizeKeyDown}
+        />
         <div className="chat-sidebar-head">
           <span className="chat-sidebar-title">Chat</span>
           <button

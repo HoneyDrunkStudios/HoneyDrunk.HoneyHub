@@ -6,6 +6,7 @@ pub mod artifact;
 pub mod attachments;
 pub mod azcli;
 pub mod backend_catalog;
+pub mod checks;
 pub mod clock;
 pub mod coaching;
 pub mod core;
@@ -42,8 +43,11 @@ pub use agents::{
 pub use artifact::{ArtifactKind, DispatchArtifact};
 pub use attachments::{append_attachment_refs, attachment_dir, write_attachments};
 pub use backend_catalog::{
-    detect_default_backends, detect_one, program_on_path, BackendCapability, BackendModel,
-    ModelSource,
+    detect_default_backends, detect_one, model_rate_table, parse_model_rates, program_on_path,
+    resolve_program, BackendCapability, BackendModel, ModelPricing, ModelSource,
+};
+pub use checks::{
+    parse_extra_checks, resolve_check, run_check, CheckDenialReason, CheckDisposition, CheckOutcome,
 };
 pub use coaching::{coach, CoachingSnapshot};
 pub use core::{BridgeRuntime, ManagedRun, ReplyOutcome};

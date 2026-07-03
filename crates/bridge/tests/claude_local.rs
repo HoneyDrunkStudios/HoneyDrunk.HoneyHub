@@ -24,6 +24,7 @@ fn fixed_clock() -> EventClock {
 
 fn session(workspace: &str) -> DispatchSession {
     DispatchSession {
+        pinned: false,
         id: "session-1".to_string(),
         backend: AgentBackend::ClaudeLocal,
         title: "Claude lifecycle".to_string(),

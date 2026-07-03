@@ -72,9 +72,13 @@ class FakeClient implements WireClient {
   async gitDeleteBranch(): Promise<void> {}
   async listSessions(): Promise<void> {}
   async sessionDetail(): Promise<void> {}
+  async renameSession(): Promise<void> {}
+  async deleteSession(): Promise<void> {}
+  async pinSession(): Promise<void> {}
   async roadmap(): Promise<void> {}
   async scaffoldArchitecture(): Promise<void> {}
   async pullArchitecture(): Promise<void> {}
+  async runCheck(): Promise<void> {}
 
   private emit(runId: string, payload: BridgeEventPayload): void {
     const event: BridgeEvent = {

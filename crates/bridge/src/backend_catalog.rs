@@ -8,7 +8,7 @@
 //! Provenance note: where a CLI exposes its own model list we read THAT (so the
 //! list is real and current), and tag it so the UI is honest about the source:
 //! - Codex caches its models at `~/.codex/models_cache.json` → [`ModelSource::CliCache`].
-//! - Claude's selectable set is its canonical aliases (`opus`/`sonnet`/`haiku`),
+//! - Claude's selectable set is its canonical aliases (`fable`/`opus`/`sonnet`/`haiku`),
 //!   the same ones its `/model` picker uses → [`ModelSource::CliAlias`].
 //!
 //! A small bridge-known seed ([`ModelSource::BridgeKnown`]) is only the fallback when
@@ -21,10 +21,25 @@
 
 use crate::adapter::{AgentBackend, CapabilityFlags};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+
+/// Per-model USD pricing (per **million** tokens), when the bridge knows an
+/// authoritative rate. Powers pre-send estimates and derived cost; absent =
+/// unknown, and a cost is never guessed from a missing rate.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelPricing {
+    pub input_usd_per_mtok: f64,
+    pub output_usd_per_mtok: f64,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
+}
 
 /// One model a backend can run, as offered to the user in the model picker. `id`
 /// is the value passed to the CLI (e.g. `--model <id>`); `label` is human-facing.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BackendModel {
     pub id: String,
@@ -36,6 +51,15 @@ pub struct BackendModel {
     /// The CLI's default reasoning level for this model, when known.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_reasoning: Option<String>,
+    /// Known per-token pricing (see [`ModelPricing`]); absent when the bridge has no
+    /// authoritative rate for this model.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pricing: Option<ModelPricing>,
+    /// True when running this model bills real dollars even on a flat subscription
+    /// (usage credits / API metering). The cost optimizer and the composer's
+    /// "included in your plan" display must never treat a metered model as free.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub metered: bool,
 }
 
 impl BackendModel {
@@ -45,7 +69,14 @@ impl BackendModel {
             label: label.to_string(),
             reasoning_levels: Vec::new(),
             default_reasoning: None,
+            pricing: None,
+            metered: false,
         }
+    }
+
+    fn with_metered(mut self) -> Self {
+        self.metered = true;
+        self
     }
 }
 
@@ -55,7 +86,7 @@ impl BackendModel {
 pub enum ModelSource {
     /// Read from the CLI's own on-disk model cache (e.g. Codex's `models_cache.json`).
     CliCache,
-    /// The CLI's canonical model aliases (e.g. Claude's `opus`/`sonnet`/`haiku`).
+    /// The CLI's canonical model aliases (e.g. Claude's `fable`/`opus`/`sonnet`/`haiku`).
     CliAlias,
     /// A curated, bridge-known fallback (used only when a real source can't be read).
     BridgeKnown,
@@ -63,8 +94,9 @@ pub enum ModelSource {
 
 /// A single backend's detected capability: whether its CLI is installed, the models
 /// it offers, and its honest capability flags. Reported to the cockpit so the
-/// first-run provider picker and the run-screen model picker show only what's real.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// first-run provider picker and the model picker show only what's real.
+/// (`PartialEq` only: [`ModelPricing`] carries `f64` rates, so `Eq` cannot hold.)
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BackendCapability {
     pub backend: AgentBackend,
@@ -96,13 +128,19 @@ pub fn default_program(backend: AgentBackend) -> &'static str {
 /// Resolve the models offered for a backend, with provenance. Reads each CLI's real
 /// source where one exists, falling back to a conservative bridge-known seed.
 fn models_for(backend: AgentBackend) -> (Vec<BackendModel>, ModelSource) {
-    match backend {
+    let (models, source) = match backend {
         // Claude's selectable set is its canonical aliases (latest of each family).
+        // Order matters: the cockpit defaults to the FIRST entry when the user hasn't
+        // picked, so `opus` stays first; `fable` (usage-credit billed) is opt-in only.
+        // No rate is ever coined here (invariant 45): pricing comes solely from the
+        // operator's HONEYHUB_MODEL_RATES table below, and actual Claude spend stays
+        // exact via the CLI's total_cost_usd regardless.
         AgentBackend::ClaudeLocal => (
             vec![
                 BackendModel::new("opus", "Claude Opus 4.8"),
-                BackendModel::new("sonnet", "Claude Sonnet 4.6"),
+                BackendModel::new("sonnet", "Claude Sonnet 5"),
                 BackendModel::new("haiku", "Claude Haiku 4.5"),
+                BackendModel::new("fable", "Claude Fable 5").with_metered(),
             ],
             ModelSource::CliAlias,
         ),
@@ -119,7 +157,11 @@ fn models_for(backend: AgentBackend) -> (Vec<BackendModel>, ModelSource) {
             vec![BackendModel::new("auto", "Copilot (auto)")],
             ModelSource::BridgeKnown,
         ),
-    }
+    };
+    // Rates attach uniformly to EVERY backend's list (one env read per call), so an
+    // operator entry works the same for a cached Codex model, a Claude alias, or a
+    // seed row — no per-branch exemptions.
+    (priced(models, &model_rate_table()), source)
 }
 
 fn capabilities_for(backend: AgentBackend) -> CapabilityFlags {
@@ -128,6 +170,55 @@ fn capabilities_for(backend: AgentBackend) -> CapabilityFlags {
         AgentBackend::CodexLocal => CapabilityFlags::codex_local(),
         AgentBackend::CopilotLocal => CapabilityFlags::copilot_local(),
     }
+}
+
+/// The operator's model rate table, from the `HONEYHUB_MODEL_RATES` env var:
+/// `{"<model id or alias>": {"input": <usd per MTok>, "output": <usd per MTok>}, ...}`
+/// (e.g. `opus`, `fable`, `gpt-5-codex`). Rates are never coined in application code
+/// (invariant 45 / ADR-0092 D2): the operator — or a canonical Grid rate projection
+/// feeding this seam — owns vendor prices. Absent or invalid config just means no
+/// rates, so costs stay honestly absent rather than guessed.
+pub fn model_rate_table() -> HashMap<String, ModelPricing> {
+    parse_model_rates(&std::env::var("HONEYHUB_MODEL_RATES").unwrap_or_default())
+}
+
+/// Attach the operator's rates (by exact id) to a model list. Models without a
+/// configured rate keep `pricing: None`.
+fn priced(models: Vec<BackendModel>, rates: &HashMap<String, ModelPricing>) -> Vec<BackendModel> {
+    models
+        .into_iter()
+        .map(|mut model| {
+            model.pricing = rates.get(&model.id).copied();
+            model
+        })
+        .collect()
+}
+
+/// Parse a `HONEYHUB_MODEL_RATES` JSON document. Entries with a missing or
+/// non-positive rate are dropped; any parse failure yields an empty table.
+pub fn parse_model_rates(json: &str) -> HashMap<String, ModelPricing> {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(json) else {
+        return HashMap::new();
+    };
+    let Some(entries) = value.as_object() else {
+        return HashMap::new();
+    };
+    entries
+        .iter()
+        .filter_map(|(slug, rate)| {
+            let input = rate.get("input").and_then(serde_json::Value::as_f64)?;
+            let output = rate.get("output").and_then(serde_json::Value::as_f64)?;
+            (input > 0.0 && output > 0.0).then(|| {
+                (
+                    slug.clone(),
+                    ModelPricing {
+                        input_usd_per_mtok: input,
+                        output_usd_per_mtok: output,
+                    },
+                )
+            })
+        })
+        .collect()
 }
 
 /// Read Codex's on-disk model cache (`~/.codex/models_cache.json`) into models.
@@ -204,36 +295,42 @@ pub fn detect_default_backends() -> Vec<BackendCapability> {
         .collect()
 }
 
-/// Resolve whether an executable named `program` exists on `PATH`. A name that
-/// already contains a path separator (or is absolute) is checked directly. On
-/// Windows the `PATHEXT` extensions are tried in addition to the bare name.
-pub fn program_on_path(program: &str) -> bool {
+/// Resolve `program` to the concrete file to launch. A name that already contains a
+/// path separator (or is absolute) is checked directly; otherwise `PATH` is walked,
+/// trying the bare name plus the Windows `PATHEXT` extensions — so `npm` resolves to
+/// `npm.cmd` and spawns correctly on Windows.
+pub fn resolve_program(program: &str) -> Option<std::path::PathBuf> {
     if program.is_empty() {
-        return false;
+        return None;
     }
     let direct = std::path::Path::new(program);
     if direct.is_absolute() || program.contains('/') || program.contains('\\') {
-        return direct.is_file();
+        return direct.is_file().then(|| direct.to_path_buf());
     }
 
-    let Some(path) = std::env::var_os("PATH") else {
-        return false;
-    };
+    let path = std::env::var_os("PATH")?;
     let extensions = windows_path_extensions();
     for dir in std::env::split_paths(&path) {
         if dir.as_os_str().is_empty() {
             continue;
         }
-        if dir.join(program).is_file() {
-            return true;
+        let bare = dir.join(program);
+        if bare.is_file() {
+            return Some(bare);
         }
         for ext in &extensions {
-            if dir.join(format!("{program}{ext}")).is_file() {
-                return true;
+            let with_ext = dir.join(format!("{program}{ext}"));
+            if with_ext.is_file() {
+                return Some(with_ext);
             }
         }
     }
-    false
+    None
+}
+
+/// Whether an executable named `program` exists on `PATH` (see [`resolve_program`]).
+pub fn program_on_path(program: &str) -> bool {
+    resolve_program(program).is_some()
 }
 
 /// The executable extensions to try on Windows (from `PATHEXT`), or none elsewhere.
@@ -324,6 +421,63 @@ mod tests {
         // A model without the fields gets an empty level set + no default.
         assert!(models[1].reasoning_levels.is_empty());
         assert_eq!(models[1].default_reasoning, None);
+    }
+
+    #[test]
+    fn claude_models_carry_metering_but_never_coined_rates() {
+        let claude = detect_one(AgentBackend::ClaudeLocal, "claude");
+        // First entry is the picker's default when the user has not chosen — it must
+        // stay a plan-included model, never the usage-credit-billed fable.
+        assert_eq!(claude.models[0].id, "opus");
+        let fable = claude
+            .models
+            .iter()
+            .find(|model| model.id == "fable")
+            .expect("fable offered");
+        assert!(fable.metered);
+        for model in &claude.models {
+            if model.id != "fable" {
+                assert!(!model.metered, "{} must be plan-included", model.id);
+            }
+        }
+        // Invariant 45: no rate is hand-authored into the catalog. Assert against an
+        // explicitly EMPTY rate table (not the live env, which an operator may have
+        // configured on the machine running the tests).
+        for model in priced(claude.models, &HashMap::new()) {
+            assert!(model.pricing.is_none(), "{} must not coin a rate", model.id);
+        }
+        // And rates attach purely from the supplied table, by exact id.
+        let table = parse_model_rates(r#"{"opus": {"input": 5.0, "output": 25.0}}"#);
+        let repriced = priced(
+            detect_one(AgentBackend::ClaudeLocal, "claude").models,
+            &table,
+        );
+        assert!(repriced.iter().any(|model| {
+            model.id == "opus"
+                && model
+                    .pricing
+                    .is_some_and(|rate| rate.input_usd_per_mtok == 5.0)
+        }));
+    }
+
+    #[test]
+    fn parses_model_rates_and_drops_garbage() {
+        let table = parse_model_rates(
+            r#"{
+                "gpt-5-codex": {"input": 1.25, "output": 10.0},
+                "opus": {"input": 5.0, "output": 25.0},
+                "negative": {"input": -1, "output": 2},
+                "half": {"input": 1.0}
+            }"#,
+        );
+        assert_eq!(table.len(), 2);
+        let rate = table.get("gpt-5-codex").expect("valid entry kept");
+        assert_eq!(rate.input_usd_per_mtok, 1.25);
+        assert_eq!(rate.output_usd_per_mtok, 10.0);
+        assert!(table.contains_key("opus"));
+        assert!(parse_model_rates("not json").is_empty());
+        assert!(parse_model_rates("[]").is_empty());
+        assert!(parse_model_rates("").is_empty());
     }
 
     #[test]

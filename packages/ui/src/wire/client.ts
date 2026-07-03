@@ -206,6 +206,15 @@ export interface WireClient {
   /** Read a persisted session's runs + transcript, to reopen it. The answer arrives as a
       `session_detail` event via `subscribe` (correlate by `sessionId`). */
   sessionDetail(sessionId: string): Promise<void>;
+  /** **Write**: rename a persisted session (thread rename). The host answers with a
+      refreshed `session_list` event. */
+  renameSession(sessionId: string, title: string): Promise<void>;
+  /** **Write**: delete a persisted session (record + transcripts); answers with a
+      refreshed `session_list` event. */
+  deleteSession(sessionId: string): Promise<void>;
+  /** **Write**: pin/unpin a persisted session (sorts first; exempt from transcript
+      pruning); answers with a refreshed `session_list` event. */
+  pinSession(sessionId: string, pinned: boolean): Promise<void>;
   /** Read the roadmap snapshot (parsed from the Architecture repo's initiatives). The
       answer arrives as a `roadmap` event via `subscribe` (`found:false` = no repo). */
   roadmap(): Promise<void>;
@@ -216,6 +225,13 @@ export interface WireClient {
   /** Fast-forward the Architecture repo (`git pull --ff-only`) and re-read it. The answer
       arrives as a `roadmap` event; rejects with the git error (e.g. diverged/dirty). */
   pullArchitecture(): Promise<void>;
+  /** **Run**: run a **named, host-owned** check (a repo's build/test) in an allowlisted
+      repo root — the "test a change group" action. Only a check id crosses the wire; the
+      bridge resolves it against its own definitions, refuses unknown ids and overlapping
+      runs, and kills the process after a timeout. The answer arrives as a `check_result`
+      event via `subscribe` (correlate by `root`); a refusal, spawn failure, or timeout
+      surfaces as `ok: false` with its disposition, not a rejection. */
+  runCheck(root: string, checkId: string): Promise<void>;
   /** Subscribe to bridge events; returns an unsubscribe function. */
   subscribe(handler: WireEventHandler): () => void;
 }

@@ -32,6 +32,7 @@ use crate::adapter::{
     AgentBackend, AgentBackendAdapter, BridgeError, CapabilityFlags, RunHandle, StartRunRequest,
 };
 use crate::adapters::child_run::{ChildRun, EventClock, RunSlot};
+use crate::backend_catalog::{model_rate_table, ModelPricing};
 use crate::session::{
     DispatchMessage, DispatchMessageRole, UsageConfidence, UsageFidelity, UsageSignal,
 };
@@ -57,6 +58,18 @@ pub fn no_rate_lookup() -> UsdRateLookup {
     Arc::new(|_model, _input, _output| None)
 }
 
+/// Build a rate lookup from a parsed rate table (normally
+/// [`crate::backend_catalog::model_rate_table`]), so hosts wire the operator-owned
+/// rates in one line. Exact slug match; unknown models stay cost-absent.
+pub fn rate_lookup_from(table: HashMap<String, ModelPricing>) -> UsdRateLookup {
+    Arc::new(move |model, input, output| {
+        table.get(model).map(|rate| {
+            (input as f64 * rate.input_usd_per_mtok + output as f64 * rate.output_usd_per_mtok)
+                / 1_000_000.0
+        })
+    })
+}
+
 /// The `codex.local` backend adapter. Methods take `&self` (the trait contract), so
 /// the live child processes live behind a `Mutex` for interior mutability.
 pub struct CodexLocalAdapter {
@@ -71,6 +84,12 @@ impl CodexLocalAdapter {
     /// path under test) with the given clock and **no** rate table (USD absent).
     pub fn new(program: impl Into<String>, clock: EventClock) -> Self {
         Self::with_rate_lookup(program, clock, no_rate_lookup())
+    }
+
+    /// Build an adapter priced from the operator's `HONEYHUB_MODEL_RATES` env table
+    /// (see [`crate::backend_catalog::model_rate_table`]) — the standard host wiring.
+    pub fn with_env_rates(program: impl Into<String>, clock: EventClock) -> Self {
+        Self::with_rate_lookup(program, clock, rate_lookup_from(model_rate_table()))
     }
 
     /// Build an adapter with an injected rate lookup so `result` token counts gain a
@@ -596,6 +615,23 @@ mod tests {
         Arc::new(|| "2026-06-08T12:00:00Z".to_string())
     }
 
+    #[test]
+    fn rate_lookup_from_table_derives_usd_per_mtok() {
+        let mut table = HashMap::new();
+        table.insert(
+            "gpt-5-codex".to_string(),
+            ModelPricing {
+                input_usd_per_mtok: 2.0,
+                output_usd_per_mtok: 10.0,
+            },
+        );
+        let lookup = rate_lookup_from(table);
+        // 1M input at $2/MTok + 0.5M output at $10/MTok = $7.
+        assert_eq!(lookup("gpt-5-codex", 1_000_000, 500_000), Some(7.0));
+        // Unknown slugs stay cost-absent — never guessed.
+        assert_eq!(lookup("mystery-model", 1_000_000, 500_000), None);
+    }
+
     fn command_args(command: &std::process::Command) -> Vec<String> {
         command
             .get_args()
@@ -858,6 +894,7 @@ mod tests {
         let adapter = CodexLocalAdapter::new("codex", test_clock());
         let request = StartRunRequest {
             session: crate::session::DispatchSession {
+                pinned: false,
                 id: "s1".to_string(),
                 backend: AgentBackend::CodexLocal,
                 title: "t".to_string(),
@@ -926,6 +963,7 @@ mod tests {
             CodexLocalAdapter::new("definitely-not-a-real-codex-binary-xyz", test_clock());
         let request = StartRunRequest {
             session: crate::session::DispatchSession {
+                pinned: false,
                 id: "s1".to_string(),
                 backend: AgentBackend::CodexLocal,
                 title: "t".to_string(),

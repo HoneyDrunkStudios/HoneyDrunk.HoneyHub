@@ -1156,6 +1156,7 @@ mod tests {
         let adapter = CopilotLocalAdapter::new("copilot", test_clock());
         let request = StartRunRequest {
             session: crate::session::DispatchSession {
+                pinned: false,
                 id: "s1".to_string(),
                 backend: AgentBackend::CopilotLocal,
                 title: "t".to_string(),
@@ -1187,6 +1188,7 @@ mod tests {
             CopilotLocalAdapter::new("definitely-not-a-real-copilot-binary-xyz", test_clock());
         let request = StartRunRequest {
             session: crate::session::DispatchSession {
+                pinned: false,
                 id: "s1".to_string(),
                 backend: AgentBackend::CopilotLocal,
                 title: "t".to_string(),

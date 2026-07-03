@@ -41,6 +41,8 @@ export interface DispatchSession {
   createdAt: string;
   updatedAt: string;
   currentRunId?: string;
+  /** Pinned in the cockpit's history (sorts first; exempt from transcript pruning). */
+  pinned?: boolean;
 }
 
 export interface DispatchRun {
@@ -261,6 +263,13 @@ export interface StartRunRequest {
   attachments?: ChatAttachment[];
 }
 
+/** Per-model USD pricing (per million tokens), when the bridge knows an authoritative
+    rate. Powers pre-send estimates and derived cost; absent = unknown, never guessed. */
+export interface ModelPricing {
+  inputUsdPerMtok: number;
+  outputUsdPerMtok: number;
+}
+
 /** One model a backend can run, offered in the model picker. `id` is the value the
     CLI receives (e.g. `--model <id>`); `label` is human-facing. */
 export interface BackendModel {
@@ -271,6 +280,11 @@ export interface BackendModel {
   reasoningLevels?: string[];
   /** The CLI's default reasoning level for this model, when known. */
   defaultReasoning?: string;
+  /** Known per-token pricing; absent when the bridge has no authoritative rate. */
+  pricing?: ModelPricing;
+  /** True when running this model bills real dollars even on a flat subscription
+      (usage credits / API metering) — never treat it as included-in-plan. */
+  metered?: boolean;
 }
 
 /** How a backend's model list was sourced, so the UI is honest about provenance.
@@ -858,6 +872,39 @@ export interface GitOpResult {
   message?: string;
 }
 
+/** How a check request was disposed of — explicit, so denied/timed-out runs are
+    observable states rather than indistinguishable failures. */
+export type CheckDisposition = "ran" | "denied" | "spawn_failed" | "timed_out";
+
+/** WHY a request was denied — typed, so clients fold denials on a stable code
+    instead of matching the human-readable message. Only `overlap` is non-terminal
+    for a requester (the in-flight run's real outcome is still coming). */
+export type CheckDenialReason = "overlap" | "unknown_check" | "task_failed";
+
+/** The outcome of running one **named, host-owned** check (a repo's build/test) in a
+    repo root — the "test a change group" action. The client sends only a check id;
+    the host resolves it against its own definitions and refuses anything else. Argv
+    is spawned shell-free with a timeout; a refusal, spawn failure, or timeout
+    surfaces as `ok: false` with its disposition and the reason in `output`. */
+export interface CheckOutcome {
+  root: string;
+  /** The check id as requested (echoed for correlation). */
+  check: string;
+  /** The resolved command line (display only). */
+  command: string;
+  ok: boolean;
+  disposition: CheckDisposition;
+  /** The process exit code, when one was returned (absent on signal/spawn failure). */
+  exitCode?: number;
+  /** The typed reason when `disposition` is `denied`; absent otherwise (and absent
+      from hosts predating the field, where clients fall back to the message). */
+  denial?: CheckDenialReason;
+  /** Combined stdout + stderr, trimmed and clamped. */
+  output: string;
+  /** True when `output` was clamped. */
+  truncated: boolean;
+}
+
 export interface RunHandle {
   runId: string;
   processId?: number;
@@ -972,9 +1019,13 @@ export type ClientCommand =
   | { kind: "git_delete_branch"; root: string; name: string; force?: boolean }
   | { kind: "list_sessions" }
   | { kind: "session_detail"; sessionId: string }
+  | { kind: "rename_session"; sessionId: string; title: string }
+  | { kind: "delete_session"; sessionId: string }
+  | { kind: "pin_session"; sessionId: string; pinned: boolean }
   | { kind: "roadmap" }
   | { kind: "scaffold_architecture"; name?: string; location?: string }
-  | { kind: "pull_architecture" };
+  | { kind: "pull_architecture" }
+  | { kind: "run_check"; root: string; check: string };
 
 export interface ReconnectRequest {
   sessionId: string;
@@ -1056,7 +1107,8 @@ export type BridgeEventPayload =
       runs: DispatchRun[];
       transcript: DispatchMessage[];
     }
-  | { kind: "roadmap"; roadmap: RoadmapSnapshot };
+  | { kind: "roadmap"; roadmap: RoadmapSnapshot }
+  | { kind: "check_result"; result: CheckOutcome };
 
 export interface BridgeStatusEvent {
   state: DispatchRunState;

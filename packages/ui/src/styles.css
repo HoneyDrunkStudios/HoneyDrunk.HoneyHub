@@ -266,14 +266,26 @@ body {
   min-height: 100vh;
 }
 
-/* When the right-hand chat sidebar is shown, the shell grows a third column sized to
-   the panel (expanded) or a slim rail (collapsed). On the Chat tab the sidebar is
-   removed entirely (no modifier → two columns). */
+/* When the right-hand chat dock is shown, the shell grows a third column sized to
+   the panel (expanded, at its dragged width) or a slim rail (collapsed). On the
+   small-screen Chat page the dock is removed entirely (no modifier → two columns). */
 .app-shell.chat-open {
-  grid-template-columns: var(--sidebar-w) minmax(0, 1fr) 380px;
+  grid-template-columns: var(--sidebar-w) minmax(0, 1fr) var(--chat-dock-w, 380px);
 }
 .app-shell.chat-collapsed {
   grid-template-columns: var(--sidebar-w) minmax(0, 1fr) 52px;
+}
+
+/* The Chat nav item exists for small screens (the dock does not fit there, and is
+   display:none'd in the 860px media block below); on wide screens the dock IS the
+   chat, so the tab hides. The two breakpoints must stay in lockstep, or a window
+   width would exist with no chat surface (or two). The compound selector out-ranks
+   the later `.nav-item { display: flex }` base rule, which would otherwise win the
+   equal-specificity source-order tie and keep the tab visible. */
+@media (min-width: 861px) {
+  .nav-item.nav-item-mobile {
+    display: none;
+  }
 }
 
 .sidebar {
@@ -734,14 +746,31 @@ h2 {
   padding-left: 18px;
 }
 
+/* One compact status line under the composer (lead clause + cost hint); the full
+   rationale lives in the title tooltip. Single line, ellipsized, quiet. */
 .routing-rationale {
   margin: 2px 0 0;
+  color: var(--text-dim);
+  font-size: 0.74rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.routing-cost {
   color: var(--text-muted);
-  font-size: 0.82rem;
 }
 
 .routing-source {
   color: var(--text-dim);
+}
+
+/* The composer's pre-send cost hint (included-in-plan / ~$ range / floor). */
+.cost-estimate {
+  margin: 2px 0 0;
+  color: var(--text-dim);
+  font-size: 0.78rem;
+  font-variant-numeric: tabular-nums;
 }
 
 /* --------------------------------------------------------- diagnostics */
@@ -1377,6 +1406,40 @@ h2 {
   border: 1px solid var(--border);
   border-radius: 8px;
   background: var(--surface);
+  flex-wrap: wrap;
+}
+
+/* Per-job local history: a collapsible transitions list on the user's own jobs. */
+.job-history {
+  flex-basis: 100%;
+}
+.job-history summary {
+  cursor: pointer;
+  font-size: 0.75rem;
+  color: var(--text-dim);
+}
+.job-history-list {
+  list-style: none;
+  margin: 6px 0 0;
+  padding: 0 0 0 14px;
+  display: grid;
+  gap: 3px;
+  font-size: 0.76rem;
+  font-variant-numeric: tabular-nums;
+}
+.job-history-list li {
+  display: flex;
+  gap: 10px;
+  color: var(--text-muted);
+}
+.job-history-list li.is-up .job-history-state {
+  color: var(--neon-blue);
+}
+.job-history-list li.is-down .job-history-state {
+  color: var(--text-dim);
+}
+.job-history-at {
+  color: var(--text-dim);
 }
 
 .known-dot {
@@ -2012,6 +2075,10 @@ h2 {
 }
 .stat-del {
   color: var(--neon-pink, #ff2a6d);
+}
+
+.diff-figure {
+  margin: 0;
 }
 
 .diff-view {
@@ -3831,6 +3898,13 @@ h2 {
   box-shadow: 0 12px 40px rgba(0, 0, 0, 0.45);
 }
 
+/* Flipped placement when the composer sits near the bottom of the window — the list
+   opens upward instead of clipping at the viewport edge. */
+.model-popover.drop-up {
+  top: auto;
+  bottom: calc(100% + 8px);
+}
+
 .model-option {
   display: flex;
   flex-direction: column;
@@ -3905,6 +3979,93 @@ h2 {
   padding: 0;
   display: grid;
   gap: 4px;
+}
+
+.recent-chats-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.recent-search {
+  flex: 0 1 200px;
+  min-width: 0;
+  padding: 5px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--panel-2);
+  color: var(--text);
+  font: inherit;
+  font-size: 0.8rem;
+}
+
+.recent-empty {
+  margin: 0;
+  color: var(--text-dim);
+  font-size: 0.8rem;
+}
+
+/* A thread row: the open button fills the row; pin/rename/delete reveal on hover. */
+.recent-row {
+  position: relative;
+  display: flex;
+  align-items: stretch;
+  gap: 4px;
+}
+
+.recent-row .recent-chat {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.recent-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  opacity: 0;
+  transition: opacity 120ms ease;
+}
+
+.recent-row:hover .recent-actions,
+.recent-row:focus-within .recent-actions {
+  opacity: 1;
+}
+
+.recent-action {
+  padding: 4px 7px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-dim);
+  font-size: 0.82rem;
+  cursor: pointer;
+}
+
+.recent-action:hover {
+  border-color: var(--border);
+  background: var(--panel-2);
+  color: var(--text);
+}
+
+.recent-action.is-danger {
+  border-color: var(--danger, #e5484d);
+  color: var(--danger, #e5484d);
+}
+
+.recent-pin-mark {
+  color: var(--neon-blue);
+}
+
+.recent-rename {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 9px 12px;
+  border: 1px solid var(--neon-blue-line);
+  border-radius: var(--radius-sm);
+  background: var(--panel-2);
+  color: var(--text);
+  font: inherit;
 }
 
 .recent-chat {
@@ -4118,28 +4279,363 @@ h2 {
   font-size: 0.78rem;
 }
 
+/* ------------------------------------------------------------------ groups */
+
+.groups {
+  display: grid;
+  gap: 14px;
+  padding: 20px 22px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: linear-gradient(180deg, var(--glass-top), var(--glass-bottom)), var(--panel);
+  box-shadow: var(--shadow-card);
+}
+
+.groups-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.groups-header h2 {
+  font-size: 1.15rem;
+}
+
+.groups-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.groups-empty {
+  margin: 8px 0;
+  color: var(--text-muted);
+  max-width: 64ch;
+  line-height: 1.5;
+}
+
+.groups-empty code {
+  color: var(--honey-bright);
+}
+
+.groups-loading {
+  color: var(--text-muted);
+  font-size: 0.82rem;
+}
+
+.groups-error {
+  color: var(--neon-pink);
+}
+
+.groups-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 8px;
+}
+
+.group-row {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--panel-2);
+  overflow: hidden;
+}
+
+.group-summary {
+  display: grid;
+  grid-template-columns: 14px minmax(0, 1fr) auto auto auto auto auto;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  padding: 11px 14px;
+  background: transparent;
+  border: none;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.group-summary:hover {
+  background: var(--panel-3);
+}
+
+.group-caret {
+  color: var(--text-dim);
+}
+
+.group-branch {
+  font-family: var(--font-mono, monospace);
+  color: var(--honey-bright);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.group-repos {
+  color: var(--text-muted);
+  font-size: 0.8rem;
+  white-space: nowrap;
+}
+
+.group-clean {
+  color: var(--positive);
+  font-size: 0.8rem;
+}
+
+.group-dirty {
+  color: var(--honey-soft);
+  font-size: 0.8rem;
+}
+
+.group-ahead,
+.group-behind {
+  color: var(--neon-blue);
+  font-size: 0.8rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.group-runs {
+  color: var(--neon-blue);
+  font-size: 0.78rem;
+  white-space: nowrap;
+}
+
+.group-detail {
+  display: grid;
+  gap: 12px;
+  padding: 4px 14px 14px;
+  border-top: 1px solid var(--border);
+}
+
+.group-members {
+  display: grid;
+  gap: 8px;
+}
+
+.group-member {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--panel);
+}
+
+.group-member-name {
+  font-weight: 600;
+}
+
+.group-member-runs {
+  grid-column: 1 / -1;
+  list-style: none;
+  margin: 4px 0 0;
+  padding: 0;
+  display: grid;
+  gap: 4px;
+}
+
+.group-member-run {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.8rem;
+  color: var(--text-muted);
+}
+
+.group-run-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: var(--radius-pill);
+  background: var(--text-dim);
+  flex: none;
+}
+
+.group-member-run.is-active .group-run-dot {
+  background: var(--neon-blue);
+  box-shadow: 0 0 0 2px var(--neon-blue-glow);
+}
+
+.group-member-run.is-done .group-run-dot {
+  background: var(--positive);
+}
+
+.group-run-task {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.group-diff-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 6px;
+}
+
+.group-diff-title {
+  font-size: 0.85rem;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.group-diff-stat {
+  font-variant-numeric: tabular-nums;
+  font-size: 0.82rem;
+}
+
+.group-repo-diff-name {
+  margin: 10px 0 4px;
+  font-family: var(--font-mono, monospace);
+  font-size: 0.8rem;
+  color: var(--honey-soft);
+}
+
+.group-checks-bar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.group-run-checks {
+  padding: 6px 14px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-strong);
+  background: var(--panel-3);
+  color: var(--honey-bright);
+  cursor: pointer;
+}
+
+.group-run-checks:hover {
+  background: var(--panel-2);
+}
+
+.group-checks-summary {
+  display: flex;
+  gap: 10px;
+  font-size: 0.8rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.checks-passed {
+  color: var(--positive);
+}
+
+.checks-failed {
+  color: var(--neon-pink);
+}
+
+.checks-running {
+  color: var(--neon-blue);
+}
+
+.group-member-check {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 6px;
+}
+
+.group-check-command {
+  flex: 1 1 200px;
+  min-width: 0;
+  padding: 5px 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--panel-2);
+  color: inherit;
+  font-family: var(--font-mono, monospace);
+  font-size: 0.78rem;
+}
+
+.group-check-result {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.group-check-pill {
+  padding: 3px 9px;
+  border-radius: var(--radius-pill);
+  border: 1px solid var(--border-strong);
+  font-size: 0.72rem;
+  white-space: nowrap;
+}
+
+.group-check-result.phase-passed .group-check-pill {
+  color: var(--positive);
+  border-color: var(--positive);
+}
+
+.group-check-result.phase-failed .group-check-pill {
+  color: var(--neon-pink);
+  border-color: var(--neon-pink);
+}
+
+.group-check-result.phase-running .group-check-pill {
+  color: var(--neon-blue);
+  border-color: var(--neon-blue);
+}
+
+.group-check-output summary {
+  cursor: pointer;
+  font-size: 0.76rem;
+  color: var(--text-muted);
+}
+
+.group-check-output pre {
+  margin: 6px 0 0;
+  max-height: 240px;
+  overflow: auto;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--panel);
+  font-size: 0.74rem;
+  white-space: pre-wrap;
+}
+
 /* ------------------------------------------------------------------ responsive */
 
 @media (max-width: 860px) {
   .app-shell,
   .app-shell.chat-open,
   .app-shell.chat-collapsed {
-    grid-template-columns: 1fr;
+    /* minmax(0, …) not 1fr: a bare `1fr` track keeps an auto min-size, so a wide
+       non-wrapping child (the nav strip below) would stretch the whole page instead of
+       scrolling within it. */
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .sidebar,
+  .content {
+    min-width: 0;
   }
 
   /* The right chat sidebar does not fit a phone layout; the dedicated Chat tab covers
-     chat on small screens. */
-  .chat-sidebar {
+     chat on small screens. Scoped to `.app-shell` so it outranks the base `.chat-sidebar`
+     rule, which is later in source order at equal specificity (so a bare `.chat-sidebar`
+     here would lose and the sidebar would stack below the content). */
+  .app-shell .chat-sidebar {
     display: none;
   }
 
+  /* The left nav becomes a stack of horizontally-scrollable strips instead of wrapping
+     into ~6 rows that ate a third of a phone screen. */
   .sidebar {
     position: static;
     height: auto;
-    flex-direction: row;
-    flex-wrap: wrap;
-    align-items: center;
+    flex-direction: column;
+    align-items: stretch;
     gap: 8px;
+    padding: 8px 12px;
   }
 
   .sidebar-brand {
@@ -4148,7 +4644,24 @@ h2 {
 
   .sidebar-nav {
     flex-direction: row;
-    flex-wrap: wrap;
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    /* min-width: 0 lets this flex item shrink below its content width so overflow-x
+       actually scrolls instead of the strip stretching its parent. */
+    min-width: 0;
+    gap: 4px;
+    padding-bottom: 4px;
+    /* Hidden scrollbar: scrollbar-width for Chrome 121+/Firefox, with the
+       ::-webkit-scrollbar rule below covering Safari and older Chromium. */
+    scrollbar-width: none;
+  }
+
+  .sidebar-nav::-webkit-scrollbar {
+    display: none;
+  }
+
+  .nav-item {
+    flex: 0 0 auto;
   }
 
   .sidebar-nav.secondary {
@@ -4170,15 +4683,18 @@ h2 {
   }
 
   .content-inner {
-    padding: 22px 18px 40px;
+    padding: 20px 14px 40px;
   }
 
   .message {
     max-width: 92%;
   }
 
+  /* Multi-column forms / boards / stat grids collapse to a single column on a phone. */
   .spend-totals,
-  .diagnostics-grid {
+  .diagnostics-grid,
+  .goal-form-row,
+  .plan-board {
     grid-template-columns: 1fr;
   }
 
@@ -4186,6 +4702,56 @@ h2 {
   .browse {
     grid-template-columns: 1fr;
     height: auto;
+  }
+
+  /* Let grid/flex panels shrink to the viewport instead of forcing a horizontal clip. */
+  .bridge-settings,
+  .bridge-settings fieldset,
+  .connectors,
+  .connector,
+  .plans-settings,
+  .runs,
+  .groups,
+  .jobs,
+  .git,
+  .observe,
+  .work {
+    min-width: 0;
+    max-width: 100%;
+  }
+
+  /* Long unbreakable strings (env vars, addresses, command lines) wrap rather than force
+     the panel wider than the screen — the root cause of the settings/jobs clipping. */
+  .bridge-settings code,
+  .connect-phone-bind code,
+  .connect-phone-url code,
+  .connect-phone-addrs code,
+  .jobs-cmd {
+    word-break: break-all;
+    overflow-wrap: anywhere;
+    white-space: normal;
+    max-width: 100%;
+  }
+
+  /* Code / diff blocks scroll within their card rather than blow out page width. */
+  .diff-view,
+  .group-check-output pre {
+    max-width: 100%;
+    overflow-x: auto;
+  }
+
+  /* The expanded Change-group detail (members, per-repo check inputs, combined diff) must
+     shrink to the card so its wide children scroll instead of stretching/clipping it. */
+  .group-detail,
+  .group-members,
+  .group-member,
+  .group-member-check,
+  .group-checks-bar,
+  .group-diff,
+  .group-repo-diff,
+  .group-check-command {
+    min-width: 0;
+    max-width: 100%;
   }
 }
 
@@ -5689,10 +6255,27 @@ button:focus-visible,
   display: none;
 }
 .chat-sidebar-panel {
+  position: relative;
   display: flex;
   flex-direction: column;
   height: 100%;
   min-height: 0;
+}
+/* Drag handle on the dock's left edge: an invisible grab strip that lights up on
+   hover/drag. touch-action none keeps pointer events flowing during the drag. */
+.chat-sidebar-resizer {
+  position: absolute;
+  left: -3px;
+  top: 0;
+  bottom: 0;
+  width: 7px;
+  cursor: col-resize;
+  touch-action: none;
+  z-index: 5;
+}
+.chat-sidebar-resizer:hover,
+.chat-sidebar-resizer:active {
+  background: linear-gradient(90deg, transparent, var(--neon-blue-line), transparent);
 }
 .chat-sidebar-panel[hidden] {
   display: none;
@@ -5731,8 +6314,10 @@ button:focus-visible,
 .chat-sidebar-body {
   flex: 1 1 auto;
   min-height: 0;
-  overflow-y: auto;
-  padding: 12px 14px 18px;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  padding: 0 14px 12px;
 }
 /* The collapsed rail: a slim launcher column. */
 .chat-sidebar-rail {
@@ -5751,29 +6336,89 @@ button:focus-visible,
   color: var(--neon-pink);
 }
 
-/* Compact RunScreen variant used inside the sidebar: single column, no details aside,
-   left-aligned and a touch tighter. */
+/* Compact RunScreen variant used inside the dock: single column, no details aside,
+   shaped like an editor chat panel — history in the middle, the composer pinned to
+   the bottom, controls in one tight row. */
 .chat--sidebar {
   min-height: 0;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
 }
 .chat--sidebar .chat-start {
   width: 100%;
+  height: 100%;
+  min-height: 0;
   justify-content: flex-start;
-  gap: 12px;
-  padding-top: 4px;
+  gap: 10px;
+  padding-top: 10px;
+  overflow: hidden;
 }
+/* Bottom-anchored composer, editor-panel style: the (randomized) heading sits over
+   the history area; the composer + its cost/routing lines dock at the bottom. */
 .chat--sidebar .chat-heading {
-  font-size: 1.15rem;
-  text-align: left;
+  order: 0;
+  font-size: 1.05rem;
+  text-align: center;
+  color: var(--text-muted);
+  margin: 6px 0 0;
+}
+.chat--sidebar .recent-chats {
+  order: 1;
+  width: 100%;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  align-content: start;
+}
+.chat--sidebar .synced-history {
+  order: 2;
+  flex: 0 1 auto;
+  max-height: 30%;
+  overflow-y: auto;
+}
+.chat--sidebar .composer {
+  order: 3;
+  margin-top: auto;
+  padding: 10px 12px 8px;
+  border-radius: 14px;
+}
+.chat--sidebar .routing-rationale,
+.chat--sidebar .cost-estimate {
+  order: 4;
+  margin: 0;
 }
 .chat--sidebar .chat-active {
   grid-template-columns: minmax(0, 1fr);
 }
+/* One tight control row: compact chips, send pinned to the right like an editor
+   panel's submit. */
 .chat--sidebar .composer-bar {
   flex-wrap: wrap;
+  gap: 6px;
+  padding-top: 6px;
 }
-.chat--sidebar .recent-chats {
-  width: 100%;
+.chat--sidebar .composer-controls {
+  gap: 6px;
+  flex: 1 1 auto;
+}
+.chat--sidebar .composer-controls .chip-select {
+  max-width: 132px;
+  font-size: 0.75rem;
+}
+.chat--sidebar .cost-mode .seg {
+  padding: 4px 9px;
+  font-size: 0.72rem;
+}
+.chat--sidebar .composer-send {
+  width: 32px;
+  height: 32px;
+  margin-left: auto;
+  align-self: flex-end;
+}
+.chat--sidebar .composer-input {
+  min-height: 44px;
+  font-size: 0.92rem;
 }
 
 /* Attachment chips (shared by the composer + the follow-up box). */
