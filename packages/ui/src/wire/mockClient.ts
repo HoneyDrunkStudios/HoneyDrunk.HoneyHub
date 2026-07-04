@@ -1495,8 +1495,10 @@ export class MockWireClient implements WireClient {
     });
   }
 
-  /** Emit a device-scoped event (empty session/run ids, sequence 0). */
-  private emitDevice(payload: BridgeEventPayload): void {
+  /** Emit a device-scoped event (empty session/run ids, sequence 0). Protected so
+      tests can subclass the mock and script host-shaped events (e.g. probe edge
+      cases the default mock never emits). */
+  protected emitDevice(payload: BridgeEventPayload): void {
     const event: BridgeEvent = {
       id: `event-${this.sequence}`,
       sessionId: "",
