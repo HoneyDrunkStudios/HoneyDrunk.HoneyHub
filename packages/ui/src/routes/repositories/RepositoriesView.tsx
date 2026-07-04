@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { ReactElement, ReactNode } from "react";
+import type { Dispatch, ReactElement, RefObject, SetStateAction } from "react";
 import type {
+  BridgeEvent,
   DirListing,
   FileContents,
   GitBranches,
@@ -45,6 +46,604 @@ function childPath(parent: string, name: string): string {
   }
   const sep = parent.includes("\\") ? "\\" : "/";
   return parent.endsWith(sep) ? `${parent}${name}` : `${parent}${sep}${name}`;
+}
+
+/** A caught rejection's message, or a fallback for non-Error throws. */
+function errorMessage(cause: unknown, fallback: string): string {
+  return cause instanceof Error ? cause.message : fallback;
+}
+
+/** The tree-row caret glyph: collapsed/expanded for a directory, a dot for a file. */
+function caretGlyph(isDir: boolean, isOpen: boolean): string {
+  if (!isDir) {
+    return "·";
+  }
+  return isOpen ? "▾" : "▸";
+}
+
+/** Which repo should be active given the overview and the current selection: keep the current
+    one if it still exists, otherwise the first dirty repo (else the first repo). `undefined` when
+    there are no repos. */
+function nextActiveRepo(repos: GitStatus[], activeRepo: string | undefined): string | undefined {
+  if (repos.length === 0) {
+    return undefined;
+  }
+  if (activeRepo !== undefined && repos.some((candidate) => candidate.root === activeRepo)) {
+    return activeRepo;
+  }
+  const fallback = repos.find((candidate) => !candidate.clean) ?? repos[0];
+  return fallback?.root ?? activeRepo;
+}
+
+/** Toggle a directory's expanded state, lazily loading its listing the first time it opens. */
+function toggleExpandedDir(
+  setExpandedDirs: Dispatch<SetStateAction<Set<string>>>,
+  listings: Record<string, DirListing>,
+  loadDir: (path: string) => void,
+  path: string
+): void {
+  setExpandedDirs((prev) => {
+    const next = new Set(prev);
+    if (next.has(path)) {
+      next.delete(path);
+    } else {
+      next.add(path);
+      if (listings[path] === undefined) {
+        loadDir(path);
+      }
+    }
+    return next;
+  });
+}
+
+/** Toggle a path's membership in a selection set. */
+function togglePathInSet(setSelected: Dispatch<SetStateAction<Set<string>>>, path: string): void {
+  setSelected((prev) => {
+    const next = new Set(prev);
+    if (next.has(path)) {
+      next.delete(path);
+    } else {
+      next.add(path);
+    }
+    return next;
+  });
+}
+
+/** Re-read the open file + every expanded directory so the tree and viewer reflect disk. */
+function refreshRepoTree(
+  client: WireClient,
+  loadDir: (path: string) => void,
+  folder: string,
+  expandedDirs: Set<string>,
+  openPath: string | undefined,
+  editing: boolean
+): void {
+  if (folder !== "") {
+    loadDir(folder);
+  }
+  for (const path of expandedDirs) {
+    loadDir(path);
+  }
+  if (openPath !== undefined && !editing) {
+    void client.readFile(openPath).catch(() => undefined);
+  }
+}
+
+/** The centre-pane setters + correlation refs, bundled so the file/diff/editor handlers can live
+    at module scope (keeping the component's cognitive complexity down). */
+interface ViewerControls {
+  client: WireClient;
+  setViewerMode: Dispatch<SetStateAction<"file" | "diff">>;
+  setFile: Dispatch<SetStateAction<FileContents | undefined>>;
+  setFileLoading: Dispatch<SetStateAction<boolean>>;
+  setFileError: Dispatch<SetStateAction<string | undefined>>;
+  setDiff: Dispatch<SetStateAction<GitDiff | undefined>>;
+  setEditing: Dispatch<SetStateAction<boolean>>;
+  setDraft: Dispatch<SetStateAction<string>>;
+  setSaving: Dispatch<SetStateAction<boolean>>;
+  setSaveError: Dispatch<SetStateAction<string | undefined>>;
+  pendingFile: RefObject<string | undefined>;
+  pendingDiff: RefObject<{ root: string; path?: string } | undefined>;
+  savingPath: RefObject<string | undefined>;
+}
+
+/** Open a file into the centre pane's read view, correlating the async reply by path. */
+function openFileInView(v: ViewerControls, path: string): void {
+  v.setViewerMode("file");
+  v.setEditing(false);
+  v.setSaveError(undefined);
+  v.pendingFile.current = path;
+  v.setFile(undefined);
+  v.setFileError(undefined);
+  v.setFileLoading(true);
+  void v.client.readFile(path).catch((cause: unknown) => {
+    if (v.pendingFile.current === path) {
+      v.setFileLoading(false);
+      v.setFileError(errorMessage(cause, "could not read file"));
+    }
+  });
+}
+
+/** Open a changed file's diff into the centre pane. */
+function openDiffInView(v: ViewerControls, repoRoot: string, path?: string): void {
+  v.setViewerMode("diff");
+  v.setDiff(undefined);
+  v.setFileError(undefined);
+  v.pendingDiff.current = path === undefined ? { root: repoRoot } : { root: repoRoot, path };
+  void v.client.gitDiff(repoRoot, path).catch(() => v.setFileError("could not read the diff"));
+}
+
+/** Enter edit mode for the open file (no-op for a missing or truncated-too-large file). */
+function startEditingFile(v: ViewerControls, file: FileContents | undefined): void {
+  if (file === undefined || file.truncated) {
+    return;
+  }
+  v.setDraft(file.content);
+  v.setSaveError(undefined);
+  v.setEditing(true);
+}
+
+/** Save the editor draft through the bridge's write_file boundary (ADR-0097). */
+function saveFileDraft(v: ViewerControls, file: FileContents | undefined, draft: string): void {
+  if (file === undefined) {
+    return;
+  }
+  v.setSaving(true);
+  v.setSaveError(undefined);
+  v.savingPath.current = file.path;
+  void v.client.writeFile(file.path, draft).catch((cause: unknown) => {
+    if (v.savingPath.current === file.path) {
+      v.setSaving(false);
+      v.savingPath.current = undefined;
+      v.setSaveError(errorMessage(cause, "could not save the file"));
+    }
+  });
+}
+
+/** Run a git write op: mark busy, clear stale feedback, and gate behind the confirm modal when a
+    message is supplied. The `git_op` event clears busy. */
+function runGitWrite(
+  setBusy: Dispatch<SetStateAction<boolean>>,
+  setFeedback: Dispatch<SetStateAction<GitOpResult | undefined>>,
+  setConfirm: Dispatch<SetStateAction<PendingConfirm | undefined>>,
+  op: () => Promise<void>,
+  confirmMessage?: string
+): void {
+  const fire = (): void => {
+    setBusy(true);
+    setFeedback(undefined);
+    op().catch(() => setBusy(false));
+  };
+  if (confirmMessage === undefined) {
+    fire();
+  } else {
+    setConfirm({ message: confirmMessage, action: fire });
+  }
+}
+
+/** Everything the device-wide event subscription needs to fold a bridge event into this view's
+    state. Bundled so the reducer can live at module scope (keeping the component's cognitive
+    complexity down) while still reading the latest values through refs. */
+interface RepoEventContext {
+  client: WireClient;
+  folderRef: RefObject<string>;
+  activeRef: RefObject<boolean>;
+  pendingFile: RefObject<string | undefined>;
+  pendingDiff: RefObject<{ root: string; path?: string } | undefined>;
+  savingPath: RefObject<string | undefined>;
+  refreshOverviewRef: RefObject<() => void>;
+  refreshTreeRef: RefObject<() => void>;
+  setListings: Dispatch<SetStateAction<Record<string, DirListing>>>;
+  setFile: Dispatch<SetStateAction<FileContents | undefined>>;
+  setFileLoading: Dispatch<SetStateAction<boolean>>;
+  setFileError: Dispatch<SetStateAction<string | undefined>>;
+  setOverview: Dispatch<SetStateAction<GitOverview | undefined>>;
+  setBranches: Dispatch<SetStateAction<GitBranches | undefined>>;
+  setDiff: Dispatch<SetStateAction<GitDiff | undefined>>;
+  setFeedback: Dispatch<SetStateAction<GitOpResult | undefined>>;
+  setBusy: Dispatch<SetStateAction<boolean>>;
+  setCommitMessage: Dispatch<SetStateAction<string>>;
+  setSaving: Dispatch<SetStateAction<boolean>>;
+  setEditing: Dispatch<SetStateAction<boolean>>;
+  setSaveError: Dispatch<SetStateAction<string | undefined>>;
+}
+
+type FileWrittenResult = Extract<BridgeEvent["payload"], { kind: "file_written" }>["result"];
+
+function applyFileContents(file: FileContents, ctx: RepoEventContext): void {
+  if (ctx.pendingFile.current === undefined || file.path === ctx.pendingFile.current) {
+    ctx.setFile(file);
+    ctx.setFileLoading(false);
+    ctx.setFileError(undefined);
+  }
+}
+
+function applyGitDiff(diff: GitDiff, ctx: RepoEventContext): void {
+  const want = ctx.pendingDiff.current;
+  if (diff.root === want?.root && diff.path === want?.path) {
+    ctx.setDiff(diff);
+  }
+}
+
+function applyGitOp(result: GitOpResult, ctx: RepoEventContext): void {
+  ctx.setFeedback(result);
+  ctx.setBusy(false);
+  if (result.ok && result.op === "commit") {
+    ctx.setCommitMessage("");
+  }
+}
+
+function applyFileWritten(result: FileWrittenResult, ctx: RepoEventContext): void {
+  // Our own save came back. Clear the saving state and, on success, leave edit mode and re-read
+  // the file so the viewer shows the persisted content.
+  if (result.path !== ctx.savingPath.current) {
+    return;
+  }
+  ctx.setSaving(false);
+  ctx.savingPath.current = undefined;
+  if (result.ok) {
+    ctx.setEditing(false);
+    ctx.setSaveError(undefined);
+    ctx.pendingFile.current = result.path;
+    void ctx.client.readFile(result.path).catch(() => undefined);
+  } else {
+    ctx.setSaveError(result.message ?? "could not save the file");
+  }
+}
+
+function applyFsChanged(paths: string[], ctx: RepoEventContext): void {
+  if (
+    ctx.activeRef.current &&
+    ctx.folderRef.current !== "" &&
+    paths.some((path) => isWithin(path, ctx.folderRef.current))
+  ) {
+    ctx.refreshOverviewRef.current();
+    ctx.refreshTreeRef.current();
+  }
+}
+
+/** Fold a single device-wide bridge event into this view's state. The bus is shared across
+    surfaces, so each branch correlates the payload to what this view asked for before applying
+    it. Lives at module scope so it doesn't count against the component's cognitive complexity. */
+function applyRepoEvent(event: BridgeEvent, ctx: RepoEventContext): void {
+  const payload = event.payload;
+  switch (payload.kind) {
+    case "dir_listing":
+      ctx.setListings((prev) => ({ ...prev, [payload.listing.path]: payload.listing }));
+      break;
+    case "file_contents":
+      applyFileContents(payload.file, ctx);
+      break;
+    case "git_overview":
+      if (payload.overview.root === ctx.folderRef.current) {
+        ctx.setOverview(payload.overview);
+      }
+      break;
+    case "git_status":
+      ctx.setOverview((prev) =>
+        prev === undefined ? prev : replaceRepoStatus(prev, payload.status)
+      );
+      break;
+    case "git_branches":
+      ctx.setBranches(payload.branches);
+      break;
+    case "git_diff":
+      applyGitDiff(payload.diff, ctx);
+      break;
+    case "git_op":
+      applyGitOp(payload.result, ctx);
+      break;
+    case "file_written":
+      applyFileWritten(payload.result, ctx);
+      break;
+    case "fs_changed":
+      applyFsChanged(payload.paths, ctx);
+      break;
+    default:
+      break;
+  }
+}
+
+/** The git-write handlers for the source-control panel + context menu. */
+interface RepoActions {
+  onOpenDiff: (path: string) => void;
+  onOpenFile: (path: string) => void;
+  onStage: (paths: string[]) => void;
+  onUnstage: (paths: string[]) => void;
+  onCommit: () => void;
+  onPush: () => void;
+  onPull: () => void;
+  onCheckout: (name: string, create: boolean) => void;
+  onDiscardFile: (file: GitFileStatus) => void;
+}
+
+/** Build the git-write handlers bound to the active repo. Each is a no-op until a repo is
+    active; extracted to module scope so the per-handler `repo` guards don't drive the
+    component's cognitive complexity. Behaviour matches the previous inline
+    `repo !== undefined && …` handlers exactly. */
+function buildRepoActions(
+  repo: GitStatus | undefined,
+  client: WireClient,
+  runWrite: (op: () => Promise<void>, confirmMessage?: string) => void,
+  openDiff: (repoRoot: string, path?: string) => void,
+  openFile: (path: string) => void,
+  commitMessage: string
+): RepoActions {
+  if (repo === undefined) {
+    const noop = (): void => undefined;
+    return {
+      onOpenDiff: noop,
+      onOpenFile: noop,
+      onStage: noop,
+      onUnstage: noop,
+      onCommit: noop,
+      onPush: noop,
+      onPull: noop,
+      onCheckout: noop,
+      onDiscardFile: noop
+    };
+  }
+  const branchName = repo.branch ?? "this branch";
+  return {
+    onOpenDiff: (path) => openDiff(repo.root, path),
+    onOpenFile: (path) => openFile(childPath(repo.root, path)),
+    onStage: (paths) => runWrite(() => client.gitStage(repo.root, paths)),
+    onUnstage: (paths) => runWrite(() => client.gitUnstage(repo.root, paths)),
+    onCommit: () => runWrite(() => client.gitCommit(repo.root, commitMessage.trim())),
+    onPush: () => runWrite(() => client.gitPush(repo.root), `Push ${branchName} to its remote?`),
+    onPull: () =>
+      runWrite(() => client.gitPull(repo.root), `Pull (fast-forward only) into ${branchName}?`),
+    onCheckout: (name, create) =>
+      runWrite(
+        () => client.gitCheckout(repo.root, name, create),
+        repo.clean
+          ? undefined
+          : `Switch to "${name}" with uncommitted changes? Your changes will follow if they don't conflict.`
+      ),
+    onDiscardFile: (target) =>
+      runWrite(
+        () => client.gitDiscard(repo.root, [target.path], target.untracked),
+        `Discard changes to ${target.path}? This cannot be undone.`
+      )
+  };
+}
+
+interface ExplorerTreeProps {
+  rootListing: DirListing | undefined;
+  listings: Record<string, DirListing>;
+  expandedDirs: Set<string>;
+  openFilePath: string | undefined;
+  onToggleDir: (path: string) => void;
+  onOpenFile: (path: string) => void;
+}
+
+/** The explorer's root level: a loading/empty hint, or the recursive tree. Extracted so the
+    loading/empty/tree choice is a set of statements, not a nested ternary. */
+function ExplorerTree({
+  rootListing,
+  listings,
+  expandedDirs,
+  openFilePath,
+  onToggleDir,
+  onOpenFile
+}: Readonly<ExplorerTreeProps>): ReactElement {
+  if (rootListing === undefined) {
+    return <li className="repos-hint">Loading…</li>;
+  }
+  if (rootListing.entries.length === 0) {
+    return <li className="repos-hint">Empty folder.</li>;
+  }
+  return (
+    <TreeLevel
+      listing={rootListing}
+      depth={0}
+      listings={listings}
+      expandedDirs={expandedDirs}
+      openFilePath={openFilePath}
+      onToggleDir={onToggleDir}
+      onOpenFile={onOpenFile}
+    />
+  );
+}
+
+interface RepoPickerProps {
+  repos: GitStatus[];
+  activeRepo: string | undefined;
+  onSelectRepo: (root: string) => void;
+}
+
+/** The repository picker, shown only when the folder holds more than one repo. */
+function RepoPicker({ repos, activeRepo, onSelectRepo }: Readonly<RepoPickerProps>): ReactElement | null {
+  if (repos.length <= 1) {
+    return null;
+  }
+  return (
+    <select
+      aria-label="Repository"
+      value={activeRepo ?? ""}
+      onChange={(event) => onSelectRepo(event.target.value)}
+    >
+      {repos.map((option) => (
+        <option key={option.root} value={option.root}>
+          {basename(option.root)}
+          {option.clean ? "" : ` (${option.files.length})`}
+        </option>
+      ))}
+    </select>
+  );
+}
+
+interface BranchBarProps {
+  repo: GitStatus;
+  branches: GitBranches | undefined;
+  busy: boolean;
+  newBranch: string;
+  onNewBranch: (value: string) => void;
+  onCheckout: (name: string, create: boolean) => void;
+  onPull: () => void;
+  onPush: () => void;
+}
+
+/** Branch switcher, new-branch form, and pull/push actions for the active repo. */
+function BranchBar({
+  repo,
+  branches,
+  busy,
+  newBranch,
+  onNewBranch,
+  onCheckout,
+  onPull,
+  onPush
+}: Readonly<BranchBarProps>): ReactElement {
+  const branchOptions = branches?.branches ?? (repo.branch === undefined ? [] : [repo.branch]);
+  return (
+    <div className="repos-branch-bar">
+      <label className="repos-branch-switch">
+        <span className="visually-hidden">Switch branch</span>
+        <select
+          aria-label="Switch branch"
+          value={repo.branch ?? ""}
+          disabled={busy || branches === undefined}
+          onChange={(event) => {
+            if (event.target.value !== "" && event.target.value !== repo.branch) {
+              onCheckout(event.target.value, false);
+            }
+          }}
+        >
+          {repo.branch === undefined && <option value="">(detached)</option>}
+          {branchOptions.map((name) => (
+            <option key={name} value={name}>
+              {name}
+            </option>
+          ))}
+        </select>
+      </label>
+      <form
+        className="repos-new-branch"
+        onSubmit={(event) => {
+          event.preventDefault();
+          const name = newBranch.trim();
+          if (name.length > 0) {
+            onCheckout(name, true);
+            onNewBranch("");
+          }
+        }}
+      >
+        <input
+          aria-label="New branch name"
+          value={newBranch}
+          placeholder="new branch…"
+          onChange={(event) => onNewBranch(event.target.value)}
+        />
+        <button type="submit" disabled={busy || newBranch.trim().length === 0}>
+          Create
+        </button>
+      </form>
+      <div className="repos-remote-actions">
+        <button type="button" onClick={onPull} disabled={busy}>
+          Pull{repo.behind > 0 ? ` ↓${repo.behind}` : ""}
+        </button>
+        <button type="button" onClick={onPush} disabled={busy}>
+          Push{repo.ahead > 0 ? ` ↑${repo.ahead}` : ""}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+interface RepoChangesProps {
+  repo: GitStatus;
+  commitMessage: string;
+  busy: boolean;
+  selected: Set<string>;
+  onCommitMessage: (value: string) => void;
+  onStage: (paths: string[]) => void;
+  onUnstage: (paths: string[]) => void;
+  onCommit: () => void;
+  onOpenDiff: (path: string) => void;
+  onOpenFile: (path: string) => void;
+  onToggleSelected: (path: string) => void;
+  onContextMenu: (target: ContextTarget) => void;
+  onDiscardFile: (file: GitFileStatus) => void;
+}
+
+/** Staged/unstaged file groups and the commit box for the active repo, or a clean-tree hint. */
+function RepoChanges({
+  repo,
+  commitMessage,
+  busy,
+  selected,
+  onCommitMessage,
+  onStage,
+  onUnstage,
+  onCommit,
+  onOpenDiff,
+  onOpenFile,
+  onToggleSelected,
+  onContextMenu,
+  onDiscardFile
+}: Readonly<RepoChangesProps>): ReactElement {
+  const grouped = useMemo(() => groupFiles(repo.files), [repo]);
+  if (repo.clean) {
+    return <p className="repos-hint">Working tree clean.</p>;
+  }
+  const stagedCount = grouped.staged.length;
+  const canCommit = stagedCount > 0 && commitMessage.trim().length > 0 && !busy;
+  return (
+    <div className="repos-changes">
+      {stagedCount > 0 && (
+        <ScmGroup
+          title="Staged"
+          files={grouped.staged}
+          staged
+          action="Unstage"
+          allLabel="Unstage all"
+          selected={selected}
+          busy={busy}
+          repoRoot={repo.root}
+          onAction={(file) => onUnstage([file.path])}
+          onActionAll={() => onUnstage(["."])}
+          onOpenDiff={onOpenDiff}
+          onOpenFile={onOpenFile}
+          onToggleSelected={onToggleSelected}
+          onContextMenu={onContextMenu}
+          onDiscard={onDiscardFile}
+        />
+      )}
+      {grouped.unstaged.length > 0 && (
+        <ScmGroup
+          title="Changes"
+          files={grouped.unstaged}
+          staged={false}
+          action="Stage"
+          allLabel="Stage all"
+          selected={selected}
+          busy={busy}
+          repoRoot={repo.root}
+          onAction={(file) => onStage([file.path])}
+          onActionAll={() => onStage(["."])}
+          onOpenDiff={onOpenDiff}
+          onOpenFile={onOpenFile}
+          onToggleSelected={onToggleSelected}
+          onContextMenu={onContextMenu}
+          onDiscard={onDiscardFile}
+        />
+      )}
+      <div className="repos-commit">
+        <textarea
+          aria-label="Commit message"
+          value={commitMessage}
+          placeholder={stagedCount === 0 ? "Stage changes to commit…" : "Commit message…"}
+          rows={2}
+          onChange={(event) => onCommitMessage(event.target.value)}
+        />
+        <button type="button" className="git-commit-button" onClick={onCommit} disabled={!canCommit}>
+          Commit{" "}
+          {stagedCount > 0 ? `(${stagedCount})` : ""}
+        </button>
+      </div>
+    </div>
+  );
 }
 
 /**
@@ -123,79 +722,39 @@ export function RepositoriesView({
 
   // Re-read the open file + every expanded directory (so the tree and viewer reflect disk).
   const refreshTree = useCallback(() => {
-    if (folderRef.current !== "") {
-      loadDir(folderRef.current);
-    }
-    for (const path of expandedDirs) {
-      loadDir(path);
-    }
-    const openPath = pendingFile.current;
-    if (openPath !== undefined && !editing) {
-      void client.readFile(openPath).catch(() => undefined);
-    }
+    refreshRepoTree(client, loadDir, folderRef.current, expandedDirs, pendingFile.current, editing);
   }, [client, loadDir, expandedDirs, editing]);
   const refreshTreeRef = useRef(refreshTree);
   refreshTreeRef.current = refreshTree;
 
   // The single device-wide event subscription. The bus is shared across surfaces, so every
-  // handler correlates the payload to what this view asked for before applying it.
+  // handler correlates the payload to what this view asked for before applying it. The folding
+  // logic lives in `applyRepoEvent` (module scope) and reads the latest values through refs.
   useEffect(() => {
-    const unsubscribe = client.subscribe((event) => {
-      const payload = event.payload;
-      if (payload.kind === "dir_listing") {
-        setListings((prev) => ({ ...prev, [payload.listing.path]: payload.listing }));
-      } else if (payload.kind === "file_contents") {
-        if (pendingFile.current === undefined || payload.file.path === pendingFile.current) {
-          setFile(payload.file);
-          setFileLoading(false);
-          setFileError(undefined);
-        }
-      } else if (payload.kind === "git_overview") {
-        if (payload.overview.root === folderRef.current) {
-          setOverview(payload.overview);
-        }
-      } else if (payload.kind === "git_status") {
-        setOverview((prev) => (prev === undefined ? prev : replaceRepoStatus(prev, payload.status)));
-      } else if (payload.kind === "git_branches") {
-        setBranches(payload.branches);
-      } else if (payload.kind === "git_diff") {
-        const want = pendingDiff.current;
-        if (payload.diff.root === want?.root && payload.diff.path === want?.path) {
-          setDiff(payload.diff);
-        }
-      } else if (payload.kind === "git_op") {
-        setFeedback(payload.result);
-        setBusy(false);
-        if (payload.result.ok && payload.result.op === "commit") {
-          setCommitMessage("");
-        }
-      } else if (payload.kind === "file_written") {
-        // Our own save came back. Clear the saving state and, on success, leave edit mode
-        // and re-read the file so the viewer shows the persisted content.
-        if (payload.result.path === savingPath.current) {
-          setSaving(false);
-          savingPath.current = undefined;
-          if (payload.result.ok) {
-            setEditing(false);
-            setSaveError(undefined);
-            pendingFile.current = payload.result.path;
-            void client.readFile(payload.result.path).catch(() => undefined);
-          } else {
-            setSaveError(payload.result.message ?? "could not save the file");
-          }
-        }
-      } else if (payload.kind === "fs_changed") {
-        if (
-          activeRef.current &&
-          folderRef.current !== "" &&
-          payload.paths.some((path) => isWithin(path, folderRef.current))
-        ) {
-          refreshOverviewRef.current();
-          refreshTreeRef.current();
-        }
-      }
-    });
-    return unsubscribe;
+    const ctx: RepoEventContext = {
+      client,
+      folderRef,
+      activeRef,
+      pendingFile,
+      pendingDiff,
+      savingPath,
+      refreshOverviewRef,
+      refreshTreeRef,
+      setListings,
+      setFile,
+      setFileLoading,
+      setFileError,
+      setOverview,
+      setBranches,
+      setDiff,
+      setFeedback,
+      setBusy,
+      setCommitMessage,
+      setSaving,
+      setEditing,
+      setSaveError
+    };
+    return client.subscribe((event) => applyRepoEvent(event, ctx));
   }, [client]);
 
   // Load the root listing + git overview when the view activates or the folder changes.
@@ -232,16 +791,9 @@ export function RepositoriesView({
 
   // Default the active repo to the first repo that has changes, else the first repo.
   useEffect(() => {
-    const repos = overview?.repos ?? [];
-    if (repos.length === 0) {
-      setActiveRepo(undefined);
-      return;
-    }
-    if (activeRepo === undefined || !repos.some((repo) => repo.root === activeRepo)) {
-      const fallback = repos.find((repo) => !repo.clean) ?? repos[0];
-      if (fallback !== undefined) {
-        setActiveRepo(fallback.root);
-      }
+    const next = nextActiveRepo(overview?.repos ?? [], activeRepo);
+    if (next !== activeRepo) {
+      setActiveRepo(next);
     }
   }, [overview, activeRepo]);
 
@@ -253,103 +805,40 @@ export function RepositoriesView({
     }
   }, [client, activeRepo]);
 
-  const toggleDir = (path: string) => {
-    setExpandedDirs((prev) => {
-      const next = new Set(prev);
-      if (next.has(path)) {
-        next.delete(path);
-      } else {
-        next.add(path);
-        if (listings[path] === undefined) {
-          loadDir(path);
-        }
-      }
-      return next;
-    });
-  };
+  const toggleDir = (path: string) => toggleExpandedDir(setExpandedDirs, listings, loadDir, path);
 
-  const openFile = (path: string) => {
-    setViewerMode("file");
-    setEditing(false);
-    setSaveError(undefined);
-    pendingFile.current = path;
-    setFile(undefined);
-    setFileError(undefined);
-    setFileLoading(true);
-    void client.readFile(path).catch((cause: unknown) => {
-      if (pendingFile.current === path) {
-        setFileLoading(false);
-        setFileError(cause instanceof Error ? cause.message : "could not read file");
-      }
-    });
+  // The file/diff/editor handlers live at module scope over this bundle of centre-pane setters.
+  const viewer: ViewerControls = {
+    client,
+    setViewerMode,
+    setFile,
+    setFileLoading,
+    setFileError,
+    setDiff,
+    setEditing,
+    setDraft,
+    setSaving,
+    setSaveError,
+    pendingFile,
+    pendingDiff,
+    savingPath
   };
-
-  const openDiff = (repoRoot: string, path?: string) => {
-    setViewerMode("diff");
-    setDiff(undefined);
-    setFileError(undefined);
-    pendingDiff.current = path === undefined ? { root: repoRoot } : { root: repoRoot, path };
-    void client.gitDiff(repoRoot, path).catch(() => setFileError("could not read the diff"));
-  };
-
-  const startEditing = () => {
-    if (file === undefined || file.truncated) {
-      return;
-    }
-    setDraft(file.content);
-    setSaveError(undefined);
-    setEditing(true);
-  };
-
-  const saveDraft = () => {
-    if (file === undefined) {
-      return;
-    }
-    setSaving(true);
-    setSaveError(undefined);
-    savingPath.current = file.path;
-    void client.writeFile(file.path, draft).catch((cause: unknown) => {
-      if (savingPath.current === file.path) {
-        setSaving(false);
-        savingPath.current = undefined;
-        setSaveError(cause instanceof Error ? cause.message : "could not save the file");
-      }
-    });
-  };
-
-  // Run a git write op: mark busy, clear stale feedback, gate behind the confirm modal when
-  // a message is supplied. The git_op event clears busy.
-  const runWrite = (op: () => Promise<void>, confirmMessage?: string) => {
-    const fire = () => {
-      setBusy(true);
-      setFeedback(undefined);
-      op().catch(() => setBusy(false));
-    };
-    if (confirmMessage === undefined) {
-      fire();
-    } else {
-      setConfirm({ message: confirmMessage, action: fire });
-    }
-  };
+  const openFile = (path: string) => openFileInView(viewer, path);
+  const openDiff = (repoRoot: string, path?: string) => openDiffInView(viewer, repoRoot, path);
+  const startEditing = () => startEditingFile(viewer, file);
+  const saveDraft = () => saveFileDraft(viewer, file, draft);
+  const runWrite = (op: () => Promise<void>, confirmMessage?: string) =>
+    runGitWrite(setBusy, setFeedback, setConfirm, op, confirmMessage);
 
   const repo = overview?.repos.find((candidate) => candidate.root === activeRepo);
+  const repoActions = buildRepoActions(repo, client, runWrite, openDiff, openFile, commitMessage);
 
   // Selection is scoped to the active repo; reset it when the repo changes.
   useEffect(() => {
     setSelected(new Set());
   }, [activeRepo]);
 
-  const toggleSelected = (path: string) => {
-    setSelected((prev) => {
-      const next = new Set(prev);
-      if (next.has(path)) {
-        next.delete(path);
-      } else {
-        next.add(path);
-      }
-      return next;
-    });
-  };
+  const toggleSelected = (path: string) => togglePathInSet(setSelected, path);
 
   if (workspaceRoots.length === 0) {
     return (
@@ -408,21 +897,14 @@ export function RepositoriesView({
         <aside className="repos-explorer" aria-label="Explorer">
           <p className="repos-pane-title">Files</p>
           <ul className="repos-tree">
-            {rootListing === undefined ? (
-              <li className="repos-hint">Loading…</li>
-            ) : rootListing.entries.length === 0 ? (
-              <li className="repos-hint">Empty folder.</li>
-            ) : (
-              <TreeLevel
-                listing={rootListing}
-                depth={0}
-                listings={listings}
-                expandedDirs={expandedDirs}
-                openFilePath={file?.path}
-                onToggleDir={toggleDir}
-                onOpenFile={openFile}
-              />
-            )}
+            <ExplorerTree
+              rootListing={rootListing}
+              listings={listings}
+              expandedDirs={expandedDirs}
+              openFilePath={file?.path}
+              onToggleDir={toggleDir}
+              onOpenFile={openFile}
+            />
           </ul>
 
           <SourceControl
@@ -438,42 +920,17 @@ export function RepositoriesView({
             onSelectRepo={setActiveRepo}
             onCommitMessage={setCommitMessage}
             onNewBranch={setNewBranch}
-            onOpenDiff={(path) => repo !== undefined && openDiff(repo.root, path)}
-            onOpenFile={(path) => repo !== undefined && openFile(childPath(repo.root, path))}
+            onOpenDiff={repoActions.onOpenDiff}
+            onOpenFile={repoActions.onOpenFile}
             onToggleSelected={toggleSelected}
             onContextMenu={(target) => setMenu(target)}
-            onStage={(paths) => repo !== undefined && runWrite(() => client.gitStage(repo.root, paths))}
-            onUnstage={(paths) => repo !== undefined && runWrite(() => client.gitUnstage(repo.root, paths))}
-            onCommit={() =>
-              repo !== undefined && runWrite(() => client.gitCommit(repo.root, commitMessage.trim()))
-            }
-            onPush={() =>
-              repo !== undefined &&
-              runWrite(() => client.gitPush(repo.root), `Push ${repo.branch ?? "this branch"} to its remote?`)
-            }
-            onPull={() =>
-              repo !== undefined &&
-              runWrite(
-                () => client.gitPull(repo.root),
-                `Pull (fast-forward only) into ${repo.branch ?? "this branch"}?`
-              )
-            }
-            onCheckout={(name, create) =>
-              repo !== undefined &&
-              runWrite(
-                () => client.gitCheckout(repo.root, name, create),
-                repo.clean
-                  ? undefined
-                  : `Switch to "${name}" with uncommitted changes? Your changes will follow if they don't conflict.`
-              )
-            }
-            onDiscardFile={(target) =>
-              repo !== undefined &&
-              runWrite(
-                () => client.gitDiscard(repo.root, [target.path], target.untracked),
-                `Discard changes to ${target.path}? This cannot be undone.`
-              )
-            }
+            onStage={repoActions.onStage}
+            onUnstage={repoActions.onUnstage}
+            onCommit={repoActions.onCommit}
+            onPush={repoActions.onPush}
+            onPull={repoActions.onPull}
+            onCheckout={repoActions.onCheckout}
+            onDiscardFile={repoActions.onDiscardFile}
           />
         </aside>
 
@@ -505,17 +962,11 @@ export function RepositoriesView({
         <RepoContextMenu
           target={menu}
           onClose={() => setMenu(undefined)}
-          onOpenDiff={(path) => repo !== undefined && openDiff(repo.root, path)}
-          onOpenFile={(path) => repo !== undefined && openFile(childPath(repo.root, path))}
-          onStage={(paths) => repo !== undefined && runWrite(() => client.gitStage(repo.root, paths))}
-          onUnstage={(paths) => repo !== undefined && runWrite(() => client.gitUnstage(repo.root, paths))}
-          onDiscard={(target) =>
-            repo !== undefined &&
-            runWrite(
-              () => client.gitDiscard(repo.root, [target.path], target.untracked),
-              `Discard changes to ${target.path}? This cannot be undone.`
-            )
-          }
+          onOpenDiff={repoActions.onOpenDiff}
+          onOpenFile={repoActions.onOpenFile}
+          onStage={repoActions.onStage}
+          onUnstage={repoActions.onUnstage}
+          onDiscard={repoActions.onDiscardFile}
         />
       )}
 
@@ -581,7 +1032,7 @@ function TreeLevel({
               onClick={() => (isDir ? onToggleDir(path) : onOpenFile(path))}
             >
               <span className="repos-tree-caret" aria-hidden="true">
-                {isDir ? (isOpen ? "▾" : "▸") : "·"}
+                {caretGlyph(isDir, isOpen)}
               </span>
               <span className="repos-tree-name">{entry.name}</span>
             </button>
@@ -658,86 +1109,29 @@ function SourceControl({
   onCheckout,
   onDiscardFile
 }: Readonly<SourceControlProps>): ReactElement {
-  const grouped = useMemo(() => (repo === undefined ? undefined : groupFiles(repo.files)), [repo]);
-  const canCommit =
-    grouped !== undefined && grouped.staged.length > 0 && commitMessage.trim().length > 0 && !busy;
   const selectedList = [...selected];
 
   return (
     <div className="repos-scm" aria-label="Source control">
       <div className="repos-scm-head">
         <p className="repos-pane-title">Source control</p>
-        {repos.length > 1 && (
-          <select
-            aria-label="Repository"
-            value={activeRepo ?? ""}
-            onChange={(event) => onSelectRepo(event.target.value)}
-          >
-            {repos.map((option) => (
-              <option key={option.root} value={option.root}>
-                {basename(option.root)}
-                {option.clean ? "" : ` (${option.files.length})`}
-              </option>
-            ))}
-          </select>
-        )}
+        <RepoPicker repos={repos} activeRepo={activeRepo} onSelectRepo={onSelectRepo} />
       </div>
 
       {repo === undefined ? (
         <p className="repos-hint">No git repository in this folder.</p>
       ) : (
         <>
-          <div className="repos-branch-bar">
-            <label className="repos-branch-switch">
-              <span className="visually-hidden">Switch branch</span>
-              <select
-                aria-label="Switch branch"
-                value={repo.branch ?? ""}
-                disabled={busy || branches === undefined}
-                onChange={(event) => {
-                  if (event.target.value !== "" && event.target.value !== repo.branch) {
-                    onCheckout(event.target.value, false);
-                  }
-                }}
-              >
-                {repo.branch === undefined && <option value="">(detached)</option>}
-                {(branches?.branches ?? (repo.branch === undefined ? [] : [repo.branch])).map((name) => (
-                  <option key={name} value={name}>
-                    {name}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <form
-              className="repos-new-branch"
-              onSubmit={(event) => {
-                event.preventDefault();
-                const name = newBranch.trim();
-                if (name.length > 0) {
-                  onCheckout(name, true);
-                  onNewBranch("");
-                }
-              }}
-            >
-              <input
-                aria-label="New branch name"
-                value={newBranch}
-                placeholder="new branch…"
-                onChange={(event) => onNewBranch(event.target.value)}
-              />
-              <button type="submit" disabled={busy || newBranch.trim().length === 0}>
-                Create
-              </button>
-            </form>
-            <div className="repos-remote-actions">
-              <button type="button" onClick={onPull} disabled={busy}>
-                Pull{repo.behind > 0 ? ` ↓${repo.behind}` : ""}
-              </button>
-              <button type="button" onClick={onPush} disabled={busy}>
-                Push{repo.ahead > 0 ? ` ↑${repo.ahead}` : ""}
-              </button>
-            </div>
-          </div>
+          <BranchBar
+            repo={repo}
+            branches={branches}
+            busy={busy}
+            newBranch={newBranch}
+            onNewBranch={onNewBranch}
+            onCheckout={onCheckout}
+            onPull={onPull}
+            onPush={onPush}
+          />
 
           {feedback !== undefined && (
             <output className={`git-feedback ${feedback.ok ? "is-ok" : "is-error"}`}>
@@ -757,67 +1151,21 @@ function SourceControl({
             </div>
           )}
 
-          {repo.clean ? (
-            <p className="repos-hint">Working tree clean.</p>
-          ) : (
-            <div className="repos-changes">
-              {grouped !== undefined && grouped.staged.length > 0 && (
-                <ScmGroup
-                  title="Staged"
-                  files={grouped.staged}
-                  staged
-                  action="Unstage"
-                  allLabel="Unstage all"
-                  selected={selected}
-                  busy={busy}
-                  repoRoot={repo.root}
-                  onAction={(file) => onUnstage([file.path])}
-                  onActionAll={() => onUnstage(["."])}
-                  onOpenDiff={onOpenDiff}
-                  onOpenFile={onOpenFile}
-                  onToggleSelected={onToggleSelected}
-                  onContextMenu={onContextMenu}
-                  onDiscard={onDiscardFile}
-                />
-              )}
-              {grouped !== undefined && grouped.unstaged.length > 0 && (
-                <ScmGroup
-                  title="Changes"
-                  files={grouped.unstaged}
-                  staged={false}
-                  action="Stage"
-                  allLabel="Stage all"
-                  selected={selected}
-                  busy={busy}
-                  repoRoot={repo.root}
-                  onAction={(file) => onStage([file.path])}
-                  onActionAll={() => onStage(["."])}
-                  onOpenDiff={onOpenDiff}
-                  onOpenFile={onOpenFile}
-                  onToggleSelected={onToggleSelected}
-                  onContextMenu={onContextMenu}
-                  onDiscard={onDiscardFile}
-                />
-              )}
-              <div className="repos-commit">
-                <textarea
-                  aria-label="Commit message"
-                  value={commitMessage}
-                  placeholder={
-                    grouped !== undefined && grouped.staged.length === 0
-                      ? "Stage changes to commit…"
-                      : "Commit message…"
-                  }
-                  rows={2}
-                  onChange={(event) => onCommitMessage(event.target.value)}
-                />
-                <button type="button" className="git-commit-button" onClick={onCommit} disabled={!canCommit}>
-                  Commit{" "}
-                  {grouped !== undefined && grouped.staged.length > 0 ? `(${grouped.staged.length})` : ""}
-                </button>
-              </div>
-            </div>
-          )}
+          <RepoChanges
+            repo={repo}
+            commitMessage={commitMessage}
+            busy={busy}
+            selected={selected}
+            onCommitMessage={onCommitMessage}
+            onStage={onStage}
+            onUnstage={onUnstage}
+            onCommit={onCommit}
+            onOpenDiff={onOpenDiff}
+            onOpenFile={onOpenFile}
+            onToggleSelected={onToggleSelected}
+            onContextMenu={onContextMenu}
+            onDiscardFile={onDiscardFile}
+          />
         </>
       )}
     </div>
@@ -1046,6 +1394,27 @@ function FilePane({
 
   const dirty = editing && draft !== file.content;
 
+  let body: ReactElement;
+  if (editing) {
+    body = (
+      <textarea
+        className="repos-editor"
+        aria-label={`Edit ${basename(file.path)}`}
+        spellCheck={false}
+        value={draft}
+        onChange={(event) => onDraft(event.target.value)}
+      />
+    );
+  } else if (rendered?.kind === "markdown") {
+    body = <article className="markdown-body" dangerouslySetInnerHTML={{ __html: rendered.html }} />;
+  } else {
+    body = (
+      <pre className="code-view">
+        <code className="hljs" dangerouslySetInnerHTML={{ __html: rendered?.html ?? "" }} />
+      </pre>
+    );
+  }
+
   return (
     <div className="file-viewer">
       <header className="file-viewer-head">
@@ -1080,21 +1449,7 @@ function FilePane({
         </p>
       )}
 
-      {editing ? (
-        <textarea
-          className="repos-editor"
-          aria-label={`Edit ${basename(file.path)}`}
-          spellCheck={false}
-          value={draft}
-          onChange={(event) => onDraft(event.target.value)}
-        />
-      ) : rendered?.kind === "markdown" ? (
-        <article className="markdown-body" dangerouslySetInnerHTML={{ __html: rendered.html }} />
-      ) : (
-        <pre className="code-view">
-          <code className="hljs" dangerouslySetInnerHTML={{ __html: rendered?.html ?? "" }} />
-        </pre>
-      )}
+      {body}
     </div>
   );
 }

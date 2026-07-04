@@ -60,7 +60,7 @@ export function SettingsModal({
   onClose
 }: Readonly<SettingsModalProps>): ReactElement {
   const [section, setSection] = useState<SectionId>("general");
-  const dialogRef = useRef<HTMLDivElement>(null);
+  const dialogRef = useRef<HTMLDialogElement>(null);
   // The element focused before the modal opened, restored on close so keyboard focus
   // returns to the Settings trigger.
   const openerRef = useRef<Element | null>(
@@ -104,13 +104,16 @@ export function SettingsModal({
         aria-label="Close settings"
         onClick={onClose}
       />
-      <div
+      <dialog
         ref={dialogRef}
         className="settings-modal"
-        role="dialog"
-        aria-modal="true"
         aria-label="Settings"
-        tabIndex={-1}
+        open
+        // A native <dialog open> is a normally-positioned element, but the UA stylesheet
+        // still applies margin:auto, padding:1em, color:CanvasText, and inset-inline-end:0.
+        // `.settings-modal` doesn't override those, so neutralize them inline (styles.css is
+        // owned elsewhere) to render exactly where the previous <div role="dialog"> did.
+        style={{ margin: 0, padding: 0, color: "inherit", insetInlineEnd: "auto" }}
       >
         <nav className="settings-modal-nav" aria-label="Settings sections">
           {SECTIONS.map((entry) => (
@@ -187,7 +190,7 @@ export function SettingsModal({
             />
           )}
         </div>
-      </div>
+      </dialog>
     </>
   );
 }

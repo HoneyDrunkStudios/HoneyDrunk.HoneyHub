@@ -174,7 +174,7 @@ describe("RepositoriesView", () => {
     fireEvent.change(editor, { target: { value: "Edited in HoneyHub." } });
     fireEvent.click(screen.getByRole("button", { name: "Save" }));
 
-    await waitFor(() => expect(client.writeFileCalls.length).toBe(1));
+    await waitFor(() => expect(client.writeFileCalls).toHaveLength(1));
     expect(client.writeFileCalls[0]?.content).toBe("Edited in HoneyHub.");
     await waitFor(() => expect(screen.getByRole("button", { name: "Edit" })).toBeTruthy());
   });
@@ -194,7 +194,7 @@ describe("RepositoriesView", () => {
 
     // Back to read mode, and nothing was written.
     await waitFor(() => expect(screen.getByRole("button", { name: "Edit" })).toBeTruthy());
-    expect(client.writeFileCalls.length).toBe(0);
+    expect(client.writeFileCalls).toHaveLength(0);
   });
 
   it("surfaces a save failure reported as an ok:false file_written result", async () => {
@@ -353,11 +353,11 @@ describe("RepositoriesView", () => {
 
     const bulk = screen.getByText("1 selected").parentElement as HTMLElement;
     fireEvent.click(within(bulk).getByRole("button", { name: "Stage" }));
-    await waitFor(() => expect(client.gitStageCalls.length).toBe(1));
+    await waitFor(() => expect(client.gitStageCalls).toHaveLength(1));
     expect(client.gitStageCalls[0]?.paths).toEqual(["packages/ui/src/App.tsx"]);
 
     fireEvent.click(within(bulk).getByRole("button", { name: "Unstage" }));
-    await waitFor(() => expect(client.gitUnstageCalls.length).toBe(1));
+    await waitFor(() => expect(client.gitUnstageCalls).toHaveLength(1));
   });
 
   it("right-clicks a changed file to open the context menu and stage it", async () => {
@@ -370,7 +370,7 @@ describe("RepositoriesView", () => {
     const menu = await screen.findByRole("menu", { name: "File actions" });
     fireEvent.click(within(menu).getByRole("menuitem", { name: "Stage" }));
 
-    await waitFor(() => expect(client.gitStageCalls.length).toBe(1));
+    await waitFor(() => expect(client.gitStageCalls).toHaveLength(1));
     expect(client.gitStageCalls[0]?.paths).toEqual(["packages/ui/src/App.tsx"]);
   });
 
@@ -415,13 +415,13 @@ describe("RepositoriesView", () => {
     let dialog = await screen.findByRole("dialog", { name: "Confirm action" });
     fireEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
     await waitFor(() => expect(screen.queryByRole("dialog", { name: "Confirm action" })).toBeNull());
-    expect(client.gitDiscardCalls.length).toBe(0);
+    expect(client.gitDiscardCalls).toHaveLength(0);
 
     // Now discard for real.
     fireEvent.click(within(row).getByRole("button", { name: "Discard" }));
     dialog = await screen.findByRole("dialog", { name: "Confirm action" });
     fireEvent.click(within(dialog).getByRole("button", { name: "Confirm" }));
-    await waitFor(() => expect(client.gitDiscardCalls.length).toBe(1));
+    await waitFor(() => expect(client.gitDiscardCalls).toHaveLength(1));
     expect(client.gitDiscardCalls[0]?.paths).toEqual(["packages/ui/src/App.tsx"]);
     expect(client.gitDiscardCalls[0]?.untracked).toBe(false);
   });
@@ -438,7 +438,7 @@ describe("RepositoriesView", () => {
     const dialog = await screen.findByRole("dialog", { name: "Confirm action" });
     fireEvent.click(within(dialog).getByRole("button", { name: "Confirm" }));
 
-    await waitFor(() => expect(client.gitCheckoutCalls.length).toBe(1));
+    await waitFor(() => expect(client.gitCheckoutCalls).toHaveLength(1));
     expect(client.gitCheckoutCalls[0]).toMatchObject({ name: "main", create: false });
   });
 
@@ -453,7 +453,7 @@ describe("RepositoriesView", () => {
     const dialog = await screen.findByRole("dialog", { name: "Confirm action" });
     fireEvent.click(within(dialog).getByRole("button", { name: "Confirm" }));
 
-    await waitFor(() => expect(client.gitCheckoutCalls.length).toBe(1));
+    await waitFor(() => expect(client.gitCheckoutCalls).toHaveLength(1));
     expect(client.gitCheckoutCalls[0]).toMatchObject({ name: "feature-x", create: true });
   });
 
@@ -464,13 +464,13 @@ describe("RepositoriesView", () => {
     fireEvent.click(await screen.findByRole("button", { name: /Pull/ }));
     let dialog = await screen.findByRole("dialog", { name: "Confirm action" });
     fireEvent.click(within(dialog).getByRole("button", { name: "Confirm" }));
-    await waitFor(() => expect(client.gitPullCalls.length).toBe(1));
+    await waitFor(() => expect(client.gitPullCalls).toHaveLength(1));
     await waitFor(() => expect(screen.getByText("(demo) Already up to date.")).toBeTruthy());
 
     fireEvent.click(screen.getByRole("button", { name: /Push/ }));
     dialog = await screen.findByRole("dialog", { name: "Confirm action" });
     fireEvent.click(within(dialog).getByRole("button", { name: "Confirm" }));
-    await waitFor(() => expect(client.gitPushCalls.length).toBe(1));
+    await waitFor(() => expect(client.gitPushCalls).toHaveLength(1));
   });
 
   it("switches the active repository through the repo picker", async () => {
@@ -493,7 +493,7 @@ describe("RepositoriesView", () => {
     expect(screen.getByRole("button", { name: "Unstage all" })).toBeTruthy();
 
     fireEvent.click(screen.getByRole("button", { name: "Stage all" }));
-    await waitFor(() => expect(client.gitStageCalls.length).toBe(1));
+    await waitFor(() => expect(client.gitStageCalls).toHaveLength(1));
     expect(client.gitStageCalls[0]?.paths).toEqual(["."]);
   });
 
@@ -503,7 +503,7 @@ describe("RepositoriesView", () => {
 
     await waitFor(() => expect(screen.getByText("staged.ts")).toBeTruthy());
     fireEvent.click(screen.getByRole("button", { name: "Unstage all" }));
-    await waitFor(() => expect(client.gitUnstageCalls.length).toBe(1));
+    await waitFor(() => expect(client.gitUnstageCalls).toHaveLength(1));
     expect(client.gitUnstageCalls[0]?.paths).toEqual(["."]);
   });
 
@@ -515,7 +515,7 @@ describe("RepositoriesView", () => {
     fireEvent.change(screen.getByLabelText("Commit message"), { target: { value: "wip: save" } });
     fireEvent.click(screen.getByRole("button", { name: /Commit/ }));
 
-    await waitFor(() => expect(client.gitCommitCalls.length).toBe(1));
+    await waitFor(() => expect(client.gitCommitCalls).toHaveLength(1));
     expect(client.gitCommitCalls[0]?.message).toBe("wip: save");
     // The commit leaves the tree clean.
     await waitFor(() => expect(screen.getByText("Working tree clean.")).toBeTruthy());
@@ -529,7 +529,7 @@ describe("RepositoriesView", () => {
     const menu = await screen.findByRole("menu", { name: "File actions" });
     fireEvent.click(within(menu).getByRole("menuitem", { name: "Unstage" }));
 
-    await waitFor(() => expect(client.gitUnstageCalls.length).toBe(1));
+    await waitFor(() => expect(client.gitUnstageCalls).toHaveLength(1));
     expect(client.gitUnstageCalls[0]?.paths).toEqual(["staged.ts"]);
   });
 

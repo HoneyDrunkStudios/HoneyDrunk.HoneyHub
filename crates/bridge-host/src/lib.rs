@@ -415,47 +415,7 @@ async fn handle_command(
                     .map(|file| one(BridgeEvent::file_contents(new_id(), now_rfc3339(), file)))
             }
             ClientCommand::WriteFile { path, content } => {
-                // Gate the write to an allowlisted root. `workspace_allows` canonicalizes,
-                // and canonicalize requires the path to exist — so for a NEW file we gate
-                // the parent directory instead (which must exist and be allowlisted). The
-                // allowlist gate is a canonicalized starts_with check, so this also blocks
-                // `..` escapes out of an allowlisted root.
-                let target = std::path::Path::new(&path);
-                let gate = if target.exists() {
-                    require(runtime.workspace_allows(&path), "file")
-                } else {
-                    match target.parent() {
-                        Some(parent) if parent.exists() => {
-                            require(runtime.workspace_allows(&parent.to_string_lossy()), "file")
-                        }
-                        _ => Err(BridgeError::new(
-                            "workspace_not_allowed",
-                            "file is outside an allowlisted workspace root",
-                        )),
-                    }
-                };
-                gate.map(|()| {
-                    let result = honeyhub_bridge::write_file(&path, &content);
-                    // Audit the write: path and byte count only, never the content.
-                    eprintln!(
-                        "bridge-host: write_file {path} ({} bytes, ok={})",
-                        content.len(),
-                        result.ok
-                    );
-                    let mut events = vec![BridgeEvent::file_written(
-                        new_id(),
-                        now_rfc3339(),
-                        result.clone(),
-                    )];
-                    // On success, re-emit fresh contents so the viewer reflects the save.
-                    if result.ok {
-                        if let Ok(file) = honeyhub_bridge::read_file(&path) {
-                            events.push(BridgeEvent::file_contents(new_id(), now_rfc3339(), file));
-                        }
-                    }
-                    events
-                })
-                .map(Some)
+                write_file_command(&runtime, &path, &content)
             }
             ClientCommand::ResolveWorkspaceFile { path } => {
                 // Unscoped like browse: the user selects a .code-workspace to *add* its
@@ -1078,6 +1038,58 @@ fn require(allowed: bool, scope: &str) -> Result<(), BridgeError> {
 /// Wrap a single event as the one-event success payload returned by command arms.
 fn one(event: BridgeEvent) -> Option<Vec<BridgeEvent>> {
     Some(vec![event])
+}
+
+/// Handle a `WriteFile` command: gate the target to an allowlisted root, perform the write,
+/// and answer with a `file_written` result plus (on success) fresh `file_contents` so the
+/// viewer reflects the save. Extracted from `handle_command` so its nested gate/echo logic
+/// doesn't drive that dispatcher's cognitive complexity.
+///
+/// `workspace_allows` canonicalizes, and canonicalize requires the path to exist — so for a
+/// NEW file we gate the parent directory instead (which must exist and be allowlisted). The
+/// allowlist gate is a canonicalized starts_with check, so this also blocks `..` escapes out
+/// of an allowlisted root.
+fn write_file_command(
+    runtime: &honeyhub_bridge::BridgeRuntime,
+    path: &str,
+    content: &str,
+) -> Result<Option<Vec<BridgeEvent>>, BridgeError> {
+    let target = std::path::Path::new(path);
+    let gate = if target.exists() {
+        require(runtime.workspace_allows(path), "file")
+    } else {
+        match target.parent() {
+            Some(parent) if parent.exists() => {
+                require(runtime.workspace_allows(&parent.to_string_lossy()), "file")
+            }
+            _ => Err(BridgeError::new(
+                "workspace_not_allowed",
+                "file is outside an allowlisted workspace root",
+            )),
+        }
+    };
+    gate.map(|()| {
+        let result = honeyhub_bridge::write_file(path, content);
+        // Audit the write: path and byte count only, never the content.
+        eprintln!(
+            "bridge-host: write_file {path} ({} bytes, ok={})",
+            content.len(),
+            result.ok
+        );
+        let mut events = vec![BridgeEvent::file_written(
+            new_id(),
+            now_rfc3339(),
+            result.clone(),
+        )];
+        // On success, re-emit fresh contents so the viewer reflects the save.
+        if result.ok {
+            if let Ok(file) = honeyhub_bridge::read_file(path) {
+                events.push(BridgeEvent::file_contents(new_id(), now_rfc3339(), file));
+            }
+        }
+        events
+    })
+    .map(Some)
 }
 
 /// Build the events for a git write op: a `GitOp` result (success or failure) plus, on
