@@ -1200,7 +1200,7 @@ export function RunScreen({
                         <div key={report.backend} className="usage-report">
                           <p className="usage-report-head">
                             {backendLabel(report.backend)} · as of{" "}
-                            {report.capturedAt.slice(11, 16) || "now"}
+                            {formatLocalTime(report.capturedAt)}
                           </p>
                           {report.windows.length > 0 ? (
                             <ul className="usage-windows">
@@ -1450,6 +1450,15 @@ interface RecentChatsProps {
 
 /** How many threads show without a search (pinned always show; search shows all hits). */
 const RECENT_CHATS_LIMIT = 8;
+
+/** A wire RFC3339 timestamp as local wall-clock time ("12:49 PM"); "now" when unparseable. */
+function formatLocalTime(iso: string): string {
+  const parsed = new Date(iso);
+  if (Number.isNaN(parsed.getTime())) {
+    return "now";
+  }
+  return parsed.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+}
 
 /** Filter + order the bridge-backed sessions the same way the local threads are:
     title match on the query, pinned first, then newest activity. */

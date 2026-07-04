@@ -847,9 +847,10 @@ h2 {
 }
 
 .usage-meter {
-  flex: 0 0 64px;
-  height: 6px;
-  border-radius: 3px;
+  flex: 0 0 72px;
+  height: 8px;
+  border: 1px solid var(--neon-blue-line);
+  border-radius: 4px;
   background: var(--panel-3);
   overflow: hidden;
 }
@@ -858,6 +859,7 @@ h2 {
   display: block;
   height: 100%;
   background: var(--neon-blue);
+  box-shadow: 0 0 6px var(--neon-blue-glow);
 }
 
 .usage-raw pre {

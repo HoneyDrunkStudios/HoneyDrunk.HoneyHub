@@ -37,6 +37,11 @@ const QUIET_MS: u64 = 2500;
 /// is not cut off by an early quiet period.
 const POST_SEND_MIN_MS: u64 = 5000;
 
+/// Hard ceiling on waiting for boot quiescence before typing anyway. Codex keeps a
+/// spinner repainting through its MCP-server startup, so a quiet period may NEVER
+/// come — but its composer is usable long before startup finishes (observed live).
+const BOOT_MAX_MS: u64 = 8000;
+
 fn probe_timeout() -> Duration {
     let secs = std::env::var("HONEYHUB_USAGE_PROBE_TIMEOUT_SECS")
         .ok()
@@ -152,11 +157,26 @@ fn clean_lines(stripped: &str) -> Vec<String> {
     let mut seen = std::collections::HashSet::new();
     let mut lines: Vec<String> = Vec::new();
     for raw_line in stripped.lines() {
+        // Drop box-drawing chrome (U+2500–U+257F) AND the vendors' inline meter-bar
+        // glyphs (block elements, U+2580–U+259F) — the cockpit draws its own bars.
+        // The glyphs act as separators so their removal never fuses two words.
         let line: String = raw_line
             .chars()
-            .filter(|ch| !('\u{2500}'..='\u{257f}').contains(ch))
+            .map(|ch| {
+                if ('\u{2500}'..='\u{259f}').contains(&ch) {
+                    ' '
+                } else {
+                    ch
+                }
+            })
             .collect();
         let line = line.split_whitespace().collect::<Vec<_>>().join(" ");
+        // Un-smoosh the column-layout collapse the capture produces
+        // ("0%usedResets 12:49pm" → "0% used · Resets 12:49pm").
+        let line = line
+            .replace("%used", "% used")
+            .replace("used Resets", "used · Resets")
+            .replace("usedResets", "used · Resets");
         if line.is_empty() {
             continue;
         }
@@ -175,17 +195,21 @@ fn clean_lines(stripped: &str) -> Vec<String> {
 fn parse_windows(lines: &[String]) -> Vec<UsageWindow> {
     let meter_shaped = |line: &String| {
         let lower = line.to_lowercase();
-        (lower.contains("% used") || lower.contains("%used") || lower.contains("limit left"))
-            && line.chars().count() <= 140
+        let metered = lower.contains("% used")
+            || lower.contains("%used")
+            || lower.contains("% left")
+            || lower.contains("limit left")
+            || lower.contains("resets available")
+            // A per-model group header ("GPT-5.3-Codex-Spark limit:") labels the
+            // meters under it.
+            || lower.ends_with("limit:");
+        metered && line.chars().count() <= 140
     };
     let meters: Vec<&String> = lines.iter().filter(|line| meter_shaped(line)).collect();
     if !meters.is_empty() {
         return meters
             .into_iter()
-            .map(|line| UsageWindow {
-                line: line.clone(),
-                used_percent: first_percent(line),
-            })
+            .map(|line| window_from_line(line))
             .collect();
     }
     let keywords = ["session", "week", "limit", "reset", "usage", "used", "left"];
@@ -197,11 +221,25 @@ fn parse_windows(lines: &[String]) -> Vec<UsageWindow> {
                 || (keywords.iter().any(|keyword| lower.contains(keyword))
                     && lower.chars().any(|ch| ch.is_ascii_digit()))
         })
-        .map(|line| UsageWindow {
-            line: line.clone(),
-            used_percent: first_percent(line),
-        })
+        .map(|line| window_from_line(line))
         .collect()
+}
+
+/// Build a window from a meter line, normalizing to USED percent: Claude reports
+/// "% used", Codex reports "% left" — the bar always shows consumption.
+fn window_from_line(line: &str) -> UsageWindow {
+    let percent = first_percent(line);
+    let used_percent = percent.map(|value| {
+        if line.to_lowercase().contains("% left") {
+            (100.0 - value).max(0.0)
+        } else {
+            value
+        }
+    });
+    UsageWindow {
+        line: line.to_string(),
+        used_percent,
+    }
 }
 
 /// The first "NN%" or "NN.N%" on the line, as a number. Char-safe: TUI panels mix
@@ -314,15 +352,40 @@ pub fn probe_usage(
     // then gone quiet — a quiet period before any output just means it is still
     // starting), type the slash command, then capture until the panel settles or
     // the budget runs out.
-    let deadline = Instant::now() + probe_timeout();
+    let started = Instant::now();
+    let deadline = started + probe_timeout();
     let quiet = Duration::from_millis(QUIET_MS);
     let post_send_min = Duration::from_millis(POST_SEND_MIN_MS);
+    let boot_max = Duration::from_millis(BOOT_MAX_MS);
     let mut captured: Vec<u8> = Vec::new();
+    let mut typed_at: Option<Instant> = None;
     let mut sent_at: Option<Instant> = None;
     let mut last_output = Instant::now();
     loop {
         if Instant::now() >= deadline {
             break;
+        }
+        // Two-step typing, like a human: the command text first, Enter ~700ms later.
+        // Sending "\r" in the same write gets swallowed by the slash-command popup
+        // the TUIs open mid-typing (observed live: Codex left "/status" sitting in
+        // its composer). The text goes once the TUI painted and either went idle OR
+        // has been booting past the ceiling (a background spinner can repaint
+        // forever while the composer is already usable — Codex during MCP startup).
+        if sent_at.is_none() && !captured.is_empty() {
+            match typed_at {
+                None if last_output.elapsed() >= quiet || started.elapsed() >= boot_max => {
+                    let _ = writer.write_all(command_text.as_bytes());
+                    let _ = writer.flush();
+                    typed_at = Some(Instant::now());
+                }
+                Some(when) if when.elapsed() >= Duration::from_millis(700) => {
+                    let _ = writer.write_all(b"\r");
+                    let _ = writer.flush();
+                    sent_at = Some(Instant::now());
+                    last_output = Instant::now();
+                }
+                _ => {}
+            }
         }
         match receiver.recv_timeout(Duration::from_millis(200)) {
             Ok(chunk) => {
@@ -331,21 +394,12 @@ pub fn probe_usage(
                 last_output = Instant::now();
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {
-                if last_output.elapsed() < quiet {
-                    continue;
-                }
-                match sent_at {
-                    // The panel rendered and settled (with a minimum render window,
-                    // so a late paint after the send is not cut off).
-                    Some(when) if when.elapsed() >= post_send_min => break,
-                    Some(_) => {}
-                    None if captured.is_empty() => {} // Still booting: nothing painted yet.
-                    None => {
-                        // The TUI painted and went idle: type the command + Enter.
-                        let _ = writer.write_all(format!("{command_text}\r").as_bytes());
-                        let _ = writer.flush();
-                        sent_at = Some(Instant::now());
-                        last_output = Instant::now();
+                // Done when the panel rendered and settled (with a minimum render
+                // window, so a late paint after the send is not cut off). A spinner
+                // that never settles simply rides to the deadline.
+                if let Some(when) = sent_at {
+                    if when.elapsed() >= post_send_min && last_output.elapsed() >= quiet {
+                        break;
                     }
                 }
             }
