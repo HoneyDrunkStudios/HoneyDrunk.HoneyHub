@@ -76,4 +76,17 @@ describe("SettingsModal", () => {
     fireEvent.click(screen.getByRole("button", { name: "Bridge" }));
     expect(screen.getByLabelText("Device name")).toBeTruthy();
   });
+
+  it("reaches the Notifications section", () => {
+    renderModal();
+    fireEvent.click(screen.getByRole("button", { name: "Notifications" }));
+    // The notifications settings surface renders (its heading names the section).
+    expect(screen.getByRole("heading", { name: "Notifications" })).toBeTruthy();
+  });
+
+  it("closes on the header close (✕) button", () => {
+    const { onClose } = renderModal();
+    fireEvent.click(screen.getByRole("button", { name: "Close" }));
+    expect(onClose).toHaveBeenCalled();
+  });
 });

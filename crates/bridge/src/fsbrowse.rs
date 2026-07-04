@@ -610,6 +610,37 @@ mod tests {
     }
 
     #[test]
+    fn write_file_creates_and_overwrites_reporting_the_resolved_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("out.txt");
+
+        // A new file: ok, no message, and the contents land on disk.
+        let created = write_file(file.to_str().unwrap(), "first\n");
+        assert!(created.ok);
+        assert!(created.message.is_none());
+        assert!(created.path.ends_with("out.txt"));
+        assert_eq!(fs::read_to_string(&file).unwrap(), "first\n");
+
+        // An existing file: overwritten with the full new contents (not appended).
+        let overwritten = write_file(file.to_str().unwrap(), "second\n");
+        assert!(overwritten.ok);
+        assert_eq!(fs::read_to_string(&file).unwrap(), "second\n");
+    }
+
+    #[test]
+    fn write_file_reports_io_failure_as_not_ok_with_a_message() {
+        // A path whose parent directory does not exist cannot be written.
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("no-such-dir").join("x.txt");
+
+        let result = write_file(missing.to_str().unwrap(), "data");
+        assert!(!result.ok);
+        assert!(result.message.is_some());
+        // The unresolved input path is echoed back (canonicalize is skipped on failure).
+        assert_eq!(result.path, missing.to_str().unwrap());
+    }
+
+    #[test]
     fn search_matches_filenames_case_insensitively_and_skips_heavy_dirs() {
         let dir = tempfile::tempdir().unwrap();
         fs::write(dir.path().join("README.md"), b"x").unwrap();

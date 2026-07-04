@@ -125,6 +125,17 @@ describe("App", () => {
     expect(screen.getByRole("heading", { name: "Repositories" })).toBeTruthy();
   });
 
+  it("opens the Settings modal and closes it back to the cockpit", () => {
+    renderCockpit();
+
+    fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+    expect(screen.getByRole("dialog", { name: "Settings" })).toBeTruthy();
+
+    // The backdrop closes the modal (onClose → back to the Hub).
+    fireEvent.click(screen.getByRole("button", { name: "Close settings" }));
+    expect(screen.queryByRole("dialog", { name: "Settings" })).toBeNull();
+  });
+
   it("switches to the spend view", async () => {
     renderCockpit();
 
