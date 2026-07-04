@@ -51,6 +51,10 @@ export interface WireClient {
       `file_contents` event via `subscribe` (correlate by its `path`); a denied/binary/
       oversized read rejects this promise with the bridge's error. */
   readFile(path: string): Promise<void>;
+  /** Write a file's full text (the in-app editor's Save). The answer arrives as a
+      `file_written` event via `subscribe` (correlate by its `path`), followed by a fresh
+      `file_contents`; a denied/failed write rejects this promise or reports `ok: false`. */
+  writeFile(path: string, content: string): Promise<void>;
   /** Recursively search a root for files whose name contains `query`. The answer
       arrives as a `search_results` event via `subscribe` (correlate by root+query). */
   searchFiles(root: string, query: string): Promise<void>;

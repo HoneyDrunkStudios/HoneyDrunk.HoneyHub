@@ -414,6 +414,49 @@ async fn handle_command(
                     .and_then(|()| honeyhub_bridge::read_file(&path))
                     .map(|file| one(BridgeEvent::file_contents(new_id(), now_rfc3339(), file)))
             }
+            ClientCommand::WriteFile { path, content } => {
+                // Gate the write to an allowlisted root. `workspace_allows` canonicalizes,
+                // and canonicalize requires the path to exist — so for a NEW file we gate
+                // the parent directory instead (which must exist and be allowlisted). The
+                // allowlist gate is a canonicalized starts_with check, so this also blocks
+                // `..` escapes out of an allowlisted root.
+                let target = std::path::Path::new(&path);
+                let gate = if target.exists() {
+                    require(runtime.workspace_allows(&path), "file")
+                } else {
+                    match target.parent() {
+                        Some(parent) if parent.exists() => {
+                            require(runtime.workspace_allows(&parent.to_string_lossy()), "file")
+                        }
+                        _ => Err(BridgeError::new(
+                            "workspace_not_allowed",
+                            "file is outside an allowlisted workspace root",
+                        )),
+                    }
+                };
+                gate.map(|()| {
+                    let result = honeyhub_bridge::write_file(&path, &content);
+                    // Audit the write: path and byte count only, never the content.
+                    eprintln!(
+                        "bridge-host: write_file {path} ({} bytes, ok={})",
+                        content.len(),
+                        result.ok
+                    );
+                    let mut events = vec![BridgeEvent::file_written(
+                        new_id(),
+                        now_rfc3339(),
+                        result.clone(),
+                    )];
+                    // On success, re-emit fresh contents so the viewer reflects the save.
+                    if result.ok {
+                        if let Ok(file) = honeyhub_bridge::read_file(&path) {
+                            events.push(BridgeEvent::file_contents(new_id(), now_rfc3339(), file));
+                        }
+                    }
+                    events
+                })
+                .map(Some)
+            }
             ClientCommand::ResolveWorkspaceFile { path } => {
                 // Unscoped like browse: the user selects a .code-workspace to *add* its
                 // repos as roots, so it must be readable before those roots exist. It

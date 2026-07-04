@@ -235,6 +235,44 @@ pub fn read_file(path: &str) -> Result<FileContents, BridgeError> {
     })
 }
 
+/// The outcome of a host-owned file write (the in-app editor's Save), surfaced to the
+/// UI as feedback. A failed write reports as `ok: false` with the io error in `message`
+/// rather than as a transport error, mirroring [`crate::git::GitOpResult`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FileWriteResult {
+    pub path: String,
+    pub ok: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+}
+
+/// Write `content` to `path` as the file's full new contents (overwrites if it exists,
+/// creates it if new). The caller (the host) gates `path` against the workspace
+/// allowlist before calling, so writes only ever land inside a root the user explicitly
+/// added. Reports the io outcome as a [`FileWriteResult`] — a failed write is `ok: false`
+/// with the io error string in `message`, never a fabricated success.
+pub fn write_file(path: &str, content: &str) -> FileWriteResult {
+    match std::fs::write(Path::new(path), content.as_bytes()) {
+        Ok(()) => {
+            let resolved = Path::new(path)
+                .canonicalize()
+                .map(|p| strip_unc(&p))
+                .unwrap_or_else(|_| path.to_string());
+            FileWriteResult {
+                path: resolved,
+                ok: true,
+                message: None,
+            }
+        }
+        Err(error) => FileWriteResult {
+            path: path.to_string(),
+            ok: false,
+            message: Some(error.to_string()),
+        },
+    }
+}
+
 /// The repo folders a VS Code `.code-workspace` file points at, resolved to absolute
 /// directory paths (the picker can add several repos from one file).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

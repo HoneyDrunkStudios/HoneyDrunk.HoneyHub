@@ -429,6 +429,18 @@ export class MockWireClient implements WireClient {
     this.emitDevice({ kind: "file_contents", file });
   }
 
+  async writeFile(path: string, content: string): Promise<void> {
+    this.emitDevice({ kind: "file_written", result: { path, ok: true } });
+    // Re-emit fresh contents so a subsequent read shows the saved text.
+    const file: FileContents = {
+      path,
+      content,
+      truncated: false,
+      byteSize: new TextEncoder().encode(content).length
+    };
+    this.emitDevice({ kind: "file_contents", file });
+  }
+
   async searchFiles(root: string, query: string): Promise<void> {
     const all = [
       "/demo/HoneyHub/README.md",

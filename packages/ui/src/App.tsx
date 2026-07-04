@@ -27,7 +27,7 @@ import { RunScreen } from "./routes/run/RunScreen";
 import { SpendView } from "./routes/spend/SpendView";
 import { CoachingView } from "./routes/coaching/CoachingView";
 import { AgentsView } from "./routes/agents/AgentsView";
-import { BrowseView } from "./routes/browse/BrowseView";
+import { RepositoriesView } from "./routes/repositories/RepositoriesView";
 import { RunsView } from "./routes/runs/RunsView";
 import {
   applyRunEvent,
@@ -50,7 +50,6 @@ import { PlanView } from "./routes/plan/PlanView";
 import { WorkView } from "./routes/work/WorkView";
 import { ObserveView } from "./routes/observe/ObserveView";
 import { JobsView } from "./routes/jobs/JobsView";
-import { GitView } from "./routes/git/GitView";
 import { UpdatesView } from "./routes/updates/UpdatesView";
 import { Onboarding } from "./routes/onboarding/Onboarding";
 import {
@@ -76,8 +75,7 @@ type View =
   | "work"
   | "jobs"
   | "observe"
-  | "git"
-  | "browse"
+  | "repositories"
   | "spend"
   | "coaching"
   | "agents"
@@ -108,8 +106,7 @@ const PRIMARY_NAV: NavItem[] = [
   { view: "work", label: "Work", icon: <IconInbox /> },
   { view: "jobs", label: "Jobs", icon: <IconPulse /> },
   { view: "observe", label: "Observe", icon: <IconGauge /> },
-  { view: "browse", label: "Browse", icon: <IconFiles /> },
-  { view: "git", label: "Git", icon: <IconBranch /> },
+  { view: "repositories", label: "Repositories", icon: <IconFiles /> },
   { view: "spend", label: "Spend", icon: <IconCoins /> },
   { view: "coaching", label: "Coaching", icon: <IconSpark /> },
   { view: "agents", label: "Agents", icon: <IconGrid /> }
@@ -556,21 +553,10 @@ export function App({ client }: AppProps = {}) {
             <JobsView client={wireClient} active={view === "jobs"} />
           </div>
 
-          <div hidden={view !== "browse"}>
-            <BrowseView
+          <div hidden={view !== "repositories"}>
+            <RepositoriesView
               client={wireClient}
-              workspaceRoots={settings.workspaceRoots}
-              active={view === "browse"}
-              {...(settings.defaultWorkspaceRoot === undefined
-                ? {}
-                : { defaultWorkspaceRoot: settings.defaultWorkspaceRoot })}
-            />
-          </div>
-
-          <div hidden={view !== "git"}>
-            <GitView
-              client={wireClient}
-              active={view === "git"}
+              active={view === "repositories"}
               workspaceRoots={settings.workspaceRoots}
               {...(settings.defaultWorkspaceRoot === undefined
                 ? {}
@@ -732,17 +718,6 @@ function IconHome() {
     <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2">
       <path d="M4 11l8-6 8 6" strokeLinecap="round" strokeLinejoin="round" />
       <path d="M6 10v9h12v-9" strokeLinecap="round" strokeLinejoin="round" />
-    </svg>
-  );
-}
-
-function IconBranch() {
-  return (
-    <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2">
-      <circle cx="6" cy="6" r="2.5" />
-      <circle cx="6" cy="18" r="2.5" />
-      <circle cx="18" cy="8" r="2.5" />
-      <path d="M6 8.5v7M18 10.5c0 4-6 2.5-6 5.5" strokeLinecap="round" />
     </svg>
   );
 }

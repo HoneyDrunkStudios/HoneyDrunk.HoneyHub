@@ -5,7 +5,7 @@ use crate::artifact::DispatchArtifact;
 use crate::backend_catalog::BackendCapability;
 use crate::checks::CheckOutcome;
 use crate::environment::EnvironmentInfo;
-use crate::fsbrowse::{DirListing, FileContents, SearchResults, WorkspaceFolders};
+use crate::fsbrowse::{DirListing, FileContents, FileWriteResult, SearchResults, WorkspaceFolders};
 use crate::git::{GitBranches, GitDiff, GitOpResult, GitOverview, GitStatus};
 use crate::grafana::GrafanaSummary;
 use crate::jobs::{JobProbe, JobSnapshot};
@@ -185,6 +185,14 @@ pub enum ClientCommand {
     /// [`BridgeEventPayload::FileContents`] (or an error for binary/oversized/denied).
     ReadFile {
         path: String,
+    },
+    /// Write a file's full UTF-8 text (the in-app editor's Save). The host gates the
+    /// target against the workspace allowlist (the target itself when it exists, else its
+    /// parent directory for a new file) and answers with a
+    /// [`BridgeEventPayload::FileWritten`] result.
+    WriteFile {
+        path: String,
+        content: String,
     },
     /// Recursively search a root for files whose name contains `query` (read-only).
     /// The host gates `root` against the allowlist and answers with a
@@ -783,6 +791,23 @@ impl BridgeEvent {
             sequence: 0,
             created_at: created_at.into(),
             payload: BridgeEventPayload::FileContents { file },
+        }
+    }
+
+    /// A device-wide file-written event (the in-app editor's Save). Not scoped to a run
+    /// or session, so `session_id`/`run_id` are empty and `sequence` is `0`.
+    pub fn file_written(
+        id: impl Into<String>,
+        created_at: impl Into<String>,
+        result: FileWriteResult,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            session_id: String::new(),
+            run_id: String::new(),
+            sequence: 0,
+            created_at: created_at.into(),
+            payload: BridgeEventPayload::FileWritten { result },
         }
     }
 
@@ -1388,6 +1413,9 @@ pub enum BridgeEventPayload {
     FileContents {
         file: FileContents,
     },
+    FileWritten {
+        result: FileWriteResult,
+    },
     SearchResults {
         results: SearchResults,
     },
@@ -1625,6 +1653,47 @@ mod tests {
                 "sessionIdOrTranscript": "session-1"
             })
         );
+    }
+
+    #[test]
+    fn serializes_write_file_command_and_file_written_event() {
+        // The command tag is snake_case and its fields camelCase.
+        let command = ClientCommand::WriteFile {
+            path: "C:/work/a.txt".to_string(),
+            content: "hello".to_string(),
+        };
+        assert_eq!(
+            serde_json::to_value(command).expect("command serializes"),
+            json!({
+                "kind": "write_file",
+                "path": "C:/work/a.txt",
+                "content": "hello"
+            })
+        );
+
+        // The event payload tag is snake_case and the result's fields camelCase; the
+        // optional `message` is omitted when absent.
+        let event = BridgeEvent::file_written(
+            "e",
+            "2026-07-04T00:00:00Z",
+            FileWriteResult {
+                path: "C:/work/a.txt".to_string(),
+                ok: true,
+                message: None,
+            },
+        );
+        let value = serde_json::to_value(&event).expect("event serializes");
+        assert_eq!(value["payload"]["kind"], json!("file_written"));
+        assert_eq!(value["payload"]["result"]["path"], json!("C:/work/a.txt"));
+        assert_eq!(value["payload"]["result"]["ok"], json!(true));
+        assert!(value["payload"]["result"].get("message").is_none());
+
+        // And it round-trips back to the same variant.
+        let decoded: BridgeEvent = serde_json::from_value(value).expect("event deserializes");
+        assert!(matches!(
+            decoded.payload,
+            BridgeEventPayload::FileWritten { .. }
+        ));
     }
 
     #[test]
@@ -2184,6 +2253,17 @@ mod tests {
                 }),
             ),
             BridgeEventPayload::FileContents { .. }
+        );
+        check!(
+            BridgeEvent::file_written(
+                "e",
+                at,
+                from_json!(FileWriteResult, {
+                    "path": "C:/work/a.txt",
+                    "ok": true
+                }),
+            ),
+            BridgeEventPayload::FileWritten { .. }
         );
         check!(
             BridgeEvent::search_results(

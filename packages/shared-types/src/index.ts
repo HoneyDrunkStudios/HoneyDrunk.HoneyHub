@@ -340,6 +340,14 @@ export interface FileContents {
   byteSize: number;
 }
 
+/** The outcome of a host-owned file write (the in-app editor's Save), surfaced as
+    feedback. A failed write is `ok: false` with the io error in `message`. */
+export interface FileWriteResult {
+  path: string;
+  ok: boolean;
+  message?: string;
+}
+
 /** A filename-search match (the in-repo file search). */
 export interface SearchHit {
   path: string;
@@ -929,6 +937,7 @@ export type ClientCommand =
   | { kind: "set_workspace_roots"; roots: string[] }
   | { kind: "browse_dir"; path?: string }
   | { kind: "read_file"; path: string }
+  | { kind: "write_file"; path: string; content: string }
   | { kind: "search_files"; root: string; query: string }
   | { kind: "resolve_workspace_file"; path: string }
   | {
@@ -1071,6 +1080,7 @@ export type BridgeEventPayload =
   | { kind: "backend_catalog"; backends: BackendCapability[] }
   | { kind: "dir_listing"; listing: DirListing }
   | { kind: "file_contents"; file: FileContents }
+  | { kind: "file_written"; result: FileWriteResult }
   | { kind: "search_results"; results: SearchResults }
   | { kind: "workspace_folders"; folders: WorkspaceFolders }
   | { kind: "agent_written"; agent: AgentWriteOutcome }

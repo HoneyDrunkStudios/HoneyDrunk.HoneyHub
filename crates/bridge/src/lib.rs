@@ -54,8 +54,9 @@ pub use coaching::{coach, CoachingSnapshot};
 pub use core::{BridgeRuntime, ManagedRun, ReplyOutcome};
 pub use environment::{detect_environment, BackendVersion, EnvironmentInfo};
 pub use fsbrowse::{
-    browse_dir, is_workspace_file, read_file, resolve_workspace_file, search_files, DirEntry,
-    DirEntryKind, DirListing, FileContents, SearchHit, SearchResults, WorkspaceFolders,
+    browse_dir, is_workspace_file, read_file, resolve_workspace_file, search_files, write_file,
+    DirEntry, DirEntryKind, DirListing, FileContents, FileWriteResult, SearchHit, SearchResults,
+    WorkspaceFolders,
 };
 pub use git::{
     branches as git_branches, checkout as git_checkout, commit as git_commit,

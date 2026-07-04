@@ -35,6 +35,7 @@ class FakeClient implements WireClient {
   async setWorkspaceRoots(): Promise<void> {}
   async browseDir(): Promise<void> {}
   async readFile(): Promise<void> {}
+  async writeFile(): Promise<void> {}
   async searchFiles(): Promise<void> {}
   async resolveWorkspaceFile(): Promise<void> {}
   async writeAgent(): Promise<void> {}

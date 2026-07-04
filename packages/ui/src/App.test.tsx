@@ -117,12 +117,12 @@ describe("App", () => {
     ).toBeTruthy();
   });
 
-  it("switches to the browse view", () => {
+  it("switches to the repositories view", () => {
     renderCockpit();
 
-    fireEvent.click(screen.getByRole("button", { name: "Browse" }));
+    fireEvent.click(screen.getByRole("button", { name: "Repositories" }));
 
-    expect(screen.getByRole("heading", { name: "Your repos" })).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "Repositories" })).toBeTruthy();
   });
 
   it("switches to the spend view", async () => {

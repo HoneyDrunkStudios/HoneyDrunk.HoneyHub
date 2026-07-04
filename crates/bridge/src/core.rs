@@ -1156,6 +1156,13 @@ fn validate_stream_payload(
                 "a backend stream must not emit device-wide file contents",
             ));
         }
+        BridgeEventPayload::FileWritten { .. } => {
+            // Device-wide, host-synthesized file-write result — never streamed.
+            return Err(BridgeError::new(
+                "event_unexpected_file_written",
+                "a backend stream must not emit device-wide file-write results",
+            ));
+        }
         BridgeEventPayload::SearchResults { .. } => {
             // Device-wide, host-synthesized search result — never streamed.
             return Err(BridgeError::new(
@@ -2911,6 +2918,16 @@ mod tests {
                 },
             }),
             "event_unexpected_file_contents"
+        );
+        assert_eq!(
+            err_code(BridgeEventPayload::FileWritten {
+                result: crate::fsbrowse::FileWriteResult {
+                    path: "x".to_string(),
+                    ok: true,
+                    message: None,
+                },
+            }),
+            "event_unexpected_file_written"
         );
         assert_eq!(
             err_code(BridgeEventPayload::SearchResults {
