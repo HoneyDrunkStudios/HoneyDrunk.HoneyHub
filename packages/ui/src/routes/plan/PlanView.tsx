@@ -195,7 +195,7 @@ function RoadmapEmptyState({
           <code>initiatives/current-focus.md</code>: the ranked lanes &amp; what&rsquo;s next
         </li>
         <li>
-          <code>initiatives/programs/*.md</code>: per-lane detail
+          <code>initiatives/projects/*.md</code>: per-lane detail
         </li>
         <li>
           <code>initiatives/roadmap.md</code>: the longer horizon

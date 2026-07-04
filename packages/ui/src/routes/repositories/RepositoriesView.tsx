@@ -48,7 +48,7 @@ function childPath(parent: string, name: string): string {
 }
 
 /**
- * Repositories: HoneyHub's IDE surface (PDR-0011 Amendment 2). One page that merges the
+ * Repositories: HoneyHub's IDE surface (PRD-0011 Amendment 2). One page that merges the
  * old Browse + Git surfaces: an explorer tree on the left, a source-control panel with
  * multi-select and a right-click menu, and a center pane that views a file (syntax
  * highlighted), edits it in place (saved through the bridge's `write_file` boundary,
