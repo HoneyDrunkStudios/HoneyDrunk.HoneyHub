@@ -2563,9 +2563,26 @@ mod tests {
                     "body": "done",
                     "createdAt": at
                 })],
-                None,
+                Some(crate::session::UsageSummary::from_signals(&[], 1)),
             ),
             BridgeEventPayload::SessionDetail { .. }
+        );
+        check!(
+            BridgeEvent::usage_probe(
+                "e",
+                at,
+                crate::usage_probe::UsageProbeReport {
+                    backend: crate::adapter::AgentBackend::ClaudeLocal,
+                    ok: true,
+                    windows: vec![crate::usage_probe::UsageWindow {
+                        line: "Current session 5% used".to_string(),
+                        used_percent: Some(5.0),
+                    }],
+                    raw: "raw".to_string(),
+                    captured_at: at.to_string(),
+                },
+            ),
+            BridgeEventPayload::UsageProbe { .. }
         );
         check!(
             BridgeEvent::roadmap(

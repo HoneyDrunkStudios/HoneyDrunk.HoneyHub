@@ -3062,6 +3062,18 @@ mod tests {
             "event_unexpected_session_detail"
         );
         assert_eq!(
+            err_code(BridgeEventPayload::UsageProbe {
+                report: crate::usage_probe::UsageProbeReport {
+                    backend: crate::adapter::AgentBackend::ClaudeLocal,
+                    ok: true,
+                    windows: Vec::new(),
+                    raw: String::new(),
+                    captured_at: String::new(),
+                },
+            }),
+            "event_unexpected_usage_probe"
+        );
+        assert_eq!(
             err_code(BridgeEventPayload::Roadmap {
                 roadmap: crate::roadmap::RoadmapSnapshot {
                     found: false,
