@@ -49,6 +49,9 @@ struct Host {
     /// Roots with a group check currently in flight — overlapping requests for the
     /// same root are refused so repeated clicks can't stack subprocesses.
     active_checks: Mutex<std::collections::HashSet<String>>,
+    /// Backends with a usage probe in flight (single-flight: each probe boots a full
+    /// vendor TUI, so repeated clicks or multiple cockpits must not stack them).
+    active_probes: Mutex<std::collections::HashSet<String>>,
     events: broadcast::Sender<BridgeEvent>,
     /// The live filesystem watcher (the recommended OS-native backend) plus the roots it is
     /// currently watching. Re-pointed whenever the workspace allowlist changes. `None` until
@@ -91,6 +94,7 @@ pub async fn serve(
         runtime: Mutex::new(runtime),
         active_runs: Mutex::new(std::collections::HashSet::new()),
         active_checks: Mutex::new(std::collections::HashSet::new()),
+        active_probes: Mutex::new(std::collections::HashSet::new()),
         events: events_tx,
         watcher: Mutex::new(None),
     });
@@ -903,12 +907,6 @@ fn new_id() -> String {
     uuid::Uuid::new_v4().to_string()
 }
 
-/// Run a named check without holding the runtime lock: reserve the per-root
-/// in-flight slot (refusing overlaps with an explicit `denied` outcome), execute on
-/// a blocking thread (the runner itself enforces the id allowlist, the timeout with
-/// a process-tree kill, and output caps), and **broadcast** the `check_result` so
-/// every connected cockpit sees it — including one that reconnected mid-check, as
-/// long as it is connected when the check finishes.
 /// Run a plan-usage probe without holding the runtime lock: resolve the backend's
 /// CLI program (honoring the same env overrides the adapters use), execute the PTY
 /// probe on a blocking thread, and **broadcast** the report so every connected
@@ -916,6 +914,35 @@ fn new_id() -> String {
 fn spawn_usage_probe(host: &Arc<Host>, backend: honeyhub_bridge::AgentBackend, cwd: String) {
     let host = Arc::clone(host);
     tokio::spawn(async move {
+        let refuse = |host: &Host, reason: &str| {
+            let _ = host.events.send(BridgeEvent::usage_probe(
+                new_id(),
+                now_rfc3339(),
+                honeyhub_bridge::UsageProbeReport {
+                    backend,
+                    ok: false,
+                    windows: Vec::new(),
+                    raw: reason.to_string(),
+                    captured_at: now_rfc3339(),
+                },
+            ));
+        };
+        // A vendor CLI only launches inside an allowlisted workspace root (the same
+        // trust posture as every other local exec) — no root, no probe.
+        if cwd.trim().is_empty() || cwd.trim() == "." {
+            refuse(
+                &host,
+                "no allowlisted workspace root to run the probe in — add one in Settings",
+            );
+            return;
+        }
+        // Single-flight per backend: each probe boots a full vendor TUI; repeated
+        // clicks or multiple cockpits must not stack hidden sessions.
+        let probe_key = format!("{backend:?}");
+        if !host.active_probes.lock().await.insert(probe_key.clone()) {
+            refuse(&host, "a usage probe for this backend is already running");
+            return;
+        }
         let program = match backend {
             honeyhub_bridge::AgentBackend::ClaudeLocal => {
                 std::env::var("HONEYHUB_CLAUDE_PROGRAM").unwrap_or_else(|_| "claude".to_string())
@@ -937,12 +964,19 @@ fn spawn_usage_probe(host: &Arc<Host>, backend: honeyhub_bridge::AgentBackend, c
             raw: "the probe task panicked or was cancelled".to_string(),
             captured_at: now_rfc3339(),
         });
+        host.active_probes.lock().await.remove(&probe_key);
         let _ = host
             .events
             .send(BridgeEvent::usage_probe(new_id(), now_rfc3339(), report));
     });
 }
 
+/// Run a named check without holding the runtime lock: reserve the per-root
+/// in-flight slot (refusing overlaps with an explicit `denied` outcome), execute on
+/// a blocking thread (the runner itself enforces the id allowlist, the timeout with
+/// a process-tree kill, and output caps), and **broadcast** the `check_result` so
+/// every connected cockpit sees it — including one that reconnected mid-check, as
+/// long as it is connected when the check finishes.
 fn spawn_check(host: &Arc<Host>, root: String, check: String) {
     let host = Arc::clone(host);
     tokio::spawn(async move {

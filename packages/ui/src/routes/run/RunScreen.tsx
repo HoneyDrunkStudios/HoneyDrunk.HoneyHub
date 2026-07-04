@@ -1184,6 +1184,18 @@ export function RunScreen({
                                 disabled={probing[backend] === true}
                                 onClick={() => {
                                   setProbing((prev) => ({ ...prev, [backend]: true }));
+                                  // Safety valve: if the report never arrives (bridge
+                                  // restart mid-probe), re-enable the button rather
+                                  // than leaving it stuck on "Checking…" forever.
+                                  window.setTimeout(
+                                    () =>
+                                      setProbing((prev) =>
+                                        prev[backend] === true
+                                          ? { ...prev, [backend]: false }
+                                          : prev
+                                      ),
+                                    45_000
+                                  );
                                   void client.probeUsage(backend).catch(() =>
                                     setProbing((prev) => ({ ...prev, [backend]: false }))
                                   );
@@ -1202,7 +1214,7 @@ export function RunScreen({
                             {backendLabel(report.backend)} · as of{" "}
                             {formatLocalTime(report.capturedAt)}
                           </p>
-                          {report.windows.length > 0 ? (
+                          {report.windows.length > 0 && (
                             <ul className="usage-windows">
                               {report.windows.map((window, index) => (
                                 <li key={`${report.backend}-${index}`}>
@@ -1220,14 +1232,20 @@ export function RunScreen({
                                 </li>
                               ))}
                             </ul>
-                          ) : (
-                            <details className="usage-raw">
-                              <summary>
-                                {report.ok ? "raw capture (layout not recognized)" : "probe failed"}
-                              </summary>
-                              <pre>{report.raw}</pre>
-                            </details>
                           )}
+                          {/* The raw capture is always inspectable — the parser is a
+                              heuristic over vendor TUIs, so the source of truth stays
+                              one click away (and IS the answer when parsing failed). */}
+                          <details className="usage-raw">
+                            <summary>
+                              {report.ok
+                                ? report.windows.length > 0
+                                  ? "raw capture"
+                                  : "raw capture (layout not recognized)"
+                                : "probe failed"}
+                            </summary>
+                            <pre>{report.raw}</pre>
+                          </details>
                         </div>
                       ))}
                     </div>

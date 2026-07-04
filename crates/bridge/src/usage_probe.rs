@@ -90,6 +90,30 @@ fn usage_command(backend: AgentBackend) -> Option<&'static str> {
     }
 }
 
+/// Kill the probe's CLI and everything it spawned. `kill` alone takes only the
+/// immediate process — on the Windows shim path (`cmd /c claude.cmd`) that is the
+/// shim, orphaning the real CLI underneath. `taskkill /T` takes the whole tree; on
+/// Unix the PTY child leads the session and dropping the master HUPs stragglers.
+fn kill_probe_child(child: &mut dyn portable_pty::Child) {
+    #[cfg(windows)]
+    if let Some(pid) = child.process_id() {
+        let _ = std::process::Command::new("taskkill")
+            .args(["/PID", &pid.to_string(), "/T", "/F"])
+            .output();
+    }
+    let _ = child.kill();
+}
+
+/// True when the captured (stripped) text shows Claude Code's folder-trust prompt.
+/// The probe must detect this BEFORE typing anything: its Enter keystroke would land
+/// on the dialog's highlighted "Yes, I trust" default and grant trust the operator
+/// never gave.
+pub(crate) fn detect_trust_prompt(stripped: &str) -> bool {
+    stripped.contains("Quick safety check")
+        || stripped.contains("trust this folder")
+        || stripped.contains("Do you trust the files in this folder")
+}
+
 /// True when `haystack` contains `needle` as a byte subsequence.
 fn contains_seq(haystack: &[u8], needle: &[u8]) -> bool {
     haystack
@@ -275,6 +299,13 @@ pub fn probe_usage(
     let Some(command_text) = usage_command(backend) else {
         return not_run("this backend exposes no usage surface".to_string());
     };
+    // A vendor CLI only ever launches inside an allowlisted workspace root — the
+    // same trust posture as every other local exec. No root, no probe.
+    if cwd.trim().is_empty() || cwd.trim() == "." {
+        return not_run(
+            "no allowlisted workspace root to run the probe in — add one in Settings".to_string(),
+        );
+    }
 
     // Resolve the CLI through PATH/PATHEXT (the adapters' resolver): on Windows the
     // npm shims are `claude.cmd` / `codex.cmd`, which CreateProcess cannot launch
@@ -316,16 +347,19 @@ pub fn probe_usage(
     let mut reader = match pair.master.try_clone_reader() {
         Ok(reader) => reader,
         Err(error) => {
-            let _ = child.kill();
+            kill_probe_child(child.as_mut());
             return not_run(format!("could not read the pty: {error}"));
         }
     };
+    let debug = std::env::var("HONEYHUB_USAGE_PROBE_DEBUG").is_ok();
     std::thread::spawn(move || {
         let mut buffer = [0u8; 8192];
         loop {
             match reader.read(&mut buffer) {
                 Ok(0) => {
-                    eprintln!("[usage-probe] reader: EOF");
+                    if debug {
+                        eprintln!("[usage-probe] reader: EOF");
+                    }
                     break;
                 }
                 Ok(count) => {
@@ -334,7 +368,9 @@ pub fn probe_usage(
                     }
                 }
                 Err(error) => {
-                    eprintln!("[usage-probe] reader error: {error}");
+                    if debug {
+                        eprintln!("[usage-probe] reader error: {error}");
+                    }
                     break;
                 }
             }
@@ -343,7 +379,7 @@ pub fn probe_usage(
     let mut writer = match pair.master.take_writer() {
         Ok(writer) => writer,
         Err(error) => {
-            let _ = child.kill();
+            kill_probe_child(child.as_mut());
             return not_run(format!("could not write to the pty: {error}"));
         }
     };
@@ -371,7 +407,25 @@ pub fn probe_usage(
         // its composer). The text goes once the TUI painted and either went idle OR
         // has been booting past the ceiling (a background spinner can repaint
         // forever while the composer is already usable — Codex during MCP startup).
+        //
+        // BEFORE any keystroke: check the capture for Claude Code's folder-trust
+        // prompt. Typing into that dialog would land Enter on its highlighted
+        // "Yes, I trust" default — granting trust the operator never gave. Detected
+        // trust prompts abort the probe instead.
         if sent_at.is_none() && !captured.is_empty() {
+            if detect_trust_prompt(&strip_ansi(&String::from_utf8_lossy(&captured))) {
+                kill_probe_child(child.as_mut());
+                return UsageProbeReport {
+                    backend,
+                    ok: true,
+                    windows: Vec::new(),
+                    raw: "[probe] Claude Code is waiting on its folder-trust prompt for this \
+                          workspace. Open Claude Code there once, accept the prompt, then \
+                          re-check. (The probe never answers trust prompts for you.)"
+                        .to_string(),
+                    captured_at,
+                };
+            }
             match typed_at {
                 None if last_output.elapsed() >= quiet || started.elapsed() >= boot_max => {
                     let _ = writer.write_all(command_text.as_bytes());
@@ -389,7 +443,17 @@ pub fn probe_usage(
         }
         match receiver.recv_timeout(Duration::from_millis(200)) {
             Ok(chunk) => {
-                respond_to_terminal_queries(&chunk, &mut writer);
+                // Scan with an 8-byte tail from the previous data so a capability
+                // query split across chunk boundaries still gets its reply.
+                let scan: Vec<u8> = captured
+                    .iter()
+                    .rev()
+                    .take(8)
+                    .rev()
+                    .copied()
+                    .chain(chunk.iter().copied())
+                    .collect();
+                respond_to_terminal_queries(&scan, &mut writer);
                 captured.extend_from_slice(&chunk);
                 last_output = Instant::now();
             }
@@ -411,7 +475,7 @@ pub fn probe_usage(
         Ok(Some(status)) => format!("\n[probe] the CLI exited early: {status}"),
         _ => String::new(),
     };
-    let _ = child.kill();
+    kill_probe_child(child.as_mut());
 
     if std::env::var("HONEYHUB_USAGE_PROBE_DEBUG").is_ok() {
         eprintln!("[usage-probe] captured {} bytes", captured.len());
@@ -495,6 +559,59 @@ mod tests {
             }
             println!("--- raw ---\n{}\n", report.raw);
         }
+    }
+
+    #[test]
+    fn refuses_to_probe_without_an_allowlisted_workspace_root() {
+        for cwd in ["", "   ", "."] {
+            let report = probe_usage(
+                AgentBackend::ClaudeLocal,
+                "claude",
+                cwd,
+                "2026-07-04T00:00:00Z".to_string(),
+            );
+            assert!(!report.ok, "cwd {cwd:?} must be refused");
+            assert!(report.raw.contains("workspace root"));
+        }
+    }
+
+    #[test]
+    fn detects_the_folder_trust_prompt_before_any_keystroke_would_be_sent() {
+        assert!(detect_trust_prompt(
+            "Quick safety check: Is this a project you created or one you trust?"
+        ));
+        assert!(detect_trust_prompt(
+            "1. Yes, I trust this folder 2. No, exit"
+        ));
+        assert!(!detect_trust_prompt(
+            "Current session 5% used · Resets 12:50pm"
+        ));
+    }
+
+    #[test]
+    fn usage_probe_report_serializes_camel_case_and_round_trips() {
+        let report = UsageProbeReport {
+            backend: AgentBackend::CodexLocal,
+            ok: true,
+            windows: vec![UsageWindow {
+                line: "Weekly limit: 22% left".to_string(),
+                used_percent: Some(78.0),
+            }],
+            raw: "raw".to_string(),
+            captured_at: "2026-07-04T00:00:00Z".to_string(),
+        };
+        let json = serde_json::to_string(&report).expect("serializes");
+        assert!(json.contains("\"capturedAt\""));
+        assert!(json.contains("\"usedPercent\""));
+        let back: UsageProbeReport = serde_json::from_str(&json).expect("parses");
+        assert_eq!(back, report);
+        // A window without a percent omits the field entirely (additive-friendly).
+        let bare = serde_json::to_string(&UsageWindow {
+            line: "x".to_string(),
+            used_percent: None,
+        })
+        .expect("serializes");
+        assert!(!bare.contains("usedPercent"));
     }
 
     #[test]
