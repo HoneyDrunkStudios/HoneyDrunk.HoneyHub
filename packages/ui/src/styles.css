@@ -3876,6 +3876,113 @@ h2 {
   cursor: default;
 }
 
+/* --- Settings modal (left section-nav + scrollable pane) --- */
+.settings-modal {
+  position: fixed;
+  z-index: 41;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  display: grid;
+  grid-template-columns: 200px 1fr;
+  width: min(880px, calc(100vw - 32px));
+  max-height: 85vh;
+  overflow: hidden;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-card);
+  outline: none;
+}
+
+.settings-modal-nav {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 16px 10px;
+  background: var(--panel-2);
+  border-right: 1px solid var(--border);
+  overflow-y: auto;
+}
+
+.settings-modal-nav-item {
+  appearance: none;
+  text-align: left;
+  padding: 8px 12px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-muted);
+  font: inherit;
+  cursor: pointer;
+}
+
+.settings-modal-nav-item:hover {
+  background: var(--hover);
+  color: var(--text);
+}
+
+.settings-modal-nav-item.is-active {
+  background: var(--hover);
+  color: var(--text);
+  box-shadow: inset 2px 0 0 var(--honey);
+}
+
+.settings-modal-body {
+  padding: 20px 24px 24px;
+  overflow-y: auto;
+}
+
+.settings-modal-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.settings-modal-head h2 {
+  margin: 0;
+}
+
+.settings-modal-close {
+  appearance: none;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--panel-2);
+  color: var(--text-muted);
+  width: 30px;
+  height: 30px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.settings-modal-close:hover {
+  background: var(--hover);
+  color: var(--text);
+}
+
+.page-prefs-hint {
+  color: var(--text-muted);
+  margin: 0 0 12px;
+}
+
+.page-prefs-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.page-prefs-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+}
+
 .ws-popover {
   position: absolute;
   bottom: calc(100% + 8px);

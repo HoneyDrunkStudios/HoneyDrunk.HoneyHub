@@ -7,9 +7,7 @@ import {
   type ReactElement
 } from "react";
 import type { AgentBackend, BackendCapability } from "@honeydrunk/honeyhub-types";
-import { BridgeSettings } from "./BridgeSettings";
 import { NotificationList } from "./NotificationList";
-import { NotificationsSettings } from "./NotificationsSettings";
 import {
   loadNotificationFeed,
   loadNotificationPrefs,
@@ -21,7 +19,6 @@ import {
   type NotificationPrefs
 } from "./notifications";
 import { useNotifications } from "./useNotifications";
-import { ThemeSettings } from "./ThemeSettings";
 import { applyTheme, loadTheme, saveTheme, type ThemeId } from "./theme";
 import { RunScreen } from "./routes/run/RunScreen";
 import { SpendView } from "./routes/spend/SpendView";
@@ -40,6 +37,14 @@ import { GoalsView } from "./routes/goals/GoalsView";
 import { GoalOrchestrator } from "./routes/goals/goalOrchestrator";
 import { orderGoals, type GoalsState } from "./routes/goals/goalsModel";
 import { enabledIds, loadConnectorPrefs } from "./connectors";
+import {
+  isPageVisible,
+  loadPagePrefs,
+  savePagePrefs,
+  TOGGLEABLE_PAGES,
+  type PagePrefs
+} from "./pagePrefs";
+import { SettingsModal } from "./routes/settings/SettingsModal";
 import {
   KV_SUBSCRIPTIONS_CHANGED_EVENT,
   loadSelectedSubscriptions
@@ -174,6 +179,9 @@ export function App({ client }: AppProps = {}) {
   // The enabled connectors (work + observability), re-read when the view changes so editing
   // them in Settings → Connectors re-points the notification poll.
   const [connectorPrefs, setConnectorPrefs] = useState(loadConnectorPrefs);
+  // Which nav pages the operator keeps in the sidebar. Toggled in Settings → Pages; Runs and
+  // Goals default OFF (agent-first IDE reframe). Persisted like the other prefs.
+  const [pagePrefs, setPagePrefs] = useState<PagePrefs>(loadPagePrefs);
   // The Key Vault subscription selection (owned by the Observe panel, persisted locally). Held in
   // state and re-read on view change so the expiry-scan engine reliably consumes the current
   // selection rather than a value captured at one render.
@@ -270,6 +278,21 @@ export function App({ client }: AppProps = {}) {
     applyTheme(theme);
     saveTheme(theme);
   }, [theme]);
+
+  // Persist page-visibility prefs whenever they change, so a trimmed sidebar survives a relaunch.
+  useEffect(() => {
+    savePagePrefs(pagePrefs);
+  }, [pagePrefs]);
+
+  // If the currently-active page gets hidden (toggled off in Settings), fall back to the Hub so
+  // the operator is never stranded on a page whose nav button just vanished. Core pages
+  // (settings/updates/notifications, always-on) are exempt.
+  useEffect(() => {
+    const toggleable = TOGGLEABLE_PAGES.some((page) => page.view === view);
+    if (toggleable && !isPageVisible(pagePrefs, view)) {
+      setView("hub");
+    }
+  }, [view, pagePrefs]);
 
   // Opening the Alerts view marks everything read (so the unread badge clears when you look).
   // Idempotent — only rewrites when there's actually an unread item, so it can't loop.
@@ -375,7 +398,15 @@ export function App({ client }: AppProps = {}) {
 
   const unread = unreadCount(notifications);
   const renderNav = (items: NavItem[]) =>
-    items.map((item) => (
+    items
+      // Hide toggleable pages the operator has switched off. Core pages (not in
+      // TOGGLEABLE_PAGES) always render; their button can't be hidden.
+      .filter(
+        (item) =>
+          !TOGGLEABLE_PAGES.some((page) => page.view === item.view) ||
+          isPageVisible(pagePrefs, item.view)
+      )
+      .map((item) => (
       <button
         key={item.view}
         type="button"
@@ -580,20 +611,6 @@ export function App({ client }: AppProps = {}) {
             />
           </div>
 
-          <div hidden={view !== "settings"}>
-            <BridgeSettings
-              state={settings}
-              onChange={setSettings}
-              catalog={catalog}
-              client={wireClient}
-              active={view === "settings"}
-              plans={plans}
-              onPlansChange={setPlans}
-            />
-            <NotificationsSettings prefs={notificationPrefs} onChange={setNotificationPrefs} />
-            <ThemeSettings theme={theme} onChange={setTheme} />
-          </div>
-
           <div hidden={view !== "updates"}>
             <UpdatesView client={wireClient} active={view === "updates"} catalog={catalog} />
           </div>
@@ -648,6 +665,27 @@ export function App({ client }: AppProps = {}) {
           onRunStarted: (init) => setRuns((prev) => registerRun(prev, init))
         }}
       />
+
+      {/* Settings is a modal overlay (left section-nav + scrollable pane) rather than an inline
+          page, so its distinct groups are easier to tell apart. Mounted only while open; closing
+          returns to the Hub. */}
+      {view === "settings" && (
+        <SettingsModal
+          settings={settings}
+          onSettingsChange={setSettings}
+          catalog={catalog}
+          client={wireClient}
+          plans={plans}
+          onPlansChange={setPlans}
+          theme={theme}
+          onThemeChange={setTheme}
+          notificationPrefs={notificationPrefs}
+          onNotificationPrefsChange={setNotificationPrefs}
+          pagePrefs={pagePrefs}
+          onPagePrefsChange={setPagePrefs}
+          onClose={() => setView("hub")}
+        />
+      )}
     </div>
   );
 }
