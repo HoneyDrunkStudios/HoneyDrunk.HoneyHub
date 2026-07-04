@@ -488,6 +488,13 @@ pub enum ClientCommand {
         session_id: String,
         pinned: bool,
     },
+    /// Probe one backend's plan-usage meters (the TUI-only `/usage` / `/status`
+    /// panels) via a hidden host-owned PTY. Answered with a single
+    /// [`BridgeEventPayload::UsageProbe`]; supervised and one-shot (see
+    /// `usage_probe` module docs).
+    ProbeUsage {
+        backend: AgentBackend,
+    },
     /// Read the roadmap snapshot from the Architecture repo's `initiatives/current-focus.md`
     /// (control-hub #6). A read-only query carrying no fields; the host answers with a single
     /// [`BridgeEventPayload::Roadmap`] (`found: false` when no repo is present).
@@ -1287,6 +1294,7 @@ impl BridgeEvent {
         session_id: String,
         runs: Vec<DispatchRun>,
         transcript: Vec<DispatchMessage>,
+        usage: Option<UsageSummary>,
     ) -> Self {
         Self {
             id: id.into(),
@@ -1298,7 +1306,25 @@ impl BridgeEvent {
                 session_id,
                 runs,
                 transcript,
+                usage,
             },
+        }
+    }
+
+    /// A device-wide usage-probe result (one backend's plan meters). Host-only, like
+    /// the other device-wide events: empty ids, `sequence = 0`.
+    pub fn usage_probe(
+        id: impl Into<String>,
+        created_at: impl Into<String>,
+        report: crate::usage_probe::UsageProbeReport,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            session_id: String::new(),
+            run_id: String::new(),
+            sequence: 0,
+            created_at: created_at.into(),
+            payload: BridgeEventPayload::UsageProbe { report },
         }
     }
 
@@ -1453,6 +1479,14 @@ pub enum BridgeEventPayload {
         session_id: String,
         runs: Vec<DispatchRun>,
         transcript: Vec<DispatchMessage>,
+        /// The session's usage rolled up per (backend, fidelity) — the per-thread
+        /// cost view. Absent when the session recorded no usage signals (additive).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        usage: Option<UsageSummary>,
+    },
+    /// The result of one backend's plan-usage probe (host-synthesized, device-wide).
+    UsageProbe {
+        report: crate::usage_probe::UsageProbeReport,
     },
     Roadmap {
         roadmap: RoadmapSnapshot,
@@ -2529,8 +2563,26 @@ mod tests {
                     "body": "done",
                     "createdAt": at
                 })],
+                Some(crate::session::UsageSummary::from_signals(&[], 1)),
             ),
             BridgeEventPayload::SessionDetail { .. }
+        );
+        check!(
+            BridgeEvent::usage_probe(
+                "e",
+                at,
+                crate::usage_probe::UsageProbeReport {
+                    backend: crate::adapter::AgentBackend::ClaudeLocal,
+                    ok: true,
+                    windows: vec![crate::usage_probe::UsageWindow {
+                        line: "Current session 5% used".to_string(),
+                        used_percent: Some(5.0),
+                    }],
+                    raw: "raw".to_string(),
+                    captured_at: at.to_string(),
+                },
+            ),
+            BridgeEventPayload::UsageProbe { .. }
         );
         check!(
             BridgeEvent::roadmap(

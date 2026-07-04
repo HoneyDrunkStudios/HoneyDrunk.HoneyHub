@@ -632,10 +632,47 @@ export class MockWireClient implements WireClient {
     this.emitSessionList();
   }
 
+  async probeUsage(backend: AgentBackend): Promise<void> {
+    // The real host scrapes the vendor TUI's usage panel; the mock scripts one so the
+    // Usage flow is exercisable offline.
+    this.emitDevice({
+      kind: "usage_probe",
+      report: {
+        backend,
+        ok: true,
+        windows: [
+          { line: "Current session (5h): 34% used · resets 6:00 PM", usedPercent: 34 },
+          { line: "Current week (all models): 61% used · resets Tue", usedPercent: 61 },
+          { line: "Current week (Opus): 12% used", usedPercent: 12 }
+        ],
+        raw: "(demo) usage panel capture",
+        capturedAt: this.createdAt
+      }
+    });
+  }
+
   async sessionDetail(sessionId: string): Promise<void> {
     this.emitDevice({
       kind: "session_detail",
       sessionId,
+      usage: {
+        sessionCount: 1,
+        totalTurns: 2,
+        rollups: [
+          {
+            backend: "claude.local",
+            fidelity: "exact",
+            turnCount: 2,
+            inputTokens: 1200,
+            outputTokens: 800,
+            totalTokens: 2000,
+            totalUsd: 0.0421,
+            durationMs: 61000
+          }
+        ],
+        groundedTotalUsd: 0.0421,
+        totalPremiumRequests: 0
+      },
       runs: [
         {
           id: "run-past-1",
@@ -1458,8 +1495,10 @@ export class MockWireClient implements WireClient {
     });
   }
 
-  /** Emit a device-scoped event (empty session/run ids, sequence 0). */
-  private emitDevice(payload: BridgeEventPayload): void {
+  /** Emit a device-scoped event (empty session/run ids, sequence 0). Protected so
+      tests can subclass the mock and script host-shaped events (e.g. probe edge
+      cases the default mock never emits). */
+  protected emitDevice(payload: BridgeEventPayload): void {
     const event: BridgeEvent = {
       id: `event-${this.sequence}`,
       sessionId: "",

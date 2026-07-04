@@ -1022,6 +1022,7 @@ export type ClientCommand =
   | { kind: "rename_session"; sessionId: string; title: string }
   | { kind: "delete_session"; sessionId: string }
   | { kind: "pin_session"; sessionId: string; pinned: boolean }
+  | { kind: "probe_usage"; backend: AgentBackend }
   | { kind: "roadmap" }
   | { kind: "scaffold_architecture"; name?: string; location?: string }
   | { kind: "pull_architecture" }
@@ -1106,9 +1107,32 @@ export type BridgeEventPayload =
       sessionId: string;
       runs: DispatchRun[];
       transcript: DispatchMessage[];
+      /** The session's usage rolled up per (backend, fidelity) — the per-thread cost
+          view. Absent when the session recorded no usage signals. */
+      usage?: UsageSummary;
     }
   | { kind: "roadmap"; roadmap: RoadmapSnapshot }
-  | { kind: "check_result"; result: CheckOutcome };
+  | { kind: "check_result"; result: CheckOutcome }
+  | { kind: "usage_probe"; report: UsageProbeReport };
+
+/** One meter line scraped from a vendor CLI's usage panel. */
+export interface UsageWindow {
+  /** The cleaned line as the vendor rendered it (label + numbers + reset time). */
+  line: string;
+  /** The first percentage on the line, when one parsed — powers a meter bar. */
+  usedPercent?: number;
+}
+
+/** The outcome of probing one backend's plan-usage meters (the TUI-only /usage and
+    /status panels, captured via a hidden host-owned PTY). Numbers are the vendor's
+    own meters as of `capturedAt`; when parsing found nothing, `raw` is the answer. */
+export interface UsageProbeReport {
+  backend: AgentBackend;
+  ok: boolean;
+  windows: UsageWindow[];
+  raw: string;
+  capturedAt: string;
+}
 
 export interface BridgeStatusEvent {
   state: DispatchRunState;

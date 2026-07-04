@@ -35,6 +35,30 @@ describe("ModelMenu", () => {
     expect(screen.getByRole("button", { name: "Model" }).textContent).toContain("Custom model");
   });
 
+  it("flips the list upward when the trigger sits low in the viewport", () => {
+    // Trigger near the bottom edge: less than the list's max height below, more room
+    // above → the popover gets the drop-up placement instead of clipping.
+    const rect = vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockReturnValue({
+      top: 700,
+      bottom: 730,
+      left: 0,
+      right: 100,
+      width: 100,
+      height: 30,
+      x: 0,
+      y: 700,
+      toJSON: () => ({})
+    } as DOMRect);
+    try {
+      renderMenu();
+      fireEvent.click(screen.getByRole("button", { name: "Model" }));
+      const listbox = screen.getByRole("listbox", { name: "Select model" });
+      expect(listbox.className).toContain("drop-up");
+    } finally {
+      rect.mockRestore();
+    }
+  });
+
   it("opens the listbox and lists every option plus a custom entry", () => {
     renderMenu();
     fireEvent.click(screen.getByRole("button", { name: "Model" }));

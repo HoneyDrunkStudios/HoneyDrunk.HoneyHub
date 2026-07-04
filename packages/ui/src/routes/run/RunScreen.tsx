@@ -18,7 +18,9 @@ import type {
   DispatchRunState,
   DispatchSession,
   StartRunRequest,
-  UsageSignal
+  UsageProbeReport,
+  UsageSignal,
+  UsageSummary
 } from "@honeydrunk/honeyhub-types";
 import { UsageBadge } from "../../components/UsageBadge";
 import { backendLabel } from "../../backends";
@@ -305,6 +307,13 @@ export function RunScreen({
   // historyVersion bumps on rename/delete/pin so those mutations refresh the list too.
   const [historyVersion, setHistoryVersion] = useState(0);
   const chatSummaries = useMemo(() => loadChatSummaries(), [runId, runState, historyVersion]);
+  // The composer's config drop-up (source/mode/agent/model + routing rationale) —
+  // one chip instead of two rows of controls plus a note.
+  const [configOpen, setConfigOpen] = useState(false);
+  // Plan-usage probe reports per backend (the Usage section of the drop-up), plus
+  // which backends have a probe in flight (cleared when its report lands).
+  const [usageReports, setUsageReports] = useState<Record<string, UsageProbeReport>>({});
+  const [probing, setProbing] = useState<Record<string, boolean>>({});
   // One search box governs BOTH thread lists (local + synced), so the history reads as
   // one surface. Without a query: pinned threads always show plus the newest few; with
   // one: every match shows.
@@ -403,18 +412,26 @@ export function RunScreen({
     sessionId: string;
     runs: { state: DispatchRunState }[];
     transcript: DispatchMessage[];
+    usage?: UsageSummary;
   }) => {
     setSyncedSessions((sessions) => {
       const meta = sessions.find((session) => session.id === detail.sessionId);
       const lastState = detail.runs.at(-1)?.state ?? "completed";
+      // Grounded totals come from the host's rollup (exact + derived only, per the
+      // ADR-0092 fidelity rules); zero stays honest when nothing was recorded.
+      const totalTokens = (detail.usage?.rollups ?? []).reduce(
+        (sum, rollup) => sum + rollup.totalTokens,
+        0
+      );
       setOpenedChat({
         id: detail.sessionId,
         task: meta?.title ?? detail.transcript[0]?.body ?? "(session)",
         ...(meta?.backend === undefined ? {} : { backend: meta.backend }),
         state: lastState,
         messages: detail.transcript,
-        totalUsd: 0,
-        totalTokens: 0,
+        totalUsd: detail.usage?.groundedTotalUsd ?? 0,
+        totalTokens,
+        ...(detail.usage === undefined ? {} : { usage: detail.usage }),
         createdAt: meta?.createdAt ?? "",
         updatedAt: meta?.updatedAt ?? ""
       });
@@ -428,9 +445,18 @@ export function RunScreen({
     const unsubscribe = client.subscribe((event) => {
       if (event.payload.kind === "session_list") {
         setSyncedSessions(event.payload.sessions);
+      } else if (event.payload.kind === "usage_probe") {
+        const { report } = event.payload;
+        setUsageReports((prev) => ({ ...prev, [report.backend]: report }));
+        setProbing((prev) => ({ ...prev, [report.backend]: false }));
       } else if (event.payload.kind === "session_detail") {
-        const { sessionId, runs: detailRuns, transcript } = event.payload;
-        reopenSyncedSession({ sessionId, runs: detailRuns, transcript });
+        const { sessionId, runs: detailRuns, transcript, usage } = event.payload;
+        reopenSyncedSession({
+          sessionId,
+          runs: detailRuns,
+          transcript,
+          ...(usage === undefined ? {} : { usage })
+        });
       }
     });
     void client.listSessions().catch(() => undefined);
@@ -497,6 +523,8 @@ export function RunScreen({
       setCostMode("optimize");
     } else if (command.id === "model") {
       setCostMode("manual");
+      // The model picker lives in the config drop-up; open it so /model shows it.
+      setConfigOpen(true);
     } else if (command.id.startsWith("effort:")) {
       setCostMode("manual");
       setEffortPick(command.id.slice("effort:".length));
@@ -829,6 +857,13 @@ export function RunScreen({
   }, [runId, messages, usage, runState, task, runBackend, model, latestUsage, runStartedAt]);
 
   // The model/cost controls shared by the composer (compact toolbar form).
+  // The config chip's at-a-glance label: the routed backend in optimize mode, the
+  // pinned model in manual mode.
+  const configLabel =
+    costMode === "optimize"
+      ? `Optimize · ${backendLabel(recommendation.backend)}`
+      : `${backendLabel(provider)} · ${model ?? "custom"}`;
+
   const modelControls = (
     <>
       <div className="cost-mode" aria-label="Model selection mode">
@@ -1004,6 +1039,34 @@ export function RunScreen({
             {chat.model === undefined ? "" : ` · ${chat.model}`}
             {` · $${chat.totalUsd.toFixed(4)} · ${chat.state}`}
           </p>
+          {chat.usage !== undefined && (
+            <details className="thread-cost">
+              <summary>
+                Thread cost: {chat.usage.groundedTotalUsd === undefined
+                  ? "no grounded USD"
+                  : `$${chat.usage.groundedTotalUsd.toFixed(4)}`}
+                {` · ${chat.usage.totalTurns} turns`}
+                {chat.usage.totalPremiumRequests > 0
+                  ? ` · ${chat.usage.totalPremiumRequests} premium requests`
+                  : ""}
+              </summary>
+              <ul className="thread-cost-rollups">
+                {chat.usage.rollups.map((rollup) => (
+                  <li key={`${rollup.backend}:${rollup.fidelity}`}>
+                    <span className="rollup-backend">{backendLabel(rollup.backend)}</span>
+                    <span className="rollup-fidelity">{rollup.fidelity}</span>
+                    <span className="rollup-meta">
+                      {rollup.totalTokens.toLocaleString()} tok · {rollup.turnCount}×
+                      {rollup.totalUsd === undefined ? "" : ` · $${rollup.totalUsd.toFixed(4)}`}
+                      {rollup.premiumRequests === undefined
+                        ? ""
+                        : ` · ${rollup.premiumRequests} premium`}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            </details>
+          )}
           <ol className="transcript" aria-label="Transcript">
             {chat.messages.map((message) => (
               <li key={message.id} className={`message role-${message.role}`}>
@@ -1043,21 +1106,151 @@ export function RunScreen({
             {attachmentChips}
             <div className="composer-bar">
               <div className="composer-controls">
-                <WorkspacePicker
-                  client={client}
-                  roots={workspaceRoots}
-                  value={workspaceRoot}
-                  onSelect={setWorkspaceRoot}
-                  onAddRoots={onAddWorkspaceRoots ?? (() => undefined)}
-                  {...(defaultWorkspaceRoot === undefined
-                    ? {}
-                    : { defaultRoot: defaultWorkspaceRoot })}
-                  {...(onSetDefaultWorkspaceRoot === undefined
-                    ? {}
-                    : { onSetDefault: onSetDefaultWorkspaceRoot })}
-                />
+                {/* One config chip (VS Code extension pattern): the essentials at a
+                    glance; everything else lives in the drop-up panel. */}
+                <button
+                  type="button"
+                  className="chip-button composer-config"
+                  aria-label="Configure run"
+                  aria-haspopup="dialog"
+                  aria-expanded={configOpen}
+                  onClick={() => setConfigOpen((open) => !open)}
+                >
+                  <span className="chip-text">{configLabel}</span>
+                  <span className="chip-caret" aria-hidden="true">
+                    ▴
+                  </span>
+                </button>
                 {attachButton}
-                {modelControls}
+                {configOpen && (
+                  <>
+                    <button
+                      type="button"
+                      className="ws-backdrop"
+                      aria-label="Close run configuration"
+                      onClick={() => setConfigOpen(false)}
+                    />
+                    <div className="composer-panel" role="dialog" aria-label="Run configuration">
+                      <div className="panel-row">
+                        <span className="panel-label">Source</span>
+                        <WorkspacePicker
+                          client={client}
+                          roots={workspaceRoots}
+                          value={workspaceRoot}
+                          onSelect={setWorkspaceRoot}
+                          onAddRoots={onAddWorkspaceRoots ?? (() => undefined)}
+                          {...(defaultWorkspaceRoot === undefined
+                            ? {}
+                            : { defaultRoot: defaultWorkspaceRoot })}
+                          {...(onSetDefaultWorkspaceRoot === undefined
+                            ? {}
+                            : { onSetDefault: onSetDefaultWorkspaceRoot })}
+                        />
+                      </div>
+                      <div className="panel-row">
+                        <span className="panel-label">Model</span>
+                        <div className="panel-controls">{modelControls}</div>
+                      </div>
+                      <p className="panel-rationale">
+                        {costMode === "optimize" ? (
+                          <>
+                            {recommendation.rationale}
+                            {recommendation.snapshotSource === "bundled-default" && (
+                              <span className="routing-source"> · rates: bundled</span>
+                            )}
+                          </>
+                        ) : (
+                          <>
+                            Launching {backendLabel(provider)}
+                            {model === undefined ? "" : ` · ${model}`}.
+                          </>
+                        )}
+                        {costHint !== undefined && (
+                          <span className="routing-cost"> · {costHint}</span>
+                        )}
+                      </p>
+                      {/* Plan-usage meters: click-to-refresh probes of the vendor
+                          CLIs' own /usage · /status panels (Copilot exposes none). */}
+                      <div className="panel-row">
+                        <span className="panel-label">Usage</span>
+                        <div className="panel-controls">
+                          {routableBackends
+                            .filter((backend) => backend !== "copilot.local")
+                            .map((backend) => (
+                              <button
+                                key={backend}
+                                type="button"
+                                className="chip-button"
+                                disabled={probing[backend] === true}
+                                onClick={() => {
+                                  setProbing((prev) => ({ ...prev, [backend]: true }));
+                                  // Safety valve: if the report never arrives (bridge
+                                  // restart mid-probe), re-enable the button rather
+                                  // than leaving it stuck on "Checking…" forever.
+                                  window.setTimeout(
+                                    () =>
+                                      setProbing((prev) =>
+                                        prev[backend] === true
+                                          ? { ...prev, [backend]: false }
+                                          : prev
+                                      ),
+                                    45_000
+                                  );
+                                  void client.probeUsage(backend).catch(() =>
+                                    setProbing((prev) => ({ ...prev, [backend]: false }))
+                                  );
+                                }}
+                              >
+                                {probing[backend] === true
+                                  ? `Checking ${backendLabel(backend)}…`
+                                  : `Check ${backendLabel(backend)}`}
+                              </button>
+                            ))}
+                        </div>
+                      </div>
+                      {Object.values(usageReports).map((report) => (
+                        <div key={report.backend} className="usage-report">
+                          <p className="usage-report-head">
+                            {backendLabel(report.backend)} · as of{" "}
+                            {formatLocalTime(report.capturedAt)}
+                          </p>
+                          {report.windows.length > 0 && (
+                            <ul className="usage-windows">
+                              {report.windows.map((window, index) => (
+                                <li key={`${report.backend}-${index}`}>
+                                  {window.usedPercent !== undefined && (
+                                    <span className="usage-meter" aria-hidden="true">
+                                      <span
+                                        className="usage-meter-fill"
+                                        style={{
+                                          width: `${Math.min(100, window.usedPercent)}%`
+                                        }}
+                                      />
+                                    </span>
+                                  )}
+                                  <span className="usage-line">{window.line}</span>
+                                </li>
+                              ))}
+                            </ul>
+                          )}
+                          {/* The raw capture is always inspectable — the parser is a
+                              heuristic over vendor TUIs, so the source of truth stays
+                              one click away (and IS the answer when parsing failed). */}
+                          <details className="usage-raw">
+                            <summary>
+                              {report.ok
+                                ? report.windows.length > 0
+                                  ? "raw capture"
+                                  : "raw capture (layout not recognized)"
+                                : "probe failed"}
+                            </summary>
+                            <pre>{report.raw}</pre>
+                          </details>
+                        </div>
+                      ))}
+                    </div>
+                  </>
+                )}
               </div>
               <button
                 type="button"
@@ -1081,26 +1274,8 @@ export function RunScreen({
               </button>
             </div>
           </div>
-          {/* One compact status line: the rationale's lead clause plus the cost hint,
-              with the full explanation (and rate provenance) on hover — the multi-line
-              paragraph ate composer space. */}
-          <p
-            className="routing-rationale"
-            title={
-              costMode === "optimize"
-                ? `${recommendation.rationale}${
-                    recommendation.snapshotSource === "bundled-default" ? " (rates: bundled)" : ""
-                  }${costHint === undefined ? "" : ` · ${costHint}`}`
-                : undefined
-            }
-          >
-            {costMode === "optimize" ? (
-              <>{recommendation.rationale.split(";")[0]}</>
-            ) : (
-              <>Launching {backendLabel(provider)}{model === undefined ? "" : ` · ${model}`}.</>
-            )}
-            {costHint !== undefined && <span className="routing-cost"> · {costHint}</span>}
-          </p>
+          {/* No status note under the composer: the rationale + cost hint live in the
+              config drop-up, where you look when you care. */}
 
           {(chatSummaries.length > 0 || syncedSessions.length > 0) && (
             <div className="recent-chats-head">
@@ -1293,6 +1468,15 @@ interface RecentChatsProps {
 
 /** How many threads show without a search (pinned always show; search shows all hits). */
 const RECENT_CHATS_LIMIT = 8;
+
+/** A wire RFC3339 timestamp as local wall-clock time ("12:49 PM"); "now" when unparseable. */
+function formatLocalTime(iso: string): string {
+  const parsed = new Date(iso);
+  if (Number.isNaN(parsed.getTime())) {
+    return "now";
+  }
+  return parsed.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+}
 
 /** Filter + order the bridge-backed sessions the same way the local threads are:
     title match on the query, pinned first, then newest activity. */

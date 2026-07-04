@@ -61,8 +61,17 @@ function startRun(task = "Add a feature") {
   fireEvent.click(screen.getByRole("button", { name: "Start session" }));
 }
 
-/** Switch the run screen into manual ("Pick model") mode. */
+/** Open the composer's config drop-up (idempotent: opens it if closed). */
+function openConfigPanel() {
+  const trigger = screen.getByRole("button", { name: "Configure run" });
+  if (trigger.getAttribute("aria-expanded") !== "true") {
+    fireEvent.click(trigger);
+  }
+}
+
+/** Switch the run screen into manual ("Pick model") mode (inside the config panel). */
 function pickModelMode() {
+  openConfigPanel();
   fireEvent.click(screen.getByRole("button", { name: "Pick model" }));
 }
 
@@ -137,10 +146,12 @@ describe("RunScreen", () => {
     // Optimize is the default: there is no provider/model select, just the rationale.
     expect(screen.queryByLabelText("Provider")).toBeNull();
 
-    // A complex task routes to the most capable backend (Claude).
+    // A complex task routes to the most capable backend (Claude). The rationale lives
+    // in the config drop-up now, so open it to read the routing explanation.
     fireEvent.change(screen.getByLabelText("Task"), {
       target: { value: "Refactor the concurrency model and debug the race condition" }
     });
+    openConfigPanel();
     expect(screen.getByText(/Complex task/)).toBeTruthy();
     // "Claude Code" also appears in synced history; assert the routing rationale names it.
     expect(screen.getAllByText(/Claude Code/).length).toBeGreaterThan(0);
@@ -152,6 +163,57 @@ describe("RunScreen", () => {
     expect(screen.getByText(/Light task/)).toBeTruthy();
   });
 
+  it("checks plan usage from the config panel and renders the meters", async () => {
+    render(<RunScreen client={new MockWireClient()} availableBackends={ALL_BACKENDS} />);
+    openConfigPanel();
+
+    // Fire both probes; the mock answers with scripted vendor meters.
+    fireEvent.click(screen.getByRole("button", { name: "Check Claude Code" }));
+    expect(await screen.findByText(/Current session \(5h\): 34% used/)).toBeTruthy();
+    expect(screen.getByText(/Claude Code · as of/)).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "Check Codex" }));
+    await waitFor(() => expect(screen.getByText(/Codex · as of/)).toBeTruthy());
+  });
+
+  it("degrades a usage probe to the raw capture (or the failure) when parsing found nothing", async () => {
+    // Script the host-shaped edge cases the default mock never emits: an
+    // unrecognized panel layout (ok, no windows) and a failed spawn.
+    class EdgeProbeClient extends MockWireClient {
+      override async probeUsage(backend: AgentBackend): Promise<void> {
+        this.emitDevice({
+          kind: "usage_probe",
+          report:
+            backend === "claude.local"
+              ? {
+                  backend,
+                  ok: true,
+                  windows: [],
+                  raw: "some unrecognized panel text",
+                  capturedAt: "2026-07-04T12:00:00Z"
+                }
+              : {
+                  backend,
+                  ok: false,
+                  windows: [],
+                  raw: "could not launch codex: not found",
+                  capturedAt: "2026-07-04T12:00:00Z"
+                }
+        });
+      }
+    }
+    render(<RunScreen client={new EdgeProbeClient()} availableBackends={ALL_BACKENDS} />);
+    openConfigPanel();
+
+    fireEvent.click(screen.getByRole("button", { name: "Check Claude Code" }));
+    expect(await screen.findByText("raw capture (layout not recognized)")).toBeTruthy();
+    expect(screen.getByText("some unrecognized panel text")).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "Check Codex" }));
+    expect(await screen.findByText("probe failed")).toBeTruthy();
+    expect(screen.getByText(/could not launch codex/)).toBeTruthy();
+  });
+
   it("lists synced history and reopens a past session read-only", async () => {
     render(<RunScreen client={new MockWireClient()} availableBackends={ALL_BACKENDS} />);
 
@@ -160,10 +222,12 @@ describe("RunScreen", () => {
     const entry = within(history).getByText("Wire the deploy triggers");
     fireEvent.click(entry);
 
-    // Clicking fetches its detail and reopens the transcript read-only.
+    // Clicking fetches its detail and reopens the transcript read-only, with the
+    // per-thread cost rollup the host attached to the detail.
     await waitFor(() =>
       expect(screen.getByText("Done. Staged the workflow and opened a PR.")).toBeTruthy()
     );
+    expect(screen.getByText(/Thread cost: \$0\.0421 · 2 turns/)).toBeTruthy();
   });
 
   it("manual mode lets the user pin a model that the task no longer moves", () => {

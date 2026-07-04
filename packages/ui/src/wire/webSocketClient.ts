@@ -1,4 +1,5 @@
 import type {
+  AgentBackend,
   BridgeEvent,
   ClientCommand,
   JobProbe,
@@ -563,6 +564,10 @@ export class WebSocketWireClient implements WireClient {
 
   async pinSession(sessionId: string, pinned: boolean): Promise<void> {
     await this.dispatch({ kind: "pin_session", sessionId, pinned });
+  }
+
+  async probeUsage(backend: AgentBackend): Promise<void> {
+    await this.dispatch({ kind: "probe_usage", backend });
   }
 
   async roadmap(): Promise<void> {

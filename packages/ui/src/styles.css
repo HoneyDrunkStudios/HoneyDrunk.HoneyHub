@@ -189,6 +189,62 @@ body {
   background-attachment: fixed;
 }
 
+/* Native-control theming: any button that never got a class (Refresh, pull/push,
+   Enable desktop notifications, …) inherits the app's chip look instead of the OS's
+   white default, and checkboxes/radios pick up the accent. Classed buttons keep
+   their own styles (this only targets the class-less strays). */
+:root {
+  accent-color: var(--neon-blue);
+}
+
+button:not([class]) {
+  padding: 6px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--panel-2);
+  color: var(--text);
+  font: inherit;
+  font-size: 0.84rem;
+  cursor: pointer;
+}
+
+button:not([class]):hover:not(:disabled) {
+  border-color: var(--neon-blue-line);
+  background: var(--panel-3);
+}
+
+button:not([class]):disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+/* Themed scrollbars (WebView2/Chromium) so panels stop showing the OS's white bars. */
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--border-strong);
+  border: 2px solid transparent;
+  border-radius: 6px;
+  background-clip: padding-box;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--neon-blue-line);
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+
+::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
 /* Theme picker (Settings). */
 .theme-settings {
   margin-top: 18px;
@@ -763,6 +819,145 @@ h2 {
 
 .routing-source {
   color: var(--text-dim);
+}
+
+/* The composer's config drop-up: one chip opens a panel holding source, model mode,
+   agent/effort/model pickers, and the routing rationale + cost hint. */
+.composer-controls {
+  position: relative;
+}
+
+.composer-panel {
+  position: absolute;
+  z-index: 50;
+  bottom: calc(100% + 10px);
+  left: 0;
+  min-width: 320px;
+  max-width: min(480px, 92vw);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 12px;
+  border: 1px solid var(--neon-blue-line);
+  border-radius: 14px;
+  background: var(--panel-2);
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.45);
+}
+
+.panel-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.panel-label {
+  flex: 0 0 52px;
+  color: var(--text-dim);
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.panel-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.panel-rationale {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 0.78rem;
+}
+
+/* Plan-usage meters inside the config panel (scraped from the vendor TUIs). */
+.usage-report {
+  display: grid;
+  gap: 4px;
+}
+
+.usage-report-head {
+  margin: 0;
+  color: var(--text-dim);
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.usage-windows {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 4px;
+}
+
+.usage-windows li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.78rem;
+  color: var(--text-muted);
+}
+
+.usage-meter {
+  flex: 0 0 72px;
+  height: 8px;
+  border: 1px solid var(--neon-blue-line);
+  border-radius: 4px;
+  background: var(--panel-3);
+  overflow: hidden;
+}
+
+.usage-meter-fill {
+  display: block;
+  height: 100%;
+  background: var(--neon-blue);
+  box-shadow: 0 0 6px var(--neon-blue-glow);
+}
+
+.usage-raw pre {
+  max-height: 180px;
+  overflow: auto;
+  font-size: 0.7rem;
+  white-space: pre-wrap;
+}
+
+/* The reopened thread's cost breakdown (per-backend/fidelity rollups). */
+.thread-cost {
+  font-size: 0.8rem;
+  color: var(--text-muted);
+}
+
+.thread-cost summary {
+  cursor: pointer;
+}
+
+.thread-cost-rollups {
+  list-style: none;
+  margin: 6px 0 0;
+  padding: 0;
+  display: grid;
+  gap: 4px;
+}
+
+.thread-cost-rollups li {
+  display: flex;
+  gap: 10px;
+  align-items: baseline;
+}
+
+.rollup-fidelity {
+  color: var(--text-dim);
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+}
+
+.rollup-meta {
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
 }
 
 /* The composer's pre-send cost hint (included-in-plan / ~$ range / floor). */

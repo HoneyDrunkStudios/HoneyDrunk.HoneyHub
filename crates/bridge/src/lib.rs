@@ -25,6 +25,7 @@ pub mod sentry;
 pub mod servicebus;
 pub mod session;
 pub mod store;
+pub mod usage_probe;
 pub mod wire;
 pub mod work;
 
@@ -104,6 +105,7 @@ pub use session::{
     PolicyHintSeverity, UsageConfidence, UsageFidelity, UsageRollup, UsageSignal, UsageSummary,
 };
 pub use store::{LocalStore, StoreError};
+pub use usage_probe::{probe_usage, UsageProbeReport, UsageWindow};
 pub use wire::{
     BridgeEvent, BridgeEventPayload, BridgeStatusEvent, ClientCommand, ReconnectRequest, WireFrame,
     WireFrameKind, WIRE_PROTOCOL_VERSION,
