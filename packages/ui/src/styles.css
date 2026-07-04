@@ -189,6 +189,62 @@ body {
   background-attachment: fixed;
 }
 
+/* Native-control theming: any button that never got a class (Refresh, pull/push,
+   Enable desktop notifications, …) inherits the app's chip look instead of the OS's
+   white default, and checkboxes/radios pick up the accent. Classed buttons keep
+   their own styles (this only targets the class-less strays). */
+:root {
+  accent-color: var(--neon-blue);
+}
+
+button:not([class]) {
+  padding: 6px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--panel-2);
+  color: var(--text);
+  font: inherit;
+  font-size: 0.84rem;
+  cursor: pointer;
+}
+
+button:not([class]):hover:not(:disabled) {
+  border-color: var(--neon-blue-line);
+  background: var(--panel-3);
+}
+
+button:not([class]):disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+/* Themed scrollbars (WebView2/Chromium) so panels stop showing the OS's white bars. */
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--border-strong);
+  border: 2px solid transparent;
+  border-radius: 6px;
+  background-clip: padding-box;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--neon-blue-line);
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+
+::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
 /* Theme picker (Settings). */
 .theme-settings {
   margin-top: 18px;
