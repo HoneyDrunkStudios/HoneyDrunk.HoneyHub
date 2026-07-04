@@ -33,6 +33,19 @@ function renderCockpit() {
   fireEvent.click(screen.getByRole("button", { name: "Enter the cockpit" }));
 }
 
+/** The nav lives in the floating hive launcher now: click it to bloom the honeycomb, then the
+    view hexes (role="menuitem") become clickable. */
+function openHive() {
+  fireEvent.click(screen.getByRole("button", { name: /open navigation/i }));
+}
+
+/** Open the hive and click a view's hex. Every view — including the config/trust surfaces
+    (Settings / Updates / Alerts) — is a honeycomb hex (role="menuitem"). */
+function navigate(view: string | RegExp) {
+  openHive();
+  fireEvent.click(screen.getByRole("menuitem", { name: view }));
+}
+
 describe("App", () => {
   it("shows the first-run provider selection before the cockpit", () => {
     render(<App />);
@@ -45,27 +58,38 @@ describe("App", () => {
   it("renders the HoneyHub cockpit shell after onboarding", () => {
     renderCockpit();
 
-    expect(screen.getByRole("heading", { name: "HoneyHub" })).toBeTruthy();
     // The composer heading is one of the rotating prompts (chosen per mount).
     const headings = screen.getAllByRole("heading");
     expect(headings.some((heading) => COMPOSER_PROMPTS.includes(heading.textContent ?? ""))).toBe(
       true
     );
+    // The HoneyHub wordmark now lives in the hive launcher's bloom (the brand moved off the
+    // removed sidebar), so it appears once the honeycomb is opened.
+    openHive();
+    expect(screen.getByRole("heading", { name: "HoneyHub" })).toBeTruthy();
   });
 
-  it("switches to the settings view", () => {
+  it("switches to the settings view from the Settings hex", () => {
     renderCockpit();
 
-    fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+    navigate("Settings");
 
     expect(screen.getByRole("heading", { name: "Settings" })).toBeTruthy();
     expect(screen.getByLabelText("Device name")).toBeTruthy();
   });
 
+  it("shows Alerts as a honeycomb hex", () => {
+    renderCockpit();
+
+    // Alerts lives in the honeycomb (visible once the hive is opened), not a top-right control.
+    openHive();
+    expect(screen.getByRole("menuitem", { name: /alerts/i })).toBeTruthy();
+  });
+
   it("renders the subscription plans panel in Settings and persists a change", () => {
     renderCockpit();
 
-    fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+    navigate("Settings");
 
     // The plans editor (wired via `plans` + `onPlansChange`) renders in Settings.
     const claudePlan = screen.getByLabelText("Claude Code plan") as HTMLSelectElement;
@@ -120,7 +144,7 @@ describe("App", () => {
   it("switches to the repositories view", () => {
     renderCockpit();
 
-    fireEvent.click(screen.getByRole("button", { name: "Repositories" }));
+    navigate("Repositories");
 
     expect(screen.getByRole("heading", { name: "Repositories" })).toBeTruthy();
   });
@@ -128,7 +152,7 @@ describe("App", () => {
   it("opens the Settings modal and closes it back to the cockpit", () => {
     renderCockpit();
 
-    fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+    navigate("Settings");
     expect(screen.getByRole("dialog", { name: "Settings" })).toBeTruthy();
 
     // The backdrop closes the modal (onClose → back to the Hub).
@@ -139,7 +163,7 @@ describe("App", () => {
   it("switches to the spend view", async () => {
     renderCockpit();
 
-    fireEvent.click(screen.getByRole("button", { name: "Spend" }));
+    navigate("Spend");
 
     expect(await screen.findByRole("heading", { name: "Your spend" })).toBeTruthy();
   });
@@ -147,7 +171,7 @@ describe("App", () => {
   it("switches to the coaching view", async () => {
     renderCockpit();
 
-    fireEvent.click(screen.getByRole("button", { name: "Coaching" }));
+    navigate("Coaching");
 
     expect(await screen.findByRole("heading", { name: "Coaching" })).toBeTruthy();
   });
@@ -155,7 +179,7 @@ describe("App", () => {
   it("switches to the agents view", async () => {
     renderCockpit();
 
-    fireEvent.click(screen.getByRole("button", { name: "Agents" }));
+    navigate("Agents");
 
     expect(await screen.findByRole("heading", { name: "Agents" })).toBeTruthy();
   });

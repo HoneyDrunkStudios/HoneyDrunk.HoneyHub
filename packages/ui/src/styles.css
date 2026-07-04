@@ -318,18 +318,20 @@ button:not([class]):disabled {
 
 .app-shell {
   display: grid;
-  grid-template-columns: var(--sidebar-w) minmax(0, 1fr);
+  /* The left sidebar is gone (replaced by the floating hive launcher), so content runs
+     edge-to-edge — one column, minus the chat dock when it is shown. */
+  grid-template-columns: minmax(0, 1fr);
   min-height: 100vh;
 }
 
-/* When the right-hand chat dock is shown, the shell grows a third column sized to
-   the panel (expanded, at its dragged width) or a slim rail (collapsed). On the
-   small-screen Chat page the dock is removed entirely (no modifier → two columns). */
+/* When the right-hand chat dock is shown, the shell grows a second column sized to the
+   panel (expanded, at its dragged width) or a slim rail (collapsed). On the small-screen
+   Chat page the dock is removed entirely (no modifier → single column). */
 .app-shell.chat-open {
-  grid-template-columns: var(--sidebar-w) minmax(0, 1fr) var(--chat-dock-w, 380px);
+  grid-template-columns: minmax(0, 1fr) var(--chat-dock-w, 380px);
 }
 .app-shell.chat-collapsed {
-  grid-template-columns: var(--sidebar-w) minmax(0, 1fr) 52px;
+  grid-template-columns: minmax(0, 1fr) 52px;
 }
 
 /* The Chat nav item exists for small screens (the dock does not fit there, and is
@@ -513,6 +515,286 @@ button:not([class]):disabled {
   font: inherit;
   font-weight: 600;
   cursor: pointer;
+}
+
+/* --------------------------------------------------------- hive launcher
+   HoneyHub's signature navigation: a collapsed hex "hive" that blooms into a honeycomb of
+   hexagonal view-tiles (one hex per nav view). Honey-gold with a cyberpunk neon edge; all
+   colours come from the shared theme variables so it follows every theme. Floats bottom-left,
+   clear of the right-hand chat dock. */
+
+/* --- collapsed hive (the floating launcher button) --- */
+.hive-launch {
+  position: fixed;
+  left: 22px;
+  bottom: 22px;
+  z-index: 35;
+  width: 58px;
+  height: 64px;
+}
+.hive-launch.is-open {
+  /* Lift the launcher above its own bloom backdrop (.ws-backdrop, z-40) while open. */
+  z-index: 43;
+}
+
+.hive-button {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: none;
+  cursor: pointer;
+  /* pointy-top hexagon */
+  clip-path: polygon(50% 0%, 100% 25%, 100% 75%, 50% 100%, 0% 75%, 0% 25%);
+  /* App-icon launcher: a subtle dark hex frame with a thin honey ring (the 2px reveal), the
+     brand logo centred — brand-forward, not a flat honey fill. */
+  background: var(--honey-line);
+  filter: drop-shadow(0 6px 16px rgba(0, 0, 0, 0.45)) drop-shadow(0 0 10px var(--honey-glow));
+  transition: transform 0.14s ease, filter 0.14s ease, background 0.14s ease;
+}
+.hive-button::before {
+  /* Dark inner face — the 2px reveal of the parent is the honey ring. */
+  content: "";
+  position: absolute;
+  inset: 2px;
+  clip-path: polygon(50% 0%, 100% 25%, 100% 75%, 50% 100%, 0% 75%, 0% 25%);
+  background: linear-gradient(155deg, var(--bg-elev), var(--panel-2));
+  pointer-events: none;
+}
+.hive-button:hover {
+  transform: scale(1.06);
+  background: var(--honey-bright);
+  filter: drop-shadow(0 6px 18px rgba(0, 0, 0, 0.5)) drop-shadow(0 0 16px var(--honey-line));
+}
+.hive-button:focus-visible {
+  outline: 2px solid var(--neon-blue);
+  outline-offset: 3px;
+}
+.hive-button-logo {
+  position: relative;
+  z-index: 1;
+  width: 66%;
+  height: 66%;
+  filter: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.4));
+}
+
+/* --- bloomed honeycomb panel --- */
+.hive-bloom {
+  position: fixed;
+  left: 22px;
+  bottom: 96px;
+  z-index: 42;
+  width: min(468px, calc(100vw - 36px));
+  max-height: calc(100vh - 128px);
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  /* Tight left padding so the HoneyHub wordmark sits close to the panel's left edge. */
+  padding: 14px 16px 14px 12px;
+  border: 1px solid var(--honey-line);
+  border-radius: 18px;
+  background: linear-gradient(180deg, var(--glass-top), var(--glass-bottom)), var(--panel);
+  box-shadow: 0 18px 50px rgba(0, 0, 0, 0.55), var(--glow-gold);
+  animation: hive-bloom-in 0.18s ease both;
+}
+@keyframes hive-bloom-in {
+  from {
+    opacity: 0;
+    transform: translateY(10px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+.hive-bloom-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  /* Just the wordmark now, flush to the panel's (tight) left padding. */
+  padding-left: 0;
+}
+.hive-bloom-name {
+  font-size: 1.08rem;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  text-shadow: 0 0 14px var(--honey-glow);
+}
+
+/* The honeycomb itself: a brick tessellation — fixed columns per row with alternate rows shifted
+   half a hex, so every hex (including a short last row) nestles into a valley of the row above. The
+   comb is a fit-content block centred in the panel; a negative top margin overlaps the rows. */
+.hive-comb {
+  --hex-w: 88px;
+  --hex-h: 100px;
+  --hex-gap: 6px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  width: fit-content;
+  margin: 2px auto 0;
+}
+.hive-row {
+  display: flex;
+  gap: var(--hex-gap);
+}
+.hive-row.is-offset {
+  /* Shift the brick row by half a hex (+ half a gap) so its hexes land in the valleys above. */
+  margin-left: calc((var(--hex-w) + var(--hex-gap)) / 2);
+}
+.hive-row + .hive-row {
+  margin-top: calc(var(--hex-h) * -0.26);
+}
+
+.hive-cell-wrap {
+  position: relative;
+  width: var(--hex-w);
+  height: var(--hex-h);
+  /* A non-clipped positioning shell: its overlapping corners must not steal clicks from the
+     row below, and the alert badge must be free to sit outside the hex silhouette. */
+  pointer-events: none;
+  animation: hive-cell-in 0.26s ease both;
+  animation-delay: calc(var(--hive-i, 0) * 22ms);
+}
+@keyframes hive-cell-in {
+  from {
+    opacity: 0;
+    transform: scale(0.55);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+.hive-cell {
+  position: absolute;
+  inset: 0;
+  pointer-events: auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  padding: 0 8px;
+  border: none;
+  cursor: pointer;
+  /* Clip the hit-area to the hex so overlapping rows never steal each other's clicks. */
+  clip-path: polygon(50% 0%, 100% 25%, 100% 75%, 50% 100%, 0% 75%, 0% 25%);
+  /* Solid honey background; the 2.5px reveal around the inner face is the honey cell wall
+     (a real border would be clipped by clip-path, so the double-hex reveal does the outline). */
+  background: var(--honey);
+  color: var(--honey-soft);
+  font: inherit;
+  filter: drop-shadow(0 3px 8px rgba(0, 0, 0, 0.4));
+  transition: filter 0.14s ease, color 0.14s ease, background 0.14s ease;
+}
+.hive-cell::before {
+  content: "";
+  position: absolute;
+  inset: 2.5px;
+  z-index: 0;
+  clip-path: polygon(50% 0%, 100% 25%, 100% 75%, 50% 100%, 0% 75%, 0% 25%);
+  background: linear-gradient(180deg, var(--panel), var(--panel-2));
+}
+.hive-cell:hover {
+  color: var(--honey-bright);
+  background: var(--honey-bright);
+  filter: drop-shadow(0 0 12px var(--honey-glow));
+}
+.hive-cell:hover::before {
+  background: linear-gradient(180deg, var(--bg-elev), var(--panel-2));
+}
+.hive-cell:focus-visible {
+  outline: none;
+  color: var(--honey-bright);
+  background: var(--honey-bright);
+  filter: drop-shadow(0 0 12px var(--honey-line));
+}
+/* Selected ("you are here"): a solid honey fill with DARK icon + label, so the active page is
+   clearly legible (a honey-on-honey selected cell was unreadable). */
+.hive-cell.is-current {
+  color: #1a1405;
+  background: var(--honey-bright);
+  filter: drop-shadow(0 0 14px var(--honey-line));
+}
+.hive-cell.is-current::before {
+  background: linear-gradient(180deg, var(--honey-bright), var(--honey));
+}
+.hive-cell-icon {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  place-items: center;
+}
+.hive-cell-label {
+  position: relative;
+  z-index: 1;
+  max-width: 92%;
+  font-size: 0.6rem;
+  font-weight: 600;
+  line-height: 1.1;
+  text-align: center;
+  letter-spacing: 0.01em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.hive-cell-badge {
+  position: absolute;
+  top: 8px;
+  right: 10px;
+  z-index: 2;
+  min-width: 17px;
+  height: 17px;
+  padding: 0 4px;
+  display: grid;
+  place-items: center;
+  border-radius: var(--radius-pill);
+  background: var(--neon-pink);
+  color: #fff;
+  font-size: 0.62rem;
+  font-weight: 700;
+  box-shadow: 0 0 0 2px var(--panel), var(--glow-pink);
+}
+
+/* Reuses .conn-state + .bridge-connect (rehomed from the old sidebar footer). */
+.hive-foot {
+  display: grid;
+  gap: 10px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border-hair);
+}
+
+/* The Chat hex is a phone-only affordance (desktop gets the dock); HiveNav already drops it in
+   JS on wide viewports, so no CSS hide is needed here. */
+
+@media (prefers-reduced-motion: reduce) {
+  .hive-bloom,
+  .hive-cell-wrap {
+    animation: none;
+  }
+}
+
+@media (max-width: 860px) {
+  .hive-launch {
+    left: 16px;
+    bottom: calc(16px + env(safe-area-inset-bottom, 0px));
+  }
+  .hive-bloom {
+    left: 12px;
+    right: 12px;
+    width: auto;
+    bottom: calc(84px + env(safe-area-inset-bottom, 0px));
+    max-height: calc(100vh - 150px);
+  }
+  .hive-comb {
+    --hex-w: 76px;
+    --hex-h: 86px;
+  }
 }
 
 /* ---------------------------------------------------------------- content */
@@ -7320,4 +7602,12 @@ button:focus-visible,
   font-size: 0.85rem;
   max-width: 62ch;
   margin: 2px 0 8px;
+}
+
+/* --- Ambient code-rain backdrop (MatrixRain): faint, behind all content --- */
+.matrix-rain {
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
 }

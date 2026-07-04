@@ -50,6 +50,8 @@ import {
   loadSelectedSubscriptions
 } from "./routes/observe/keyVaultModel";
 import { ChatSidebar, SIDEBAR_SESSION_ID } from "./routes/chat/ChatSidebar";
+import { HiveNav } from "./routes/nav/HiveNav";
+import { MatrixRain } from "./components/MatrixRain";
 import { HubView } from "./routes/hub/HubView";
 import { PlanView } from "./routes/plan/PlanView";
 import { WorkView } from "./routes/work/WorkView";
@@ -70,7 +72,7 @@ import { bridgeWsUrl, WebSocketWireClient } from "./wire/webSocketClient";
 import type { WireClient } from "./wire/client";
 import "./styles.css";
 
-type View =
+export type View =
   | "hub"
   | "run"
   | "runs"
@@ -116,11 +118,16 @@ const PRIMARY_NAV: NavItem[] = [
   { view: "coaching", label: "Coaching", icon: <IconSpark /> },
   { view: "agents", label: "Agents", icon: <IconGrid /> }
 ];
+// The config/trust surfaces. They live at the tail of the honeycomb (after the primary views),
+// so every view is reachable from the one hive launcher.
 const SECONDARY_NAV: NavItem[] = [
   { view: "settings", label: "Settings", icon: <IconGear /> },
   { view: "updates", label: "Updates", icon: <IconDownload /> },
   { view: "notifications", label: "Alerts", icon: <IconBell /> }
 ];
+// The full nav list the honeycomb blooms into (day-to-day surfaces first, then config/trust),
+// in display order. HiveNav filters it by page visibility.
+const NAV_ITEMS: NavItem[] = [...PRIMARY_NAV, ...SECONDARY_NAV];
 
 export interface AppProps {
   // Injectable so tests (and a future real WebSocket client) can supply their own
@@ -397,48 +404,23 @@ export function App({ client }: AppProps = {}) {
   };
 
   const unread = unreadCount(notifications);
-  const renderNav = (items: NavItem[]) =>
-    items
-      // Hide toggleable pages the operator has switched off. Core pages (not in
-      // TOGGLEABLE_PAGES) always render; their button can't be hidden.
-      .filter(
-        (item) =>
-          !TOGGLEABLE_PAGES.some((page) => page.view === item.view) ||
-          isPageVisible(pagePrefs, item.view)
-      )
-      .map((item) => (
-      <button
-        key={item.view}
-        type="button"
-        className={item.mobileOnly === true ? "nav-item nav-item-mobile" : "nav-item"}
-        aria-pressed={view === item.view}
-        onClick={() => setView(item.view)}
-      >
-        <span className="nav-icon" aria-hidden="true">
-          {item.icon}
-        </span>
-        <span className="nav-label">{item.label}</span>
-        {item.view === "notifications" && unread > 0 && (
-          <span className="nav-badge" aria-label={`${unread} unread`}>
-            {unread}
-          </span>
-        )}
-      </button>
-    ));
 
   // First launch (or after a reset): the provider-selection screen replaces the
   // cockpit until the user confirms which backends they have.
   if (!onboarded) {
     return (
-      <Onboarding
-        client={wireClient}
-        catalog={catalog}
-        detecting={detecting}
-        initialEnabled={settings.backends}
-        initialRoots={settings.workspaceRoots}
-        initialPlans={plans}
-        onComplete={completeOnboarding}
-      />
+      <>
+        <MatrixRain />
+        <Onboarding
+          client={wireClient}
+          catalog={catalog}
+          detecting={detecting}
+          initialEnabled={settings.backends}
+          initialRoots={settings.workspaceRoots}
+          initialPlans={plans}
+          onComplete={completeOnboarding}
+        />
+      </>
     );
   }
 
@@ -455,52 +437,7 @@ export function App({ client }: AppProps = {}) {
       className={shellClass}
       style={{ "--chat-dock-w": `${chatWidth}px` } as CSSProperties}
     >
-      <aside className="sidebar" aria-label="HoneyHub navigation">
-        <div className="sidebar-brand">
-          <span className="brand-mark" aria-hidden="true">
-            <img className="brand-logo" src={`${import.meta.env.BASE_URL}icons/icon-512.svg`} alt="" />
-          </span>
-          <span className="brand-text">
-            <h1 className="brand-name">HoneyHub</h1>
-          </span>
-        </div>
-
-        <nav className="sidebar-nav" aria-label="Primary views">
-          {renderNav(PRIMARY_NAV)}
-        </nav>
-
-        <div className="sidebar-spacer" />
-
-        <nav className="sidebar-nav secondary" aria-label="Configuration">
-          {renderNav(SECONDARY_NAV)}
-        </nav>
-
-        <div className="sidebar-footer">
-          <div className={`conn-state ${connected ? "is-connected" : "is-mock"}`}>
-            <span className="conn-dot" aria-hidden="true" />
-            <span>{connected ? "Connected" : "Demo (mock)"}</span>
-          </div>
-          {!connected && (
-            <div className="bridge-connect">
-              <input
-                aria-label="Bridge URL"
-                value={bridgeUrl}
-                onChange={(event) => setBridgeUrl(event.target.value)}
-                placeholder="ws://127.0.0.1:8765/ws?token=…"
-              />
-              <button type="button" onClick={onConnect}>
-                Connect
-              </button>
-              {connectError !== undefined && (
-                <span role="alert" className="settings-error">
-                  {connectError}
-                </span>
-              )}
-            </div>
-          )}
-        </div>
-      </aside>
-
+      <MatrixRain />
       <main className="content">
         <div className="content-inner">
           {/* Both panels stay mounted; visibility is toggled so in-progress state
@@ -627,6 +564,22 @@ export function App({ client }: AppProps = {}) {
           </div>
         </div>
       </main>
+
+      {/* The signature floating hive launcher: a collapsed hex that blooms into a honeycomb
+          of view-tiles (one hex per visible nav view). Replaces the old left activity-bar;
+          `position: fixed`, so its place in the tree is flexible. */}
+      <HiveNav
+        items={NAV_ITEMS}
+        view={view}
+        onSelect={setView}
+        unread={unread}
+        pagePrefs={pagePrefs}
+        connected={connected}
+        bridgeUrl={bridgeUrl}
+        onBridgeUrl={setBridgeUrl}
+        onConnect={onConnect}
+        connectError={connectError}
+      />
 
       {/* Right-hand chat dock: THE chat surface (history, model picker, attachments)
           on every page. Always mounted, so the conversation survives a collapse or a
