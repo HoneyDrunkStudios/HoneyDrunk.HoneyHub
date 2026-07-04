@@ -7304,3 +7304,20 @@ button:focus-visible,
     grid-template-columns: minmax(0, 1fr);
   }
 }
+
+/* --- Updates: the app's own self-update card --- */
+.updates-app-card {
+  border-color: var(--honey-line);
+}
+
+.updates-app-card .updates-version {
+  color: var(--honey-bright);
+}
+
+/* --- Groups: one-line explainer of groups + run checks --- */
+.groups-intro {
+  color: var(--text-dim);
+  font-size: 0.85rem;
+  max-width: 62ch;
+  margin: 2px 0 8px;
+}

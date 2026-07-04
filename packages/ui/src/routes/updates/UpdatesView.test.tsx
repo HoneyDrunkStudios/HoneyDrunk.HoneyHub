@@ -20,6 +20,14 @@ const CATALOG: BackendCapability[] = [
 ];
 
 describe("UpdatesView", () => {
+  it("shows the app's own version card with the browser-update note", () => {
+    render(<UpdatesView client={new MockWireClient()} active catalog={CATALOG} />);
+
+    expect(screen.getByText("HoneyHub app")).toBeTruthy();
+    // Outside the Tauri shell (the test env), the card explains updates arrive on reload.
+    expect(screen.getByText(/reload to get the latest/i)).toBeTruthy();
+  });
+
   it("shows the installed CLI version and the model list when active", async () => {
     const client = new MockWireClient();
     render(<UpdatesView client={client} active catalog={CATALOG} />);

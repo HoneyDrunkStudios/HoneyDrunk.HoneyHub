@@ -3,6 +3,7 @@ import type { ReactElement } from "react";
 import type { AgentBackend, BackendCapability, EnvironmentInfo } from "@honeydrunk/honeyhub-types";
 import type { WireClient } from "../../wire/client";
 import { backendLabel } from "../../backends";
+import { APP_VERSION, isTauriShell } from "../../appVersion";
 import { diffNewModels, mergeSeen, newModelCount, type SeenModels } from "./updatesModel";
 import { loadSeenModels, saveSeenModels } from "./modelsSeenStore";
 
@@ -94,10 +95,22 @@ export function UpdatesView({ client, active, catalog }: Readonly<UpdatesViewPro
         </button>
       </header>
       <p className="updates-scope">
-        Installed CLI versions and newly-available models. Versions are read from your local
-        CLIs; new models are detected by comparing what each CLI offers now against what you
-        last saw here.
+        The app itself, your installed CLI versions, and newly-available models. Versions are
+        read from your local CLIs; new models are detected by comparing what each CLI offers now
+        against what you last saw here.
       </p>
+
+      <div className="updates-card updates-app-card">
+        <div className="updates-card-head">
+          <span className="updates-name">HoneyHub app</span>
+          <span className="updates-version">v{APP_VERSION}</span>
+        </div>
+        <p className="updates-source">
+          {isTauriShell()
+            ? "Desktop app: it checks for updates on launch and installs them with your OK."
+            : "Web app: reload to get the latest. Install the desktop app for automatic updates."}
+        </p>
+      </div>
 
       {newCount > 0 && (
         <output className="updates-banner">
