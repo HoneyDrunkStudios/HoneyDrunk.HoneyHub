@@ -7412,13 +7412,59 @@ button:focus-visible,
 
 .repos-body {
   display: grid;
-  grid-template-columns: 320px minmax(0, 1fr);
+  grid-template-columns: 48px 300px minmax(0, 1fr);
   gap: 14px;
   flex: 1;
   min-height: 0;
 }
 
-.repos-explorer,
+/* Far-left activity rail: a thin column of view-switch icons (VS Code model). It toggles the
+   sidebar between the explorer tree and the source-control panel; the editor keeps the centre. */
+.repos-rail {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: linear-gradient(180deg, var(--glass-top), var(--glass-bottom)), var(--panel-2);
+  box-shadow: var(--shadow-card);
+}
+
+.repos-rail-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: none;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+.repos-rail-btn:hover {
+  color: var(--text);
+  background: var(--hover);
+}
+
+.repos-rail-btn.is-active {
+  color: var(--honey-bright);
+  border-color: var(--honey-line);
+  background: var(--honey-glow);
+  box-shadow: 0 0 0 1px var(--honey-line) inset;
+}
+
+.repos-rail-btn:focus-visible {
+  outline: none;
+  border-color: var(--honey-line);
+  box-shadow: 0 0 0 3px var(--honey-glow);
+}
+
+.repos-sidebar,
 .repos-viewer {
   border: 1px solid var(--border);
   border-radius: var(--radius);
@@ -7428,11 +7474,18 @@ button:focus-visible,
   min-height: 0;
 }
 
-.repos-explorer {
+.repos-sidebar {
   display: flex;
   flex-direction: column;
   padding: 10px;
   gap: 10px;
+}
+
+/* When the source-control panel is the whole sidebar, it no longer needs the divider that once
+   separated it from the explorer tree above it. */
+.repos-sidebar > .repos-scm {
+  border-top: none;
+  padding-top: 0;
 }
 
 .repos-pane-title {
@@ -7713,7 +7766,11 @@ button:focus-visible,
 
 @media (max-width: 860px) {
   .repos-body {
-    grid-template-columns: minmax(0, 1fr);
+    grid-template-columns: 44px minmax(0, 1fr);
+  }
+  /* Narrow: rail + sidebar share the top row, the editor/diff spans full width below. */
+  .repos-viewer {
+    grid-column: 1 / -1;
   }
 }
 

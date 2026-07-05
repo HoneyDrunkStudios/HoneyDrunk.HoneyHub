@@ -132,6 +132,12 @@ function renderRepos(client = new MockWireClient()) {
   );
 }
 
+// The VS Code activity rail shows only one left panel at a time. Explorer is the default; switch
+// to "Source control" before any git interaction, back to "Explorer" for tree interaction.
+function showPanel(name: "Explorer" | "Source control"): void {
+  fireEvent.click(screen.getByRole("button", { name }));
+}
+
 describe("RepositoriesView", () => {
   it("shows the empty state when there are no workspace roots", () => {
     render(<RepositoriesView client={new MockWireClient()} workspaceRoots={[]} active />);
@@ -144,12 +150,16 @@ describe("RepositoriesView", () => {
     renderRepos();
 
     expect(screen.getByRole("heading", { name: "Repositories" })).toBeTruthy();
+    // Explorer is the default panel: the tree shows, the source-control panel is not mounted.
     expect(screen.getByText("Files")).toBeTruthy();
-    expect(screen.getByText("Source control")).toBeTruthy();
-
-    // The root listing populates the tree with the demo repos.
+    expect(screen.queryByText("Source control")).toBeNull();
     await waitFor(() => expect(screen.getByRole("button", { name: "HoneyHub" })).toBeTruthy());
-    // The dirty repo's changed files render in the source-control panel.
+
+    // Switching the rail to Source control swaps the sidebar: the tree is gone, the git panel
+    // and the dirty repo's changed files render.
+    showPanel("Source control");
+    expect(screen.getByText("Source control")).toBeTruthy();
+    expect(screen.queryByText("Files")).toBeNull();
     await waitFor(() => expect(screen.getByText("packages/ui/src/App.tsx")).toBeTruthy());
   });
 
@@ -268,6 +278,7 @@ describe("RepositoriesView", () => {
 
   it("opens a changed file's diff in the center pane", async () => {
     renderRepos();
+    showPanel("Source control");
 
     fireEvent.click(await screen.findByText("packages/ui/src/App.tsx"));
 
@@ -292,6 +303,7 @@ describe("RepositoriesView", () => {
       }
     }
     renderRepos(new TruncatedDiffClient());
+    showPanel("Source control");
 
     fireEvent.click(await screen.findByText("packages/ui/src/App.tsx"));
 
@@ -309,6 +321,7 @@ describe("RepositoriesView", () => {
       }
     }
     renderRepos(new EmptyDiffClient());
+    showPanel("Source control");
 
     fireEvent.click(await screen.findByText("packages/ui/src/App.tsx"));
 
@@ -326,6 +339,7 @@ describe("RepositoriesView", () => {
       }
     }
     renderRepos(new RejectingDiffClient());
+    showPanel("Source control");
 
     fireEvent.click(await screen.findByText("packages/ui/src/App.tsx"));
 
@@ -371,6 +385,7 @@ describe("RepositoriesView", () => {
   it("ctrl-clicks a changed file into the multi-select bulk bar and bulk-stages/unstages", async () => {
     const client = new CapturingClient();
     renderRepos(client);
+    showPanel("Source control");
 
     const fileButton = await screen.findByText("packages/ui/src/App.tsx");
     fireEvent.click(fileButton, { ctrlKey: true });
@@ -388,6 +403,7 @@ describe("RepositoriesView", () => {
   it("right-clicks a changed file to open the context menu and stage it", async () => {
     const client = new CapturingClient();
     renderRepos(client);
+    showPanel("Source control");
 
     const fileButton = await screen.findByText("packages/ui/src/App.tsx");
     fireEvent.contextMenu(fileButton);
@@ -403,6 +419,7 @@ describe("RepositoriesView", () => {
     const writeText = vi.fn().mockResolvedValue(undefined);
     Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true });
     renderRepos();
+    showPanel("Source control");
 
     const fileButton = await screen.findByText("packages/ui/src/App.tsx");
     fireEvent.contextMenu(fileButton);
@@ -414,6 +431,7 @@ describe("RepositoriesView", () => {
 
   it("opens a file and diff from the context menu", async () => {
     renderRepos();
+    showPanel("Source control");
 
     const fileButton = await screen.findByText("packages/ui/src/App.tsx");
     fireEvent.contextMenu(fileButton);
@@ -431,6 +449,7 @@ describe("RepositoriesView", () => {
   it("discards a changed file after confirming, and can cancel the confirm", async () => {
     const client = new CapturingClient();
     renderRepos(client);
+    showPanel("Source control");
 
     // The unstaged file row exposes a Discard action.
     const row = (await screen.findByText("packages/ui/src/App.tsx")).closest("li") as HTMLElement;
@@ -454,6 +473,7 @@ describe("RepositoriesView", () => {
   it("switches branch through the branch picker (confirming for a dirty tree)", async () => {
     const client = new CapturingClient();
     renderRepos(client);
+    showPanel("Source control");
 
     const branchSelect = (await screen.findByLabelText("Switch branch")) as HTMLSelectElement;
     // Wait for branches to load so the picker is enabled.
@@ -470,6 +490,7 @@ describe("RepositoriesView", () => {
   it("creates a new branch from the new-branch form", async () => {
     const client = new CapturingClient();
     renderRepos(client);
+    showPanel("Source control");
 
     const input = (await screen.findByLabelText("New branch name")) as HTMLInputElement;
     fireEvent.change(input, { target: { value: "feature-x" } });
@@ -485,6 +506,7 @@ describe("RepositoriesView", () => {
   it("pulls and pushes through their confirm gates and shows feedback", async () => {
     const client = new CapturingClient();
     renderRepos(client);
+    showPanel("Source control");
 
     fireEvent.click(await screen.findByRole("button", { name: /Pull/ }));
     let dialog = await screen.findByRole("dialog", { name: "Confirm action" });
@@ -500,6 +522,7 @@ describe("RepositoriesView", () => {
 
   it("switches the active repository through the repo picker", async () => {
     renderRepos();
+    showPanel("Source control");
 
     const repoSelect = (await screen.findByLabelText("Repository")) as HTMLSelectElement;
     fireEvent.change(repoSelect, { target: { value: "/demo/HoneyDrunk.AI" } });
@@ -511,6 +534,7 @@ describe("RepositoriesView", () => {
   it("renders the staged group and stages all unstaged changes", async () => {
     const client = new StagedRepoClient();
     renderRepos(client);
+    showPanel("Source control");
 
     // Both groups render: a Staged file and an unstaged one.
     await waitFor(() => expect(screen.getByText("staged.ts")).toBeTruthy());
@@ -525,6 +549,7 @@ describe("RepositoriesView", () => {
   it("unstages all staged changes", async () => {
     const client = new StagedRepoClient();
     renderRepos(client);
+    showPanel("Source control");
 
     await waitFor(() => expect(screen.getByText("staged.ts")).toBeTruthy());
     fireEvent.click(screen.getByRole("button", { name: "Unstage all" }));
@@ -535,6 +560,7 @@ describe("RepositoriesView", () => {
   it("commits a staged change and clears the message", async () => {
     const client = new StagedRepoClient();
     renderRepos(client);
+    showPanel("Source control");
 
     await waitFor(() => expect(screen.getByText("staged.ts")).toBeTruthy());
     fireEvent.change(screen.getByLabelText("Commit message"), { target: { value: "wip: save" } });
@@ -549,6 +575,7 @@ describe("RepositoriesView", () => {
   it("unstages a staged file from the context menu", async () => {
     const client = new StagedRepoClient();
     renderRepos(client);
+    showPanel("Source control");
 
     fireEvent.contextMenu(await screen.findByText("staged.ts"));
     const menu = await screen.findByRole("menu", { name: "File actions" });
@@ -561,6 +588,7 @@ describe("RepositoriesView", () => {
   it("refreshes on demand and on a matching fs_changed event, but ignores unrelated paths", async () => {
     const client = new CapturingClient();
     renderRepos(client);
+    showPanel("Source control");
 
     await waitFor(() => expect(screen.getByText("packages/ui/src/App.tsx")).toBeTruthy());
     const baselineBrowse = client.browseDirCount;

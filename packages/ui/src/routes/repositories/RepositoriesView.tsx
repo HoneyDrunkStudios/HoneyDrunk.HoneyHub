@@ -643,13 +643,73 @@ function RepoChanges({
   );
 }
 
+/** The activity rail's "Explorer" glyph: a document/file page. */
+function ExplorerIcon(): ReactElement {
+  return (
+    <svg viewBox="0 0 16 16" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="1.3" aria-hidden="true">
+      <path d="M9.3 1.6H4a1 1 0 0 0-1 1v10.8a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1V5.3L9.3 1.6Z" strokeLinejoin="round" />
+      <path d="M9.2 1.7v3.8h3.7" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+/** The activity rail's "Source control" glyph: a git branch. */
+function BranchIcon(): ReactElement {
+  return (
+    <svg viewBox="0 0 16 16" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="1.3" aria-hidden="true">
+      <circle cx="4.6" cy="3" r="1.7" />
+      <circle cx="4.6" cy="13" r="1.7" />
+      <circle cx="11.4" cy="4.4" r="1.7" />
+      <path d="M4.6 4.7v6.6" strokeLinecap="round" />
+      <path d="M11.4 6.1c0 2.9-2.3 3.4-4.3 3.9-1 .3-1.9.7-2.3 1.5" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+type LeftPanel = "explorer" | "sourceControl";
+
+interface ActivityRailProps {
+  active: LeftPanel;
+  onSelect: (panel: LeftPanel) => void;
+}
+
+/** The far-left activity rail (VS Code model): switches the sidebar between the file explorer and
+    the source-control panel. Only the active icon is highlighted; the panels themselves swap. */
+function ActivityRail({ active, onSelect }: Readonly<ActivityRailProps>): ReactElement {
+  return (
+    <nav className="repos-rail" aria-label="Views">
+      <button
+        type="button"
+        className={`repos-rail-btn${active === "explorer" ? " is-active" : ""}`}
+        aria-label="Explorer"
+        aria-pressed={active === "explorer"}
+        title="Explorer"
+        onClick={() => onSelect("explorer")}
+      >
+        <ExplorerIcon />
+      </button>
+      <button
+        type="button"
+        className={`repos-rail-btn${active === "sourceControl" ? " is-active" : ""}`}
+        aria-label="Source control"
+        aria-pressed={active === "sourceControl"}
+        title="Source control"
+        onClick={() => onSelect("sourceControl")}
+      >
+        <BranchIcon />
+      </button>
+    </nav>
+  );
+}
+
 /**
  * Repositories: HoneyHub's IDE surface (PRD-0011 Amendment 2). One page that merges the
- * old Browse + Git surfaces: an explorer tree on the left, a source-control panel with
- * multi-select and a right-click menu, and a center pane that views a file (syntax
- * highlighted), edits it in place (saved through the bridge's `write_file` boundary,
- * ADR-0097), or shows a changed file's diff. Reads are free; every git write is
- * confirmation-gated and a save writes only the local working tree (PRs-as-artifacts holds).
+ * old Browse + Git surfaces, laid out like VS Code: a far-left activity rail switches the
+ * sidebar between an explorer tree and a source-control panel (multi-select + right-click
+ * menu), while the center pane always holds the Monaco editor for the open file (saved
+ * through the bridge's `write_file` boundary, ADR-0097) or a changed file's diff. Reads are
+ * free; every git write is confirmation-gated and a save writes only the local working tree
+ * (PRs-as-artifacts holds).
  */
 export function RepositoriesView({
   client,
@@ -677,6 +737,10 @@ export function RepositoriesView({
   const [confirm, setConfirm] = useState<PendingConfirm | undefined>(undefined);
   const [selected, setSelected] = useState<Set<string>>(() => new Set());
   const [menu, setMenu] = useState<ContextTarget | undefined>(undefined);
+
+  // Which panel the far-left activity rail shows (VS Code model): the explorer tree or the
+  // source-control panel. Only one is mounted at a time; the Monaco editor always holds the centre.
+  const [leftPanel, setLeftPanel] = useState<LeftPanel>("explorer");
 
   // Center pane: a file (viewed or edited) or a diff.
   const [viewerMode, setViewerMode] = useState<"file" | "diff">("file");
@@ -896,45 +960,51 @@ export function RepositoriesView({
       </header>
 
       <div className="repos-body">
-        <aside className="repos-explorer" aria-label="Explorer">
-          <p className="repos-pane-title">Files</p>
-          <ul className="repos-tree">
-            <ExplorerTree
-              rootListing={rootListing}
-              listings={listings}
-              expandedDirs={expandedDirs}
-              openFilePath={file?.path}
-              onToggleDir={toggleDir}
-              onOpenFile={openFile}
-            />
-          </ul>
+        <ActivityRail active={leftPanel} onSelect={setLeftPanel} />
 
-          <SourceControl
-            repos={overview?.repos ?? []}
-            repo={repo}
-            activeRepo={activeRepo}
-            branches={branches}
-            commitMessage={commitMessage}
-            newBranch={newBranch}
-            feedback={feedback}
-            busy={busy}
-            selected={selected}
-            onSelectRepo={setActiveRepo}
-            onCommitMessage={setCommitMessage}
-            onNewBranch={setNewBranch}
-            onOpenDiff={repoActions.onOpenDiff}
-            onOpenFile={repoActions.onOpenFile}
-            onToggleSelected={toggleSelected}
-            onContextMenu={(target) => setMenu(target)}
-            onStage={repoActions.onStage}
-            onUnstage={repoActions.onUnstage}
-            onCommit={repoActions.onCommit}
-            onPush={repoActions.onPush}
-            onPull={repoActions.onPull}
-            onCheckout={repoActions.onCheckout}
-            onDiscardFile={repoActions.onDiscardFile}
-          />
-        </aside>
+        {leftPanel === "explorer" ? (
+          <aside className="repos-sidebar" aria-label="Explorer">
+            <p className="repos-pane-title">Files</p>
+            <ul className="repos-tree">
+              <ExplorerTree
+                rootListing={rootListing}
+                listings={listings}
+                expandedDirs={expandedDirs}
+                openFilePath={file?.path}
+                onToggleDir={toggleDir}
+                onOpenFile={openFile}
+              />
+            </ul>
+          </aside>
+        ) : (
+          <aside className="repos-sidebar" aria-label="Source control panel">
+            <SourceControl
+              repos={overview?.repos ?? []}
+              repo={repo}
+              activeRepo={activeRepo}
+              branches={branches}
+              commitMessage={commitMessage}
+              newBranch={newBranch}
+              feedback={feedback}
+              busy={busy}
+              selected={selected}
+              onSelectRepo={setActiveRepo}
+              onCommitMessage={setCommitMessage}
+              onNewBranch={setNewBranch}
+              onOpenDiff={repoActions.onOpenDiff}
+              onOpenFile={repoActions.onOpenFile}
+              onToggleSelected={toggleSelected}
+              onContextMenu={(target) => setMenu(target)}
+              onStage={repoActions.onStage}
+              onUnstage={repoActions.onUnstage}
+              onCommit={repoActions.onCommit}
+              onPush={repoActions.onPush}
+              onPull={repoActions.onPull}
+              onCheckout={repoActions.onCheckout}
+              onDiscardFile={repoActions.onDiscardFile}
+            />
+          </aside>
+        )}
 
         <div className="repos-viewer">
           {viewerMode === "diff" ? (
