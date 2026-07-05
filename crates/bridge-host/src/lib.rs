@@ -26,11 +26,17 @@ use axum::routing::get;
 use axum::Router;
 use futures_util::{SinkExt, StreamExt};
 use honeyhub_bridge::clock::now_rfc3339;
-use honeyhub_bridge::{BridgeError, BridgeEvent, ClientCommand, PairingRegistry, WireFrame};
+use honeyhub_bridge::{
+    BridgeError, BridgeEvent, ClientCommand, DispatchGovernor, PairingRegistry, WireFrame,
+};
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use tokio::net::TcpListener;
 use tokio::sync::{broadcast, mpsc, Mutex};
 use tower_http::services::ServeDir;
+
+/// The bridge-hosted MCP server exposing `dispatch_agent` (ADR-0098). Mounted at
+/// `/mcp` on the same router as the WS wire when dispatch is enabled.
+mod mcp;
 
 /// Debounce window for coalescing a burst of filesystem events into one notification.
 const FS_DEBOUNCE: Duration = Duration::from_millis(400);
@@ -88,6 +94,7 @@ pub async fn serve(
     registry: PairingRegistry,
     poll_interval: Duration,
     static_dir: Option<PathBuf>,
+    dispatch: Option<Arc<DispatchGovernor>>,
 ) -> std::io::Result<()> {
     let (events_tx, _events_rx) = broadcast::channel::<BridgeEvent>(1024);
     let host = Arc::new(Host {
@@ -114,11 +121,18 @@ pub async fn serve(
     // (debounced) instead of polling.
     install_fs_watcher(&host).await;
 
+    let mut app = Router::new().route("/ws", get(ws_handler));
+    // Mount the cross-backend dispatch MCP endpoint (ADR-0098) alongside the WS wire
+    // on the same origin, when the host enabled it. `nest_service` at `/mcp` takes
+    // precedence over the static fallback below. When dispatch is disabled the
+    // endpoint is simply absent — launched CLIs then carry no `dispatch_agent` tool.
+    if let Some(governor) = dispatch {
+        app = app.nest_service("/mcp", mcp::dispatch_service(Arc::clone(&host), governor));
+    }
     let state = AppState {
         host,
         registry: Arc::new(registry),
     };
-    let mut app = Router::new().route("/ws", get(ws_handler));
     if let Some(dir) = static_dir {
         app = app.fallback_service(ServeDir::new(dir).append_index_html_on_directories(true));
     }

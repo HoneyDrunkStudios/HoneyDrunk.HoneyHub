@@ -913,6 +913,8 @@ mod tests {
             transcript: Vec::new(),
             launch_command: None,
             attachments: Vec::new(),
+            parent_run_id: None,
+            parent_session_id: None,
         };
         let error = adapter
             .start(request)
@@ -982,6 +984,8 @@ mod tests {
             transcript: Vec::new(),
             launch_command: None,
             attachments: Vec::new(),
+            parent_run_id: None,
+            parent_session_id: None,
         };
         let error = adapter.start(request).expect_err("missing binary fails");
         assert_eq!(error.code, "backend_unavailable");

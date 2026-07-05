@@ -10,6 +10,7 @@ pub mod checks;
 pub mod clock;
 pub mod coaching;
 pub mod core;
+pub mod dispatch;
 pub mod environment;
 pub mod fsbrowse;
 pub mod git;
@@ -52,6 +53,11 @@ pub use checks::{
 };
 pub use coaching::{coach, CoachingSnapshot};
 pub use core::{BridgeRuntime, ManagedRun, ReplyOutcome};
+pub use dispatch::{
+    audit_dispatch, backend_id, child_cap_from_env, dispatch_backends_from_env, parse_backend,
+    summarize_task, DispatchAdmission, DispatchCaller, DispatchDenial, DispatchDenialReason,
+    DispatchGovernor, DEFAULT_CHILD_CAP, DISPATCH_SERVER_NAME,
+};
 pub use environment::{detect_environment, BackendVersion, EnvironmentInfo};
 pub use fsbrowse::{
     browse_dir, is_workspace_file, read_file, resolve_workspace_file, search_files, write_file,

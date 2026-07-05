@@ -261,6 +261,13 @@ export interface StartRunRequest {
       materializes them to a temp dir and appends their paths to the task so the agent
       can read them. Omitted/empty = none. */
   attachments?: ChatAttachment[];
+  /** The run that dispatched this one, when an agent started it through the
+      `dispatch_agent` capability (ADR-0098 C). Omitted for every operator-started run.
+      Additive on the wire so existing frames stay byte-compatible; paired with
+      `parentSessionId` so a child records who dispatched it. */
+  parentRunId?: string;
+  /** The session of the dispatching parent (ADR-0098 C). Omitted for operator runs. */
+  parentSessionId?: string;
 }
 
 /** Per-model USD pricing (per million tokens), when the bridge knows an authoritative

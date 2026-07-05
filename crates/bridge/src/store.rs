@@ -499,6 +499,8 @@ mod tests {
             started_at: Some("2026-06-01T00:00:00.000Z".to_string()),
             completed_at: Some(completed_at.to_string()),
             failure_reason: None,
+            parent_run_id: None,
+            parent_session_id: None,
         }
     }
 

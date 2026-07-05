@@ -142,6 +142,17 @@ pub struct StartRunRequest {
     /// can read them. Empty = none.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub attachments: Vec<ChatAttachment>,
+    /// The run that dispatched this one, when it was started by an agent through the
+    /// `dispatch_agent` capability (ADR-0098 C). `None` for every operator-started run.
+    /// Additive on the wire (serde `default` + skip-if-none), so every existing frame
+    /// stays byte-compatible — an operator run simply carries no parent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_run_id: Option<String>,
+    /// The session of the dispatching parent (ADR-0098 C). `None` for operator runs.
+    /// Paired with `parent_run_id` so a child records who dispatched it and the Runs
+    /// board can nest it under its parent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_session_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

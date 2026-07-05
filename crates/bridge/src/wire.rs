@@ -1912,6 +1912,8 @@ mod tests {
                         transcript: Vec::new(),
                         launch_command: None,
                         attachments: Vec::new(),
+                        parent_run_id: None,
+                        parent_session_id: None,
                     }),
                 },
                 created_at,

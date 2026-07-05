@@ -48,6 +48,8 @@ fn start_request(workspace: &str, run_id: &str, follow_up: Option<&str>) -> Star
         transcript: Vec::new(),
         launch_command: None,
         attachments: Vec::new(),
+        parent_run_id: None,
+        parent_session_id: None,
     }
 }
 

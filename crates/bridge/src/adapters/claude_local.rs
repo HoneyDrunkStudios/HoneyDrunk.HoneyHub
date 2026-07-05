@@ -23,6 +23,7 @@ use crate::adapter::{
 };
 use crate::adapters::child_run::{ChildRun, EventClock, RunSlot};
 use crate::artifact::{ArtifactKind, DispatchArtifact};
+use crate::dispatch::{DispatchCaller, DispatchGovernor, DISPATCH_SERVER_NAME};
 use crate::session::{
     DispatchMessage, DispatchMessageRole, DispatchRunState, UsageConfidence, UsageFidelity,
     UsageSignal,
@@ -31,7 +32,7 @@ use crate::wire::{BridgeEvent, BridgeStatusEvent};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::process::Command;
-use std::sync::{Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard};
 use uuid::Uuid;
 
 /// The `claude.local` backend adapter. Methods take `&self` (the trait contract),
@@ -41,6 +42,12 @@ pub struct ClaudeLocalAdapter {
     model: Option<String>,
     clock: EventClock,
     runs: Mutex<HashMap<String, RunSlot>>,
+    /// The cross-backend dispatch governor (ADR-0098), when the host wired it. When
+    /// present **and enabled**, each launch injects the bridge `dispatch_agent` MCP
+    /// endpoint (`--mcp-config`) with a per-run capability token, so the Claude
+    /// session can spawn parented subagents. `None`/disabled = no injection, and the
+    /// run launches normally without the tool (graceful degradation).
+    dispatch: Option<Arc<DispatchGovernor>>,
 }
 
 impl ClaudeLocalAdapter {
@@ -52,7 +59,40 @@ impl ClaudeLocalAdapter {
             model,
             clock,
             runs: Mutex::new(HashMap::new()),
+            dispatch: None,
         }
+    }
+
+    /// Wire the cross-backend dispatch governor (ADR-0098) so each launched Claude
+    /// session receives the `dispatch_agent` tool via an injected MCP endpoint.
+    /// Chainable; `None` (the default) leaves dispatch off. The token minted per run
+    /// is what makes a `dispatch_agent` call attributable to the parent run.
+    pub fn with_dispatch(mut self, dispatch: Option<Arc<DispatchGovernor>>) -> Self {
+        self.dispatch = dispatch;
+        self
+    }
+
+    /// The extra CLI args that inject the bridge dispatch MCP endpoint into a launch,
+    /// or `None` when dispatch is unwired or disabled (graceful degradation: the run
+    /// launches with no `dispatch_agent` tool). Minting the capability token here
+    /// binds it to **this** run, so a `dispatch_agent` call the session makes is
+    /// attributable back to it (ADR-0098 B). Kept as a pure arg-builder so the
+    /// injection decision is unit-testable without spawning a CLI.
+    fn dispatch_mcp_args(&self, run_id: &str, request: &StartRunRequest) -> Option<Vec<String>> {
+        let governor = self.dispatch.as_ref()?;
+        if !governor.is_enabled() {
+            return None;
+        }
+        let token = governor.issue_token(DispatchCaller {
+            session_id: request.session.id.clone(),
+            run_id: run_id.to_string(),
+            backend: AgentBackend::ClaudeLocal,
+            workspace_root: request.workspace_root.clone(),
+        });
+        Some(vec![
+            "--mcp-config".to_string(),
+            build_mcp_config_json(governor.endpoint(), &token),
+        ])
     }
 
     fn lock_runs(&self) -> Result<MutexGuard<'_, HashMap<String, RunSlot>>, BridgeError> {
@@ -134,6 +174,25 @@ impl ClaudeLocalAdapter {
         }
         command
     }
+}
+
+/// Build the Claude Code `--mcp-config` JSON that points a launched session at the
+/// bridge's dispatch MCP endpoint, authenticated with the per-run capability token.
+/// Claude Code accepts an inline JSON string for `--mcp-config`; the entry is an
+/// HTTP MCP server carrying an `Authorization: Bearer` header (ADR-0098 B). Built
+/// with serde so the URL and token are always correctly escaped, and additive to
+/// the existing arg-builder so nothing else about the launch changes.
+fn build_mcp_config_json(endpoint: &str, token: &str) -> String {
+    let mut servers = serde_json::Map::new();
+    servers.insert(
+        DISPATCH_SERVER_NAME.to_string(),
+        serde_json::json!({
+            "type": "http",
+            "url": endpoint,
+            "headers": { "Authorization": format!("Bearer {token}") },
+        }),
+    );
+    serde_json::json!({ "mcpServers": Value::Object(servers) }).to_string()
 }
 
 /// Write a Claude `user` turn frame to the run's stdin, keeping the same process
@@ -459,6 +518,12 @@ impl AgentBackendAdapter for ClaudeLocalAdapter {
 
         let mut command = self.base_command(request.model.as_deref(), request.agent.as_deref());
         command.current_dir(&request.workspace_root);
+        // Additively inject the dispatch MCP endpoint (ADR-0098) so this session gets
+        // the `dispatch_agent` tool. Absent/disabled dispatch injects nothing, so the
+        // run launches exactly as before (graceful degradation).
+        if let Some(args) = self.dispatch_mcp_args(&run_id, &request) {
+            command.args(args);
+        }
         let mut run = ChildRun::spawn(command, request.session.id.clone(), None)?;
         let process_id = run.process_id();
 
@@ -802,8 +867,83 @@ mod tests {
             transcript: Vec::new(),
             launch_command: None,
             attachments: Vec::new(),
+            parent_run_id: None,
+            parent_session_id: None,
         };
         let error = adapter.start(request).expect_err("missing binary fails");
         assert_eq!(error.code, "backend_unavailable");
+    }
+
+    fn dispatch_request() -> StartRunRequest {
+        StartRunRequest {
+            session: crate::session::DispatchSession {
+                pinned: false,
+                id: "parent-session".to_string(),
+                backend: AgentBackend::ClaudeLocal,
+                title: "t".to_string(),
+                workspace_root: "/work".to_string(),
+                created_at: "2026-07-05T12:00:00Z".to_string(),
+                updated_at: "2026-07-05T12:00:00Z".to_string(),
+                current_run_id: None,
+            },
+            workspace_root: "/work".to_string(),
+            task: "plan the thing".to_string(),
+            model: None,
+            agent: None,
+            effort: None,
+            requested_run_id: Some("parent-run".to_string()),
+            follow_up_to_run_id: None,
+            transcript: Vec::new(),
+            launch_command: None,
+            attachments: Vec::new(),
+            parent_run_id: None,
+            parent_session_id: None,
+        }
+    }
+
+    #[test]
+    fn injects_mcp_config_only_when_dispatch_enabled() {
+        let request = dispatch_request();
+
+        // No governor wired -> no injection (graceful: the run launches tool-less).
+        let bare = ClaudeLocalAdapter::new("claude", None, test_clock());
+        assert!(bare.dispatch_mcp_args("parent-run", &request).is_none());
+
+        // A disabled governor (no allowed backends) also injects nothing.
+        let off =
+            ClaudeLocalAdapter::new("claude", None, test_clock()).with_dispatch(Some(Arc::new(
+                DispatchGovernor::new("http://127.0.0.1:8765/mcp", vec![], 4),
+            )));
+        assert!(off.dispatch_mcp_args("parent-run", &request).is_none());
+
+        // An enabled governor injects `--mcp-config` with the endpoint and a token
+        // that resolves back to THIS parent run (attribution, ADR-0098 B).
+        let governor = Arc::new(DispatchGovernor::new(
+            "http://127.0.0.1:8765/mcp",
+            vec![AgentBackend::CodexLocal],
+            4,
+        ));
+        let adapter = ClaudeLocalAdapter::new("claude", None, test_clock())
+            .with_dispatch(Some(governor.clone()));
+        let args = adapter
+            .dispatch_mcp_args("parent-run", &request)
+            .expect("enabled dispatch injects args");
+        assert_eq!(args[0], "--mcp-config");
+
+        let config: Value = serde_json::from_str(&args[1]).expect("mcp config is valid json");
+        let server = &config["mcpServers"][DISPATCH_SERVER_NAME];
+        assert_eq!(server["type"], "http");
+        assert_eq!(server["url"], "http://127.0.0.1:8765/mcp");
+        let auth = server["headers"]["Authorization"]
+            .as_str()
+            .expect("authorization header present");
+        let token = auth
+            .strip_prefix("Bearer ")
+            .expect("authorization is a bearer token");
+        let caller = governor.resolve(token).expect("the minted token resolves");
+        assert_eq!(caller.run_id, "parent-run");
+        assert_eq!(caller.session_id, "parent-session");
+        assert_eq!(caller.backend, AgentBackend::ClaudeLocal);
+        assert_eq!(caller.workspace_root, "/work");
     }
 }
