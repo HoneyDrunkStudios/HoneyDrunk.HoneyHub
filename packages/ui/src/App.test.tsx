@@ -39,11 +39,17 @@ function openHive() {
   fireEvent.click(screen.getByRole("button", { name: /open navigation/i }));
 }
 
-/** Open the hive and click a view's hex. Every view — including the config/trust surfaces
-    (Settings / Updates / Alerts) — is a honeycomb hex (role="menuitem"). */
+/** Open the hive and click a primary view's hex (role="menuitem"). */
 function navigate(view: string | RegExp) {
   openHive();
   fireEvent.click(screen.getByRole("menuitem", { name: view }));
+}
+
+/** Open the hive and click a config surface (Alerts / Updates / Settings). These are small icon
+    buttons in the bloom header (role="button"), not honeycomb hexes. */
+function openConfig(name: string | RegExp) {
+  openHive();
+  fireEvent.click(screen.getByRole("button", { name }));
 }
 
 describe("App", () => {
@@ -69,29 +75,40 @@ describe("App", () => {
     expect(screen.getByRole("heading", { name: "HoneyHub" })).toBeTruthy();
   });
 
-  it("switches to the settings view from the Settings hex", () => {
+  it("opens Settings as a modal over the current page from the header gear", () => {
     renderCockpit();
 
-    navigate("Settings");
+    openConfig("Settings");
 
+    expect(screen.getByRole("dialog", { name: "Settings" })).toBeTruthy();
     expect(screen.getByRole("heading", { name: "Settings" })).toBeTruthy();
+    // The page behind stays mounted (the composer is still there under the modal) — Settings no
+    // longer blanks the page.
+    const headings = screen.getAllByRole("heading");
+    expect(headings.some((heading) => COMPOSER_PROMPTS.includes(heading.textContent ?? ""))).toBe(
+      true
+    );
+    // Reach a real control: the bridge concerns are their own sections now.
+    fireEvent.click(screen.getByRole("button", { name: "Pairing & devices" }));
     expect(screen.getByLabelText("Device name")).toBeTruthy();
   });
 
-  it("shows Alerts as a honeycomb hex", () => {
+  it("shows Alerts as a bell button in the bloom header", () => {
     renderCockpit();
 
-    // Alerts lives in the honeycomb (visible once the hive is opened), not a top-right control.
     openHive();
-    expect(screen.getByRole("menuitem", { name: /alerts/i })).toBeTruthy();
+    // Alerts is a header icon button, not a honeycomb hex.
+    expect(screen.getByRole("button", { name: /alerts/i })).toBeTruthy();
+    expect(screen.queryByRole("menuitem", { name: /alerts/i })).toBeNull();
   });
 
   it("renders the subscription plans panel in Settings and persists a change", () => {
     renderCockpit();
 
-    navigate("Settings");
+    openConfig("Settings");
+    fireEvent.click(screen.getByRole("button", { name: "Plans & costs" }));
 
-    // The plans editor (wired via `plans` + `onPlansChange`) renders in Settings.
+    // The plans editor (wired via `plans` + `onPlansChange`) renders in the Plans & costs section.
     const claudePlan = screen.getByLabelText("Claude Code plan") as HTMLSelectElement;
     expect(claudePlan).toBeTruthy();
 
@@ -152,7 +169,7 @@ describe("App", () => {
   it("opens the Settings modal and closes it back to the cockpit", () => {
     renderCockpit();
 
-    navigate("Settings");
+    openConfig("Settings");
     expect(screen.getByRole("dialog", { name: "Settings" })).toBeTruthy();
 
     // The backdrop closes the modal (onClose → back to the Hub).

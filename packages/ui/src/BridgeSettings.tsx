@@ -3,9 +3,6 @@ import type { AgentBackend, BackendCapability } from "@honeydrunk/honeyhub-types
 import { backendLabel } from "./backends";
 import { FolderBrowser } from "./routes/onboarding/FolderBrowser";
 import { ConnectPhone } from "./routes/settings/ConnectPhone";
-import { ConnectorsSettings } from "./routes/settings/ConnectorsSettings";
-import { PlansSettings } from "./routes/settings/PlansSettings";
-import type { Plans } from "./plans";
 import type { WireClient } from "./wire/client";
 import {
   acknowledgeGrant,
@@ -22,66 +19,54 @@ import {
   type PairingFactory
 } from "./settingsModel";
 
-export interface BridgeSettingsProps {
-  initialState?: BridgeSettingsState;
-  factory?: PairingFactory;
-  // Optional controlled state: when `state` + `onChange` are supplied the parent
-  // owns the settings (so the run screen can read the workspace allowlist);
-  // otherwise the component manages its own state.
-  state?: BridgeSettingsState;
-  onChange?: (next: BridgeSettingsState) => void;
-  // The detected backend catalog, so the same provider toggles shown at first run
-  // are editable here with live "detected / not found" status.
-  catalog?: BackendCapability[];
-  // The transport, so the workspace-roots picker can browse the filesystem + resolve
-  // `.code-workspace` files. When omitted, only the manual path field is shown.
-  client?: WireClient;
-  // Whether this view is the active one. The folder picker subscribes to bridge
-  // events, so it is only mounted when active to avoid cross-talk with the Browse
-  // view (both react to the shared `dir_listing` stream). Defaults to true.
-  active?: boolean;
-  // The user's subscription plans + a setter. Optional so the component still renders
-  // standalone (tests, an uncontrolled host); when omitted the plans panel is hidden.
-  plans?: Plans;
-  onPlansChange?: (next: Plans) => void;
+// The settings state is either controlled by a parent (SettingsModal, which owns the single
+// bridge-settings object so every sub-page edits the same value) or, when used standalone (tests),
+// managed internally. Shared here so each split sub-page resolves it the same way.
+function useBridgeState(
+  controlled: BridgeSettingsState | undefined,
+  onChange: ((next: BridgeSettingsState) => void) | undefined,
+  initialState: BridgeSettingsState | undefined
+): { state: BridgeSettingsState; setState: (next: BridgeSettingsState) => void } {
+  const [internal, setInternal] = useState<BridgeSettingsState>(initialState ?? emptyBridgeSettings);
+  return {
+    state: controlled ?? internal,
+    setState: onChange ?? setInternal
+  };
 }
 
-export function BridgeSettings({
+/** Props shared by the state-editing sub-pages. Controlled (`state` + `onChange`) in the modal;
+    uncontrolled (`initialState`) when rendered standalone. */
+interface SharedBridgeProps {
+  initialState?: BridgeSettingsState;
+  state?: BridgeSettingsState;
+  onChange?: (next: BridgeSettingsState) => void;
+}
+
+// ------------------------------------------------------------------ Pairing & devices
+
+export interface PairingSettingsProps extends SharedBridgeProps {
+  factory?: PairingFactory;
+  // The transport, so the connect-a-phone QR + address list can render. Its bridge
+  // subscriptions only mount while this page is active.
+  client?: WireClient;
+  active?: boolean;
+}
+
+export function PairingSettings({
   initialState,
-  factory,
   state: controlledState,
   onChange,
-  catalog = [],
+  factory,
   client,
-  active = true,
-  plans,
-  onPlansChange
-}: Readonly<BridgeSettingsProps>) {
-  // Detection lookup so each toggle can show whether the CLI was found on PATH.
-  const detected = new Map<AgentBackend, BackendCapability>(
-    catalog.map((entry) => [entry.backend, entry])
-  );
-  const [internalState, setInternalState] = useState<BridgeSettingsState>(
-    initialState ?? emptyBridgeSettings
-  );
-  const state = controlledState ?? internalState;
-  const setState: (next: BridgeSettingsState) => void = onChange ?? setInternalState;
+  active = true
+}: Readonly<PairingSettingsProps>) {
+  const { state, setState } = useBridgeState(controlledState, onChange, initialState);
   const [deviceName, setDeviceName] = useState("");
-  const [workspaceRoot, setWorkspaceRoot] = useState("");
   const [error, setError] = useState<string | undefined>(undefined);
 
-  // Compute the next state exactly once (model transitions can consume a
-  // PairingFactory id/token, so a second evaluation would waste one) and commit
-  // it. Each handler is a discrete user event, so `state` is the latest committed
-  // value here — there is no batched multi-update in a single tick to go stale
-  // against. Returns whether the transition succeeded so callers clear inputs
-  // only on success.
-  const apply = (
-    compute: (prev: BridgeSettingsState) => BridgeSettingsState
-  ): boolean => {
+  const apply = (compute: (prev: BridgeSettingsState) => BridgeSettingsState): boolean => {
     try {
-      const next = compute(state);
-      setState(next);
+      setState(compute(state));
       setError(undefined);
       return true;
     } catch (cause) {
@@ -96,41 +81,13 @@ export function BridgeSettings({
     }
   };
 
-  // Add one or more roots from the folder/workspace-file picker, skipping any that are
-  // invalid or already present (no error for those, unlike the single manual add).
-  const addRoots = (paths: string[]) => {
-    let next = state;
-    for (const path of paths) {
-      try {
-        next = addWorkspaceRoot(next, path);
-      } catch {
-        // skip duplicates / non-absolute paths from the picker
-      }
-    }
-    setState(next);
-    setError(undefined);
-  };
-
-  const onAddRoot = () => {
-    if (apply((prev) => addWorkspaceRoot(prev, workspaceRoot))) {
-      setWorkspaceRoot("");
-    }
-  };
-
-  // Extracted from the model-toggle JSX so the change handler isn't a 5th-level
-  // nested function (provider map → model map → onChange → apply callback).
-  const onModelToggle = (
-    backend: AgentBackend,
-    modelId: string,
-    allowed: boolean,
-    modelIds: string[]
-  ) => {
-    apply((prev) => setModelAllowed(prev, backend, modelId, allowed, modelIds));
-  };
-
   return (
-    <section className="bridge-settings" aria-label="Settings">
-      <h2>Settings</h2>
+    <section className="bridge-settings" aria-label="Pairing & devices">
+      <h2>Pairing &amp; devices</h2>
+      <p className="settings-group-hint">
+        Pair a phone or another device with this cockpit, and manage the devices you have granted
+        access.
+      </p>
 
       {error !== undefined && (
         <p role="alert" className="settings-error">
@@ -184,94 +141,208 @@ export function BridgeSettings({
       </fieldset>
 
       {client !== undefined && <ConnectPhone client={client} active={active} />}
+    </section>
+  );
+}
 
-      <ConnectorsSettings {...(client === undefined ? {} : { client })} />
+// ------------------------------------------------------------------ Workspace roots
 
-      {plans !== undefined && onPlansChange !== undefined && (
-        <PlansSettings plans={plans} onChange={onPlansChange} />
+export interface WorkspaceRootsSettingsProps extends SharedBridgeProps {
+  // The transport, so the folder / `.code-workspace` picker can browse the filesystem. Its
+  // bridge subscription only mounts while this page is active.
+  client?: WireClient;
+  active?: boolean;
+}
+
+export function WorkspaceRootsSettings({
+  initialState,
+  state: controlledState,
+  onChange,
+  client,
+  active = true
+}: Readonly<WorkspaceRootsSettingsProps>) {
+  const { state, setState } = useBridgeState(controlledState, onChange, initialState);
+  const [workspaceRoot, setWorkspaceRoot] = useState("");
+  const [error, setError] = useState<string | undefined>(undefined);
+
+  const apply = (compute: (prev: BridgeSettingsState) => BridgeSettingsState): boolean => {
+    try {
+      setState(compute(state));
+      setError(undefined);
+      return true;
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "unexpected error");
+      return false;
+    }
+  };
+
+  // Add one or more roots from the folder/workspace-file picker, skipping any that are
+  // invalid or already present (no error for those, unlike the single manual add).
+  const addRoots = (paths: string[]) => {
+    let next = state;
+    for (const path of paths) {
+      try {
+        next = addWorkspaceRoot(next, path);
+      } catch {
+        // skip duplicates / non-absolute paths from the picker
+      }
+    }
+    setState(next);
+    setError(undefined);
+  };
+
+  const onAddRoot = () => {
+    if (apply((prev) => addWorkspaceRoot(prev, workspaceRoot))) {
+      setWorkspaceRoot("");
+    }
+  };
+
+  return (
+    <section className="bridge-settings" aria-label="Workspace roots">
+      <h2>Workspace roots</h2>
+      <p className="settings-group-hint">
+        The repository folders the agent may read and launch in. Add a root by browsing or by
+        absolute path.
+      </p>
+
+      {error !== undefined && (
+        <p role="alert" className="settings-error">
+          {error}
+        </p>
       )}
 
-      <fieldset>
-        <legend>Workspace roots</legend>
-        {client !== undefined && active && (
-          <>
-            <p className="ws-browse-label">Browse for a folder or a .code-workspace file</p>
-            <FolderBrowser client={client} onAddRoots={addRoots} />
-          </>
-        )}
-        <label htmlFor="workspace-root">Or enter an absolute path</label>
-        <input
-          id="workspace-root"
-          value={workspaceRoot}
-          onChange={(event) => setWorkspaceRoot(event.target.value)}
-        />
-        <button type="button" onClick={onAddRoot}>
-          Add root
-        </button>
-        <ul aria-label="Workspace roots">
-          {state.workspaceRoots.map((root) => (
-            <li key={root}>
-              <code>{root}</code>
-              <button
-                type="button"
-                onClick={() => apply((prev) => removeWorkspaceRoot(prev, root))}
-              >
-                Remove
-              </button>
-            </li>
-          ))}
-        </ul>
-      </fieldset>
+      {client !== undefined && active && (
+        <>
+          <p className="ws-browse-label">Browse for a folder or a .code-workspace file</p>
+          <FolderBrowser client={client} onAddRoots={addRoots} />
+        </>
+      )}
+      <label htmlFor="workspace-root">Or enter an absolute path</label>
+      <input
+        id="workspace-root"
+        value={workspaceRoot}
+        onChange={(event) => setWorkspaceRoot(event.target.value)}
+      />
+      <button type="button" onClick={onAddRoot}>
+        Add root
+      </button>
+      <ul aria-label="Workspace roots">
+        {state.workspaceRoots.map((root) => (
+          <li key={root}>
+            <code>{root}</code>
+            <button
+              type="button"
+              onClick={() => apply((prev) => removeWorkspaceRoot(prev, root))}
+            >
+              Remove
+            </button>
+          </li>
+        ))}
+      </ul>
+    </section>
+  );
+}
 
-      <fieldset>
-        <legend>Providers &amp; models</legend>
-        {allBackends.map((backend: AgentBackend) => {
-          const entry = detected.get(backend);
-          const models = entry?.models ?? [];
-          const modelIds = models.map((model) => model.id);
-          const providerOn = state.backends.includes(backend);
-          return (
-            <div key={backend} className="provider-config">
-              <label className="backend-toggle">
-                <input
-                  type="checkbox"
-                  checked={providerOn}
-                  onChange={(event) =>
-                    apply((prev) => setBackendAllowed(prev, backend, event.target.checked))
-                  }
-                />
-                <span className="backend-toggle-name">{backendLabel(backend)}</span>
-                {entry !== undefined && (
-                  <span
-                    className={`provider-chip ${entry.available ? "is-detected" : "is-missing"}`}
-                  >
-                    {entry.available ? "Detected" : "Not found"}
-                  </span>
-                )}
-              </label>
-              {models.length > 0 && (
-                <ul className="model-toggles" aria-label={`${backendLabel(backend)} models`}>
-                  {models.map((model) => (
-                    <li key={model.id}>
-                      <label className="model-toggle">
-                        <input
-                          type="checkbox"
-                          checked={isModelEnabled(state, backend, model.id)}
-                          disabled={!providerOn}
-                          onChange={(event) =>
-                            onModelToggle(backend, model.id, event.target.checked, modelIds)
-                          }
-                        />
-                        {model.label}
-                      </label>
-                    </li>
-                  ))}
-                </ul>
+// ------------------------------------------------------------------ Providers & models
+
+export interface ProvidersModelsSettingsProps extends SharedBridgeProps {
+  // The detected backend catalog, so each provider toggle shows "detected / not found" and its
+  // models are listed.
+  catalog?: BackendCapability[];
+}
+
+export function ProvidersModelsSettings({
+  initialState,
+  state: controlledState,
+  onChange,
+  catalog = []
+}: Readonly<ProvidersModelsSettingsProps>) {
+  const { state, setState } = useBridgeState(controlledState, onChange, initialState);
+  const [error, setError] = useState<string | undefined>(undefined);
+
+  // Detection lookup so each toggle can show whether the CLI was found on PATH.
+  const detected = new Map<AgentBackend, BackendCapability>(
+    catalog.map((entry) => [entry.backend, entry])
+  );
+
+  const apply = (compute: (prev: BridgeSettingsState) => BridgeSettingsState): void => {
+    try {
+      setState(compute(state));
+      setError(undefined);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "unexpected error");
+    }
+  };
+
+  // Extracted from the model-toggle JSX so the change handler isn't a deeply nested function.
+  const onModelToggle = (
+    backend: AgentBackend,
+    modelId: string,
+    allowed: boolean,
+    modelIds: string[]
+  ) => {
+    apply((prev) => setModelAllowed(prev, backend, modelId, allowed, modelIds));
+  };
+
+  return (
+    <section className="bridge-settings" aria-label="Providers & models">
+      <h2>Providers &amp; models</h2>
+      <p className="settings-group-hint">
+        Enable the agent CLIs you have installed, then choose which of their models to allow.
+      </p>
+
+      {error !== undefined && (
+        <p role="alert" className="settings-error">
+          {error}
+        </p>
+      )}
+
+      {allBackends.map((backend: AgentBackend) => {
+        const entry = detected.get(backend);
+        const models = entry?.models ?? [];
+        const modelIds = models.map((model) => model.id);
+        const providerOn = state.backends.includes(backend);
+        return (
+          <div key={backend} className="provider-config">
+            <label className="backend-toggle">
+              <input
+                type="checkbox"
+                checked={providerOn}
+                onChange={(event) =>
+                  apply((prev) => setBackendAllowed(prev, backend, event.target.checked))
+                }
+              />
+              <span className="backend-toggle-name">{backendLabel(backend)}</span>
+              {entry !== undefined && (
+                <span
+                  className={`provider-chip ${entry.available ? "is-detected" : "is-missing"}`}
+                >
+                  {entry.available ? "Detected" : "Not found"}
+                </span>
               )}
-            </div>
-          );
-        })}
-      </fieldset>
+            </label>
+            {models.length > 0 && (
+              <ul className="model-toggles" aria-label={`${backendLabel(backend)} models`}>
+                {models.map((model) => (
+                  <li key={model.id}>
+                    <label className="model-toggle">
+                      <input
+                        type="checkbox"
+                        checked={isModelEnabled(state, backend, model.id)}
+                        disabled={!providerOn}
+                        onChange={(event) =>
+                          onModelToggle(backend, model.id, event.target.checked, modelIds)
+                        }
+                      />
+                      {model.label}
+                    </label>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+        );
+      })}
     </section>
   );
 }

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { Dispatch, ReactElement, RefObject, SetStateAction } from "react";
 import type {
   BridgeEvent,
@@ -15,7 +15,11 @@ import type { WireClient } from "../../wire/client";
 import { basename, isWithin } from "../../paths";
 import { resolveDefaultWorkspaceRoot } from "../../settingsModel";
 import { diffStat, groupFiles, replaceRepoStatus, toDiffLines } from "../git/gitModel";
-import { highlightSource, isMarkdownFile, renderMarkdown } from "../browse/fileView";
+
+// Monaco is heavy, so the file editor is loaded only once a file is opened. The base bundle
+// (and the mobile PWA that never touches a file) stays light; a <Suspense> fallback covers the
+// one-time chunk fetch.
+const CodeEditor = lazy(() => import("./CodeEditor"));
 
 export interface RepositoriesViewProps {
   client: WireClient;
@@ -109,14 +113,16 @@ function togglePathInSet(setSelected: Dispatch<SetStateAction<Set<string>>>, pat
   });
 }
 
-/** Re-read the open file + every expanded directory so the tree and viewer reflect disk. */
+/** Re-read the open file + every expanded directory so the tree and viewer reflect disk. Skips
+    re-reading the open file while it has unsaved edits (`dirty`), so a disk refresh never clobbers
+    the draft in the editor. */
 function refreshRepoTree(
   client: WireClient,
   loadDir: (path: string) => void,
   folder: string,
   expandedDirs: Set<string>,
   openPath: string | undefined,
-  editing: boolean
+  dirty: boolean
 ): void {
   if (folder !== "") {
     loadDir(folder);
@@ -124,7 +130,7 @@ function refreshRepoTree(
   for (const path of expandedDirs) {
     loadDir(path);
   }
-  if (openPath !== undefined && !editing) {
+  if (openPath !== undefined && !dirty) {
     void client.readFile(openPath).catch(() => undefined);
   }
 }
@@ -138,8 +144,6 @@ interface ViewerControls {
   setFileLoading: Dispatch<SetStateAction<boolean>>;
   setFileError: Dispatch<SetStateAction<string | undefined>>;
   setDiff: Dispatch<SetStateAction<GitDiff | undefined>>;
-  setEditing: Dispatch<SetStateAction<boolean>>;
-  setDraft: Dispatch<SetStateAction<string>>;
   setSaving: Dispatch<SetStateAction<boolean>>;
   setSaveError: Dispatch<SetStateAction<string | undefined>>;
   pendingFile: RefObject<string | undefined>;
@@ -147,10 +151,11 @@ interface ViewerControls {
   savingPath: RefObject<string | undefined>;
 }
 
-/** Open a file into the centre pane's read view, correlating the async reply by path. */
+/** Open a file straight into the centre pane's editor, correlating the async reply by path.
+    The editor's initial draft is seeded from the file contents when they arrive (see
+    `applyFileContents`). */
 function openFileInView(v: ViewerControls, path: string): void {
   v.setViewerMode("file");
-  v.setEditing(false);
   v.setSaveError(undefined);
   v.pendingFile.current = path;
   v.setFile(undefined);
@@ -171,16 +176,6 @@ function openDiffInView(v: ViewerControls, repoRoot: string, path?: string): voi
   v.setFileError(undefined);
   v.pendingDiff.current = path === undefined ? { root: repoRoot } : { root: repoRoot, path };
   void v.client.gitDiff(repoRoot, path).catch(() => v.setFileError("could not read the diff"));
-}
-
-/** Enter edit mode for the open file (no-op for a missing or truncated-too-large file). */
-function startEditingFile(v: ViewerControls, file: FileContents | undefined): void {
-  if (file === undefined || file.truncated) {
-    return;
-  }
-  v.setDraft(file.content);
-  v.setSaveError(undefined);
-  v.setEditing(true);
 }
 
 /** Save the editor draft through the bridge's write_file boundary (ADR-0097). */
@@ -244,7 +239,7 @@ interface RepoEventContext {
   setBusy: Dispatch<SetStateAction<boolean>>;
   setCommitMessage: Dispatch<SetStateAction<string>>;
   setSaving: Dispatch<SetStateAction<boolean>>;
-  setEditing: Dispatch<SetStateAction<boolean>>;
+  setDraft: Dispatch<SetStateAction<string>>;
   setSaveError: Dispatch<SetStateAction<string | undefined>>;
 }
 
@@ -255,6 +250,9 @@ function applyFileContents(file: FileContents, ctx: RepoEventContext): void {
     ctx.setFile(file);
     ctx.setFileLoading(false);
     ctx.setFileError(undefined);
+    // Seed (or re-seed, after a save) the editor draft from disk. The refresh path won't
+    // re-read an open file while it's dirty, so this never clobbers unsaved edits.
+    ctx.setDraft(file.content);
   }
 }
 
@@ -274,15 +272,14 @@ function applyGitOp(result: GitOpResult, ctx: RepoEventContext): void {
 }
 
 function applyFileWritten(result: FileWrittenResult, ctx: RepoEventContext): void {
-  // Our own save came back. Clear the saving state and, on success, leave edit mode and re-read
-  // the file so the viewer shows the persisted content.
+  // Our own save came back. Clear the saving state and, on success, re-read the file so the
+  // editor's draft is re-seeded from the persisted content (clearing the dirty indicator).
   if (result.path !== ctx.savingPath.current) {
     return;
   }
   ctx.setSaving(false);
   ctx.savingPath.current = undefined;
   if (result.ok) {
-    ctx.setEditing(false);
     ctx.setSaveError(undefined);
     ctx.pendingFile.current = result.path;
     void ctx.client.readFile(result.path).catch(() => undefined);
@@ -688,13 +685,15 @@ export function RepositoriesView({
   const [fileError, setFileError] = useState<string | undefined>(undefined);
   const [diff, setDiff] = useState<GitDiff | undefined>(undefined);
 
-  // Editor state.
-  const [editing, setEditing] = useState(false);
+  // Editor state. The file always opens directly in the editor; `draft` is the live editor text,
+  // seeded from disk and compared against the file to derive the dirty indicator.
   const [draft, setDraft] = useState("");
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | undefined>(undefined);
 
   const error = fileError;
+  // Unsaved edits: a non-truncated open file whose editor text has diverged from disk.
+  const dirty = file !== undefined && !file.truncated && draft !== file.content;
 
   // Refs so the [client]-only subscription reads the latest without re-subscribing.
   const folderRef = useRef(folder);
@@ -722,8 +721,8 @@ export function RepositoriesView({
 
   // Re-read the open file + every expanded directory (so the tree and viewer reflect disk).
   const refreshTree = useCallback(() => {
-    refreshRepoTree(client, loadDir, folderRef.current, expandedDirs, pendingFile.current, editing);
-  }, [client, loadDir, expandedDirs, editing]);
+    refreshRepoTree(client, loadDir, folderRef.current, expandedDirs, pendingFile.current, dirty);
+  }, [client, loadDir, expandedDirs, dirty]);
   const refreshTreeRef = useRef(refreshTree);
   refreshTreeRef.current = refreshTree;
 
@@ -751,7 +750,7 @@ export function RepositoriesView({
       setBusy,
       setCommitMessage,
       setSaving,
-      setEditing,
+      setDraft,
       setSaveError
     };
     return client.subscribe((event) => applyRepoEvent(event, ctx));
@@ -815,8 +814,6 @@ export function RepositoriesView({
     setFileLoading,
     setFileError,
     setDiff,
-    setEditing,
-    setDraft,
     setSaving,
     setSaveError,
     pendingFile,
@@ -825,8 +822,13 @@ export function RepositoriesView({
   };
   const openFile = (path: string) => openFileInView(viewer, path);
   const openDiff = (repoRoot: string, path?: string) => openDiffInView(viewer, repoRoot, path);
-  const startEditing = () => startEditingFile(viewer, file);
   const saveDraft = () => saveFileDraft(viewer, file, draft);
+  const revertDraft = () => {
+    if (file !== undefined) {
+      setDraft(file.content);
+    }
+    setSaveError(undefined);
+  };
   const runWrite = (op: () => Promise<void>, confirmMessage?: string) =>
     runGitWrite(setBusy, setFeedback, setConfirm, op, confirmMessage);
 
@@ -871,7 +873,7 @@ export function RepositoriesView({
               setActiveRepo(undefined);
               setFile(undefined);
               setDiff(undefined);
-              setEditing(false);
+              setSaveError(undefined);
             }}
           >
             {workspaceRoots.map((option) => (
@@ -942,17 +944,13 @@ export function RepositoriesView({
               file={file}
               loading={fileLoading}
               error={error}
-              editing={editing}
               draft={draft}
+              dirty={dirty}
               saving={saving}
               saveError={saveError}
-              onEdit={startEditing}
               onDraft={setDraft}
               onSave={saveDraft}
-              onCancel={() => {
-                setEditing(false);
-                setSaveError(undefined);
-              }}
+              onRevert={revertDraft}
             />
           )}
         </div>
@@ -1341,41 +1339,31 @@ interface FilePaneProps {
   file: FileContents | undefined;
   loading: boolean;
   error: string | undefined;
-  editing: boolean;
   draft: string;
+  dirty: boolean;
   saving: boolean;
   saveError: string | undefined;
-  onEdit: () => void;
   onDraft: (value: string) => void;
   onSave: () => void;
-  onCancel: () => void;
+  onRevert: () => void;
 }
 
-/** The center pane's file view: syntax-highlighted read mode, or an in-place editor
-    whose Save crosses the bridge's `write_file` boundary (ADR-0097). */
+/** The center pane's file editor: the file opens directly in a Monaco editor (honeypunk theme,
+    syntax highlighting, IntelliSense). Save (button or Ctrl/Cmd+S) crosses the bridge's
+    `write_file` boundary (ADR-0097); Revert restores the on-disk text. A truncated (too-large)
+    file opens read-only. Monaco is lazy-loaded, so the pane shows a fallback on first open. */
 function FilePane({
   file,
   loading,
   error,
-  editing,
   draft,
+  dirty,
   saving,
   saveError,
-  onEdit,
   onDraft,
   onSave,
-  onCancel
+  onRevert
 }: Readonly<FilePaneProps>): ReactElement {
-  const rendered = useMemo(() => {
-    if (file === undefined || editing) {
-      return undefined;
-    }
-    if (isMarkdownFile(file.path)) {
-      return { kind: "markdown" as const, html: renderMarkdown(file.content) };
-    }
-    return { kind: "code" as const, html: highlightSource(file.content, file.path) };
-  }, [file, editing]);
-
   if (loading) {
     return <div className="file-viewer empty">Loading…</div>;
   }
@@ -1389,30 +1377,7 @@ function FilePane({
     );
   }
   if (file === undefined) {
-    return <div className="file-viewer empty">Select a file to view or edit its source.</div>;
-  }
-
-  const dirty = editing && draft !== file.content;
-
-  let body: ReactElement;
-  if (editing) {
-    body = (
-      <textarea
-        className="repos-editor"
-        aria-label={`Edit ${basename(file.path)}`}
-        spellCheck={false}
-        value={draft}
-        onChange={(event) => onDraft(event.target.value)}
-      />
-    );
-  } else if (rendered?.kind === "markdown") {
-    body = <article className="markdown-body" dangerouslySetInnerHTML={{ __html: rendered.html }} />;
-  } else {
-    body = (
-      <pre className="code-view">
-        <code className="hljs" dangerouslySetInnerHTML={{ __html: rendered?.html ?? "" }} />
-      </pre>
-    );
+    return <div className="file-viewer empty">Select a file to open it in the editor.</div>;
   }
 
   return (
@@ -1423,23 +1388,18 @@ function FilePane({
           {dirty ? " •" : ""}
         </span>
         <span className="file-viewer-actions">
-          {editing ? (
-            <>
-              <button type="button" className="git-link" onClick={onSave} disabled={saving || !dirty}>
-                {saving ? "Saving…" : "Save"}
-              </button>
-              <button type="button" className="git-link" onClick={onCancel} disabled={saving}>
-                Cancel
-              </button>
-            </>
-          ) : (
-            <>
-              <span className="file-viewer-meta">{file.truncated ? "truncated (too large to edit)" : ""}</span>
-              <button type="button" className="git-link" onClick={onEdit} disabled={file.truncated}>
-                Edit
-              </button>
-            </>
-          )}
+          <span className="file-viewer-meta">{file.truncated ? "truncated (too large to edit)" : ""}</span>
+          <button type="button" className="git-link" onClick={onRevert} disabled={saving || !dirty}>
+            Revert
+          </button>
+          <button
+            type="button"
+            className="git-link"
+            onClick={onSave}
+            disabled={saving || !dirty || file.truncated}
+          >
+            {saving ? "Saving…" : "Save"}
+          </button>
         </span>
       </header>
 
@@ -1449,7 +1409,17 @@ function FilePane({
         </p>
       )}
 
-      {body}
+      <div className="repos-editor-host">
+        <Suspense fallback={<div className="file-viewer empty">Loading editor…</div>}>
+          <CodeEditor
+            path={file.path}
+            value={draft}
+            onChange={onDraft}
+            onSave={onSave}
+            readOnly={file.truncated}
+          />
+        </Suspense>
+      </div>
     </div>
   );
 }

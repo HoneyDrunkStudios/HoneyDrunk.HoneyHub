@@ -1,7 +1,6 @@
 import {
   useCallback,
   useEffect,
-  useRef,
   useState,
   type CSSProperties,
   type ReactElement
@@ -25,7 +24,6 @@ import { SpendView } from "./routes/spend/SpendView";
 import { CoachingView } from "./routes/coaching/CoachingView";
 import { AgentsView } from "./routes/agents/AgentsView";
 import { RepositoriesView } from "./routes/repositories/RepositoriesView";
-import { RunsView } from "./routes/runs/RunsView";
 import {
   applyRunEvent,
   orderRuns,
@@ -33,9 +31,6 @@ import {
   type RunsState
 } from "./routes/runs/runsModel";
 import { GroupsView } from "./routes/groups/GroupsView";
-import { GoalsView } from "./routes/goals/GoalsView";
-import { GoalOrchestrator } from "./routes/goals/goalOrchestrator";
-import { orderGoals, type GoalsState } from "./routes/goals/goalsModel";
 import { enabledIds, loadConnectorPrefs } from "./connectors";
 import {
   isPageVisible,
@@ -106,9 +101,7 @@ const PRIMARY_NAV: NavItem[] = [
   // On desktop the right-hand dock IS the chat; the Chat page exists for phones,
   // where the dock does not fit. The nav item is CSS-hidden on wide screens.
   { view: "run", label: "Chat", icon: <IconChat />, mobileOnly: true },
-  { view: "runs", label: "Runs", icon: <IconRuns /> },
   { view: "groups", label: "Groups", icon: <IconGroups /> },
-  { view: "goals", label: "Goals", icon: <IconTarget /> },
   { view: "plan", label: "Plan", icon: <IconMap /> },
   { view: "work", label: "Work", icon: <IconInbox /> },
   { view: "jobs", label: "Jobs", icon: <IconPulse /> },
@@ -118,16 +111,13 @@ const PRIMARY_NAV: NavItem[] = [
   { view: "coaching", label: "Coaching", icon: <IconSpark /> },
   { view: "agents", label: "Agents", icon: <IconGrid /> }
 ];
-// The config/trust surfaces. They live at the tail of the honeycomb (after the primary views),
-// so every view is reachable from the one hive launcher.
+// The config/trust surfaces. They render as small icon buttons in the bloom header (bell /
+// download / gear), opposite the wordmark — not honeycomb hexes. Order = left-to-right there.
 const SECONDARY_NAV: NavItem[] = [
-  { view: "settings", label: "Settings", icon: <IconGear /> },
+  { view: "notifications", label: "Alerts", icon: <IconBell /> },
   { view: "updates", label: "Updates", icon: <IconDownload /> },
-  { view: "notifications", label: "Alerts", icon: <IconBell /> }
+  { view: "settings", label: "Settings", icon: <IconGear /> }
 ];
-// The full nav list the honeycomb blooms into (day-to-day surfaces first, then config/trust),
-// in display order. HiveNav filters it by page visibility.
-const NAV_ITEMS: NavItem[] = [...PRIMARY_NAV, ...SECONDARY_NAV];
 
 export interface AppProps {
   // Injectable so tests (and a future real WebSocket client) can supply their own
@@ -199,35 +189,17 @@ export function App({ client }: AppProps = {}) {
   // stream — the active-runs dashboard. Runs are registered at launch (for task +
   // backend) and updated as their events arrive.
   const [runs, setRuns] = useState<RunsState>({});
-  // Active goals (bounded orchestration loops). Driven by the orchestrator below, which
-  // launches their runs over the same transport and feeds them onto the runs board.
-  const [goals, setGoals] = useState<GoalsState>({});
-  const orchestratorRef = useRef<GoalOrchestrator | undefined>(undefined);
+  // Settings is a true modal over the current page (decoupled from `view`, so the page behind
+  // stays mounted + visible). The honeycomb header gear opens it; Escape / backdrop / ✕ close it.
+  const [settingsOpen, setSettingsOpen] = useState(false);
 
-  // Aggregate all run events into the runs dashboard, whatever transport is active.
+  // Aggregate all run events into the runs dashboard, whatever transport is active. The Groups
+  // view consumes this summary; there is no standalone Runs page anymore.
   useEffect(() => {
     const unsubscribe = wireClient.subscribe((event) => {
       setRuns((prev) => applyRunEvent(prev, event));
     });
     return unsubscribe;
-  }, [wireClient]);
-
-  // The goal orchestrator follows the active transport: re-created when the client swaps
-  // (mock → real), disposed on cleanup so it never leaks a subscription. Each goal's runs
-  // are registered onto the dashboard exactly like chat runs.
-  useEffect(() => {
-    const orchestrator = new GoalOrchestrator(wireClient, {
-      onChange: (next) => setGoals(next),
-      onRunStarted: (init) => setRuns((prev) => registerRun(prev, init)),
-      now: () => new Date().toISOString(),
-      newId: () => crypto.randomUUID()
-    });
-    orchestratorRef.current = orchestrator;
-    setGoals(orchestrator.list());
-    return () => {
-      orchestrator.dispose();
-      orchestratorRef.current = undefined;
-    };
   }, [wireClient]);
 
   // Ask the bridge which backends are installed (and their models) whenever the
@@ -403,6 +375,16 @@ export function App({ client }: AppProps = {}) {
     }
   };
 
+  // Route honeycomb + header selections. Settings opens the modal OVER the current page (the
+  // view stays put, so the page behind stays visible); every other surface is a full page.
+  const handleNav = (next: View): void => {
+    if (next === "settings") {
+      setSettingsOpen(true);
+      return;
+    }
+    setView(next);
+  };
+
   const unread = unreadCount(notifications);
 
   // First launch (or after a reset): the provider-selection screen replaces the
@@ -481,27 +463,12 @@ export function App({ client }: AppProps = {}) {
             />
           </div>
 
-          <div hidden={view !== "runs"}>
-            <RunsView runs={orderRuns(runs)} />
-          </div>
-
           <div hidden={view !== "groups"}>
             <GroupsView
               client={wireClient}
               active={view === "groups"}
               workspaceRoots={settings.workspaceRoots}
               runs={orderRuns(runs)}
-            />
-          </div>
-
-          <div hidden={view !== "goals"}>
-            <GoalsView
-              goals={orderGoals(goals)}
-              backends={settings.backends.length > 0 ? settings.backends : ["claude.local"]}
-              onCreate={(input) => orchestratorRef.current?.start(input)}
-              onPause={(goalId) => orchestratorRef.current?.pause(goalId)}
-              onResume={(goalId) => orchestratorRef.current?.resume(goalId)}
-              onStop={(goalId) => orchestratorRef.current?.stop(goalId)}
             />
           </div>
 
@@ -569,9 +536,10 @@ export function App({ client }: AppProps = {}) {
           of view-tiles (one hex per visible nav view). Replaces the old left activity-bar;
           `position: fixed`, so its place in the tree is flexible. */}
       <HiveNav
-        items={NAV_ITEMS}
+        items={PRIMARY_NAV}
+        configItems={SECONDARY_NAV}
         view={view}
-        onSelect={setView}
+        onSelect={handleNav}
         unread={unread}
         pagePrefs={pagePrefs}
         connected={connected}
@@ -619,10 +587,10 @@ export function App({ client }: AppProps = {}) {
         }}
       />
 
-      {/* Settings is a modal overlay (left section-nav + scrollable pane) rather than an inline
-          page, so its distinct groups are easier to tell apart. Mounted only while open; closing
-          returns to the Hub. */}
-      {view === "settings" && (
+      {/* Settings is a true modal OVER the current page (a dim full-screen backdrop + a centered
+          card). Decoupled from `view`, so the page behind stays mounted + visible; closing returns
+          to exactly that page. Mounted only while open. */}
+      {settingsOpen && (
         <SettingsModal
           settings={settings}
           onSettingsChange={setSettings}
@@ -636,7 +604,7 @@ export function App({ client }: AppProps = {}) {
           onNotificationPrefsChange={setNotificationPrefs}
           pagePrefs={pagePrefs}
           onPagePrefsChange={setPagePrefs}
-          onClose={() => setView("hub")}
+          onClose={() => setSettingsOpen(false)}
         />
       )}
     </div>
@@ -653,17 +621,6 @@ function IconChat() {
   );
 }
 
-function IconRuns() {
-  return (
-    <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2">
-      <path d="M4 6h16M4 12h16M4 18h16" strokeLinecap="round" />
-      <circle cx="7" cy="6" r="1.4" fill="currentColor" stroke="none" />
-      <circle cx="11" cy="12" r="1.4" fill="currentColor" stroke="none" />
-      <circle cx="8" cy="18" r="1.4" fill="currentColor" stroke="none" />
-    </svg>
-  );
-}
-
 function IconGroups() {
   return (
     <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2">
@@ -671,16 +628,6 @@ function IconGroups() {
       <rect x="13" y="4" width="8" height="6" rx="1.5" />
       <rect x="8" y="14" width="8" height="6" rx="1.5" />
       <path d="M7 10v2h10v-2M12 12v2" strokeLinecap="round" strokeLinejoin="round" />
-    </svg>
-  );
-}
-
-function IconTarget() {
-  return (
-    <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2">
-      <circle cx="12" cy="12" r="9" />
-      <circle cx="12" cy="12" r="5" />
-      <circle cx="12" cy="12" r="1.4" fill="currentColor" stroke="none" />
     </svg>
   );
 }

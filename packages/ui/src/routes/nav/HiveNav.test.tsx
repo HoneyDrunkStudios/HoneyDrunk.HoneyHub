@@ -4,22 +4,27 @@ import { HiveNav, type HiveNavItem, type HiveNavProps } from "./HiveNav";
 
 const icon = <svg data-testid="icon" />;
 
-// The full honeycomb: primary views (hub, spend, coaching, work) plus the config/trust surfaces
-// (settings, updates, alerts) — all hexes now. Coaching exercises the pagePrefs filter.
+// The honeycomb holds only primary views (hub, spend, coaching, work); coaching exercises the
+// pagePrefs filter.
 const ITEMS: HiveNavItem[] = [
   { view: "hub", label: "Hub", icon },
   { view: "spend", label: "Spend", icon },
   { view: "coaching", label: "Coaching", icon },
-  { view: "work", label: "Work", icon },
-  { view: "settings", label: "Settings", icon },
+  { view: "work", label: "Work", icon }
+];
+
+// The config/trust surfaces (Alerts / Updates / Settings) — small icon buttons in the bloom header.
+const CONFIG: HiveNavItem[] = [
+  { view: "notifications", label: "Alerts", icon },
   { view: "updates", label: "Updates", icon },
-  { view: "notifications", label: "Alerts", icon }
+  { view: "settings", label: "Settings", icon }
 ];
 
 function renderHive(overrides: Partial<HiveNavProps> = {}) {
   const onSelect = vi.fn();
   const props: HiveNavProps = {
     items: ITEMS,
+    configItems: CONFIG,
     view: "hub",
     onSelect,
     unread: 0,
@@ -39,20 +44,19 @@ function openHive() {
 }
 
 describe("HiveNav", () => {
-  it("renders the collapsed hive launcher as the app icon", () => {
+  it("renders the collapsed hive launcher as the </> mark", () => {
     renderHive();
 
     const hive = screen.getByRole("button", { name: /open navigation/i });
     expect(hive.getAttribute("aria-expanded")).toBe("false");
-    // The launcher is the brand icon (an <img>), not a text glyph.
-    const logo = hive.querySelector("img");
-    expect(logo).toBeTruthy();
-    expect(logo?.getAttribute("src")).toContain("icon-512.svg");
+    // The launcher is the cyberpunk brand glyph, not an <img>.
+    expect(hive.textContent).toContain("</>");
+    expect(hive.querySelector("img")).toBeNull();
     // The honeycomb is closed until the hive is clicked.
     expect(screen.queryByRole("menu")).toBeNull();
   });
 
-  it("blooms the honeycomb of every view (primary + config) when clicked", () => {
+  it("blooms a honeycomb of only the primary views", () => {
     renderHive();
 
     openHive();
@@ -61,21 +65,45 @@ describe("HiveNav", () => {
       "true"
     );
     expect(screen.getByRole("menu", { name: "Views" })).toBeTruthy();
-    // Primary and config surfaces are all honeycomb menuitems.
     expect(screen.getByRole("menuitem", { name: "Hub" })).toBeTruthy();
-    expect(screen.getByRole("menuitem", { name: "Settings" })).toBeTruthy();
-    expect(screen.getByRole("menuitem", { name: "Updates" })).toBeTruthy();
-    expect(screen.getByRole("menuitem", { name: /alerts/i })).toBeTruthy();
+    // Config surfaces are NOT honeycomb hexes.
+    expect(screen.queryByRole("menuitem", { name: "Settings" })).toBeNull();
+    expect(screen.queryByRole("menuitem", { name: "Updates" })).toBeNull();
+    expect(screen.queryByRole("menuitem", { name: /alerts/i })).toBeNull();
+  });
+
+  it("renders the config surfaces as header buttons once the hive is open", () => {
+    renderHive();
+
+    // Closed: the header (and its config buttons) is not mounted.
+    expect(screen.queryByRole("button", { name: "Settings" })).toBeNull();
+
+    openHive();
+
+    // Open: config surfaces are buttons in the bloom header, not menuitems.
+    expect(screen.getByRole("button", { name: "Settings" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Updates" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: /alerts/i })).toBeTruthy();
+  });
+
+  it("routes a header config button to its view and closes the bloom", () => {
+    const { onSelect } = renderHive();
+
+    openHive();
+    fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+
+    expect(onSelect).toHaveBeenCalledWith("settings");
+    // Clicking a config icon collapses the bloom, same as a hex.
+    expect(screen.queryByRole("menu")).toBeNull();
   });
 
   it("selects a view and collapses when a hex is clicked", () => {
     const { onSelect } = renderHive();
 
     openHive();
-    fireEvent.click(screen.getByRole("menuitem", { name: "Settings" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "Spend" }));
 
-    expect(onSelect).toHaveBeenCalledWith("settings");
-    // The honeycomb collapses after a selection.
+    expect(onSelect).toHaveBeenCalledWith("spend");
     expect(screen.queryByRole("menu")).toBeNull();
   });
 
@@ -101,11 +129,11 @@ describe("HiveNav", () => {
   });
 
   it("marks the selected hex with the readable-selected class (dark content)", () => {
-    renderHive({ view: "settings" });
+    renderHive({ view: "spend" });
 
     openHive();
 
-    const selected = screen.getByRole("menuitem", { name: "Settings" });
+    const selected = screen.getByRole("menuitem", { name: "Spend" });
     // `is-current` carries the honey-fill + dark-content styling (readable "you are here").
     expect(selected.className).toContain("is-current");
     expect(selected.getAttribute("aria-current")).toBe("page");
@@ -113,17 +141,26 @@ describe("HiveNav", () => {
     expect(screen.getByRole("menuitem", { name: "Hub" }).className).not.toContain("is-current");
   });
 
-  it("shows the unread badge on the Alerts hex inside the comb", () => {
+  it("shows the unread badge on the collapsed launcher when the bloom is closed", () => {
+    renderHive({ unread: 3 });
+
+    // Closed: the badge is on the launcher (its aria-label also names the count).
+    expect(screen.getByText("3")).toBeTruthy();
+    expect(screen.getByRole("button", { name: /open navigation, 3 unread/i })).toBeTruthy();
+    // No header bell exists yet (bloom closed).
+    expect(screen.queryByRole("button", { name: /alerts, 3 unread/i })).toBeNull();
+  });
+
+  it("moves the unread badge to the header bell when the bloom is open", () => {
     renderHive({ unread: 3 });
 
     openHive();
 
-    // The Alerts hex carries the count (both as a visible badge and in its accessible name).
-    const alerts = screen.getByRole("menuitem", { name: /alerts, 3 unread/i });
-    expect(within(alerts.parentElement as HTMLElement).getByText("3")).toBeTruthy();
-    // The badge is not on the hive launcher.
-    const hive = screen.getByRole("button", { name: /open navigation/i });
-    expect(within(hive).queryByText("3")).toBeNull();
+    // The bell carries the count as a visible badge and in its accessible name.
+    const bell = screen.getByRole("button", { name: /alerts, 3 unread/i });
+    expect(within(bell).getByText("3")).toBeTruthy();
+    // The launcher no longer shows the badge while open (only the bell's "3" remains).
+    expect(screen.getAllByText("3")).toHaveLength(1);
   });
 
   it("offers the bridge-connect control while disconnected", () => {

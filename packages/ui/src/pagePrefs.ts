@@ -1,9 +1,9 @@
 // Page visibility preferences (opt-out): which nav pages the operator wants in the daily nav.
-// The cockpit is becoming an agent-first IDE, so the sidebar should be trimmable to the surfaces
-// you actually use. Every toggleable page is visible by DEFAULT, except two that default OFF
-// (Runs and Goals) — the operator asked to drop those from the daily nav but keep them re-enablable
-// here. Core pages (Hub, Chat, Settings, Updates, Alerts) are always on and never listed here.
-// Pure helpers, kept out of components so they're unit-testable. Mirrors the connectors.ts idiom.
+// The cockpit is becoming an agent-first IDE, so the honeycomb should be trimmable to the surfaces
+// you actually use. Every toggleable page is visible by DEFAULT (there are no default-hidden pages
+// now that Runs and Goals have been removed entirely). Core pages (Hub, Chat, Settings, Updates,
+// Alerts) are always on and never listed here. Pure helpers, kept out of components so they're
+// unit-testable. Mirrors the connectors.ts idiom.
 
 /** view-id → visible. Absent id = the default for that page (see DEFAULT_HIDDEN_PAGES). */
 export type PagePrefs = Record<string, boolean>;
@@ -11,9 +11,7 @@ export type PagePrefs = Record<string, boolean>;
 /** The pages the user may toggle on/off. Order mirrors the primary nav. Excludes core pages
     (hub, run, settings, updates, notifications), which are always rendered. */
 export const TOGGLEABLE_PAGES: { view: string; label: string }[] = [
-  { view: "runs", label: "Runs" },
   { view: "groups", label: "Groups" },
-  { view: "goals", label: "Goals" },
   { view: "plan", label: "Plan" },
   { view: "work", label: "Work" },
   { view: "jobs", label: "Jobs" },
@@ -24,8 +22,9 @@ export const TOGGLEABLE_PAGES: { view: string; label: string }[] = [
   { view: "agents", label: "Agents" }
 ];
 
-/** Pages hidden by default until the operator explicitly re-enables them. */
-export const DEFAULT_HIDDEN_PAGES: readonly string[] = ["runs", "goals"];
+/** Pages hidden by default until the operator explicitly re-enables them. None currently — every
+    toggleable page defaults visible. */
+export const DEFAULT_HIDDEN_PAGES: readonly string[] = [];
 
 const STORAGE_KEY = "honeyhub.pagePrefs.v1";
 

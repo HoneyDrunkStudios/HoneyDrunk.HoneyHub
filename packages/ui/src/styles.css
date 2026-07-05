@@ -571,12 +571,34 @@ button:not([class]):disabled {
   outline: 2px solid var(--neon-blue);
   outline-offset: 3px;
 }
-.hive-button-logo {
+.hive-button-mark {
   position: relative;
   z-index: 1;
-  width: 66%;
-  height: 66%;
-  filter: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.4));
+  font-family: var(--font-mono);
+  font-size: 1.12rem;
+  font-weight: 700;
+  letter-spacing: -0.03em;
+  color: var(--honey-bright);
+  text-shadow: 0 0 10px var(--honey-glow);
+}
+/* Unread badge on the collapsed launcher (mirrors the header bell's badge; shown only while the
+   bloom is closed). */
+.hive-launch-badge {
+  position: absolute;
+  top: -3px;
+  right: -3px;
+  z-index: 2;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  display: grid;
+  place-items: center;
+  border-radius: var(--radius-pill);
+  background: var(--neon-pink);
+  color: #fff;
+  font-size: 0.66rem;
+  font-weight: 700;
+  box-shadow: 0 0 0 2px var(--bg), var(--glow-pink);
 }
 
 /* --- bloomed honeycomb panel --- */
@@ -613,15 +635,70 @@ button:not([class]):disabled {
 .hive-bloom-head {
   display: flex;
   align-items: center;
-  gap: 8px;
-  /* Just the wordmark now, flush to the panel's (tight) left padding. */
-  padding-left: 0;
+  justify-content: space-between;
+  gap: 12px;
 }
 .hive-bloom-name {
   font-size: 1.08rem;
   font-weight: 700;
   letter-spacing: -0.01em;
   text-shadow: 0 0 14px var(--honey-glow);
+}
+
+/* Config/trust surfaces: a small right-aligned icon cluster in the bloom header (bell / download
+   / gear), opposite the wordmark. Ghost circular buttons, honey-tinted on hover/current. */
+.hive-bloom-config {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.hive-bloom-config-btn {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+  background: var(--panel-2);
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: border-color 0.14s ease, color 0.14s ease, box-shadow 0.14s ease;
+}
+.hive-bloom-config-btn:hover {
+  color: var(--honey-bright);
+  border-color: var(--honey-line);
+  box-shadow: var(--glow-gold);
+}
+.hive-bloom-config-btn:focus-visible {
+  outline: 2px solid var(--neon-blue);
+  outline-offset: 2px;
+}
+.hive-bloom-config-btn.is-current {
+  color: var(--honey-bright);
+  border-color: var(--honey-line);
+  box-shadow: 0 0 0 1px var(--honey-line), var(--glow-gold);
+}
+.hive-bloom-config-icon {
+  display: grid;
+  place-items: center;
+}
+.hive-bloom-config-badge {
+  position: absolute;
+  top: -5px;
+  right: -5px;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  display: grid;
+  place-items: center;
+  border-radius: var(--radius-pill);
+  background: var(--neon-pink);
+  color: #fff;
+  font-size: 0.6rem;
+  font-weight: 700;
+  box-shadow: 0 0 0 2px var(--panel), var(--glow-pink);
 }
 
 /* The honeycomb itself: a brick tessellation — fixed columns per row with alternate rows shifted
@@ -742,23 +819,6 @@ button:not([class]):disabled {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-.hive-cell-badge {
-  position: absolute;
-  top: 8px;
-  right: 10px;
-  z-index: 2;
-  min-width: 17px;
-  height: 17px;
-  padding: 0 4px;
-  display: grid;
-  place-items: center;
-  border-radius: var(--radius-pill);
-  background: var(--neon-pink);
-  color: #fff;
-  font-size: 0.62rem;
-  font-weight: 700;
-  box-shadow: 0 0 0 2px var(--panel), var(--glow-pink);
 }
 
 /* Reuses .conn-state + .bridge-connect (rehomed from the old sidebar footer). */
@@ -4159,6 +4219,20 @@ h2 {
 }
 
 /* --- Settings modal (left section-nav + scrollable pane) --- */
+/* A true web modal: a dim full-viewport backdrop over the whole app (content + honeycomb + chat
+   dock), with the centered card on top. Distinct from the transparent `.ws-backdrop` so only the
+   Settings modal dims the page behind it. */
+.settings-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  border: none;
+  padding: 0;
+  margin: 0;
+  background: rgba(4, 4, 10, 0.55);
+  cursor: default;
+}
+
 .settings-modal {
   position: fixed;
   z-index: 41;
@@ -4242,6 +4316,29 @@ h2 {
 .settings-modal-close:hover {
   background: var(--hover);
   color: var(--text);
+}
+
+/* Bridge settings, grouped into labeled subsections (pairing, workspace roots, providers, …)
+   so the long pane reads as clear concerns rather than a wall of controls. */
+.settings-group {
+  padding: 14px 0 4px;
+  border-top: 1px solid var(--border-hair);
+}
+.settings-group:first-of-type {
+  padding-top: 2px;
+  border-top: none;
+}
+.settings-group-title {
+  margin: 0 0 2px;
+  font-size: 0.98rem;
+  font-weight: 700;
+  color: var(--honey-soft);
+}
+.settings-group-hint {
+  margin: 0 0 10px;
+  font-size: 0.82rem;
+  color: var(--text-muted);
+  max-width: 60ch;
 }
 
 .page-prefs-hint {
@@ -7522,20 +7619,53 @@ button:focus-visible,
   flex-direction: column;
 }
 
-.repos-editor {
-  flex: 1;
-  width: 100%;
-  min-height: 300px;
-  border: none;
-  outline: none;
-  resize: none;
-  padding: 12px 14px;
-  background: transparent;
+/* The Monaco editor host: fills the remaining pane height so Monaco's automaticLayout can
+   measure a real box, and carries the editor's own dark background so nothing flashes behind
+   the lazy chunk on first open. */
+.repos-editor-host {
+  flex: 1 1 auto;
+  min-height: 0;
+  position: relative;
+  background: #0b0a11;
+}
+
+.repos-monaco {
+  height: 100%;
+}
+
+/* Repositories control polish: consistent sizing + a honey focus ring on the pane's selects,
+   the new-branch input, and the commit box (a light pass over the shared form styles, not a
+   redesign). */
+.repos-actions select,
+.repos-scm-head select,
+.repos-branch-switch select,
+.repos-new-branch input,
+.repos-commit textarea {
+  padding: 5px 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--panel-2);
   color: var(--text);
-  font-family: var(--font-mono);
+  font: inherit;
   font-size: 0.82rem;
-  line-height: 1.5;
-  tab-size: 2;
+}
+
+.repos-actions select:hover,
+.repos-scm-head select:hover,
+.repos-branch-switch select:hover,
+.repos-new-branch input:hover,
+.repos-commit textarea:hover {
+  border-color: var(--border-strong);
+}
+
+.repos-actions select:focus-visible,
+.repos-scm-head select:focus-visible,
+.repos-branch-switch select:focus-visible,
+.repos-new-branch input:focus-visible,
+.repos-commit textarea:focus-visible {
+  outline: none;
+  border-color: var(--honey-line);
+  box-shadow: 0 0 0 3px var(--honey-glow);
 }
 
 .repos-context-menu {

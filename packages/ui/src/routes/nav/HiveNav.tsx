@@ -20,12 +20,14 @@ export interface HiveNavItem {
 }
 
 export interface HiveNavProps {
-  /** The full nav list (primary views + the config/trust surfaces) in display order. The
-      honeycomb holds them all, filtered by page visibility. */
+  /** The primary view-switching items — the honeycomb. Filtered by page visibility. */
   items: HiveNavItem[];
+  /** The config/trust items (Alerts, Updates, Settings) — small icon buttons in the bloom
+      header (top-right, opposite the wordmark), not honeycomb hexes. */
+  configItems: HiveNavItem[];
   view: View;
   onSelect: (v: View) => void;
-  /** Alerts badge count; shown on the Alerts hex inside the honeycomb. */
+  /** Alerts badge count; shown on the header bell. */
   unread: number;
   pagePrefs: PagePrefs;
   connected: boolean;
@@ -55,7 +57,7 @@ function honeycombRows(items: HiveNavItem[], wide: boolean): HiveRow[] {
   // has at least two and reads balanced (the brick offset keeps the tessellation intact).
   const lastIndex = chunks.length - 1;
   const last = chunks[lastIndex];
-  if (chunks.length > 1 && last !== undefined && last.length === 1) {
+  if (chunks.length > 1 && last?.length === 1) {
     const prev = chunks[lastIndex - 1];
     if (prev !== undefined) {
       const moved = prev.pop();
@@ -69,11 +71,12 @@ function honeycombRows(items: HiveNavItem[], wide: boolean): HiveRow[] {
 
 const WIDE_QUERY = "(min-width: 861px)";
 
-/** The signature HoneyHub launcher: the app-icon hive blooms into a honeycomb of every view
-    (primary + config), filtered by page visibility. Replaces the old left activity-bar; content
-    runs edge-to-edge. */
+/** The signature HoneyHub launcher: the `</>` hive mark blooms into a honeycomb of the primary
+    views, with the config/trust surfaces (Alerts / Updates / Settings) as small icon buttons in
+    the bloom header. Replaces the old left activity-bar; content runs edge-to-edge. */
 export function HiveNav({
   items,
+  configItems,
   view,
   onSelect,
   unread,
@@ -90,10 +93,10 @@ export function HiveNav({
   // JS so it never leaves a hole in a chunked row. Defaults to wide (also the jsdom/test path,
   // where matchMedia is absent).
   const [wide, setWide] = useState<boolean>(() => {
-    if (typeof window === "undefined" || typeof window.matchMedia !== "function") {
+    if (typeof globalThis.matchMedia !== "function") {
       return true;
     }
-    return window.matchMedia(WIDE_QUERY).matches;
+    return globalThis.matchMedia(WIDE_QUERY).matches;
   });
   const hiveRef = useRef<HTMLButtonElement>(null);
   const combRef = useRef<HTMLDivElement>(null);
@@ -101,11 +104,10 @@ export function HiveNav({
   // Track the wide/narrow breakpoint so the honeycomb re-chunks and the Chat hex appears on
   // phones. Guarded for environments without matchMedia (jsdom) — there it stays wide.
   useEffect(() => {
-    const mm = typeof window === "undefined" ? undefined : window.matchMedia;
-    if (typeof mm !== "function") {
+    if (typeof globalThis.matchMedia !== "function") {
       return;
     }
-    const mq = mm.call(window, WIDE_QUERY);
+    const mq = globalThis.matchMedia(WIDE_QUERY);
     const onChange = (): void => setWide(mq.matches);
     onChange();
     mq.addEventListener("change", onChange);
@@ -164,10 +166,11 @@ export function HiveNav({
   const rows = honeycombRows(visible, wide);
   // Flat starting index per row → drives the bloom stagger (transition-delay by position).
   const rowBases: number[] = [];
-  rows.reduce((acc, row, index) => {
-    rowBases[index] = acc;
-    return acc + row.cells.length;
-  }, 0);
+  let flatIndex = 0;
+  for (const row of rows) {
+    rowBases.push(flatIndex);
+    flatIndex += row.cells.length;
+  }
 
   const handleSelect = (next: View): void => {
     onSelect(next);
@@ -188,8 +191,9 @@ export function HiveNav({
       return;
     }
     event.preventDefault();
-    const at = cells.findIndex((cell) => cell === document.activeElement);
-    let target = at;
+    const active = document.activeElement;
+    const at = active instanceof HTMLButtonElement ? cells.indexOf(active) : -1;
+    let target: number;
     if (event.key === "Home") {
       target = 0;
     } else if (event.key === "End") {
@@ -202,8 +206,6 @@ export function HiveNav({
     cells[target]?.focus();
   };
 
-  const logoSrc = `${import.meta.env.BASE_URL}icons/icon-512.svg`;
-
   return (
     <>
       <div className={`hive-launch${open ? " is-open" : ""}`}>
@@ -213,11 +215,22 @@ export function HiveNav({
           className="hive-button"
           aria-haspopup="menu"
           aria-expanded={open}
-          aria-label="Open navigation"
+          aria-label={
+            !open && unread > 0 ? `Open navigation, ${unread} unread` : "Open navigation"
+          }
           onClick={() => setOpen((prev) => !prev)}
         >
-          <img className="hive-button-logo" src={logoSrc} alt="" aria-hidden="true" />
+          <span className="hive-button-mark" aria-hidden="true">
+            {"</>"}
+          </span>
         </button>
+        {/* Unread badge sits on the collapsed launcher; while the bloom is open it moves to the
+            header Alerts bell instead. */}
+        {!open && unread > 0 && (
+          <span className="hive-launch-badge" aria-hidden="true">
+            {unread}
+          </span>
+        )}
       </div>
 
       {open && (
@@ -231,6 +244,34 @@ export function HiveNav({
           <div className="hive-bloom" aria-label="Navigation">
             <div className="hive-bloom-head">
               <h1 className="hive-bloom-name">HoneyHub</h1>
+              {/* Config/trust surfaces as a small right-aligned icon cluster, opposite the
+                  wordmark. The bell carries the unread badge. */}
+              <div className="hive-bloom-config">
+                {configItems.map((item) => {
+                  const isCurrent = item.view === view;
+                  const showBadge = item.view === "notifications" && unread > 0;
+                  const label = showBadge ? `${item.label}, ${unread} unread` : item.label;
+                  return (
+                    <button
+                      key={item.view}
+                      type="button"
+                      className={`hive-bloom-config-btn${isCurrent ? " is-current" : ""}`}
+                      aria-label={label}
+                      aria-current={isCurrent ? "page" : undefined}
+                      onClick={() => handleSelect(item.view)}
+                    >
+                      <span className="hive-bloom-config-icon" aria-hidden="true">
+                        {item.icon}
+                      </span>
+                      {showBadge && (
+                        <span className="hive-bloom-config-badge" aria-hidden="true">
+                          {unread}
+                        </span>
+                      )}
+                    </button>
+                  );
+                })}
+              </div>
             </div>
 
             <div
@@ -238,6 +279,7 @@ export function HiveNav({
               className="hive-comb"
               role="menu"
               aria-label="Views"
+              tabIndex={-1}
               onKeyDown={onCombKeyDown}
             >
               {rows.map((row, rowIndex) => (
@@ -247,7 +289,6 @@ export function HiveNav({
                 >
                   {row.cells.map((item, column) => {
                     const isCurrent = item.view === view;
-                    const showBadge = item.view === "notifications" && unread > 0;
                     return (
                       <span
                         className="hive-cell-wrap"
@@ -261,7 +302,6 @@ export function HiveNav({
                           role="menuitem"
                           className={`hive-cell${isCurrent ? " is-current" : ""}`}
                           aria-current={isCurrent ? "page" : undefined}
-                          aria-label={showBadge ? `${item.label}, ${unread} unread` : undefined}
                           onClick={() => handleSelect(item.view)}
                         >
                           <span className="hive-cell-icon" aria-hidden="true">
@@ -269,11 +309,6 @@ export function HiveNav({
                           </span>
                           <span className="hive-cell-label">{item.label}</span>
                         </button>
-                        {showBadge && (
-                          <span className="hive-cell-badge" aria-hidden="true">
-                            {unread}
-                          </span>
-                        )}
                       </span>
                     );
                   })}

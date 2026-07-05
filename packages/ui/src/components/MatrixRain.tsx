@@ -33,6 +33,20 @@ const FONT_PX = 15;
 const RESPAWN_MIN_MS = 1200;
 const RESPAWN_MAX_MS = 6000;
 
+// A tiny seeded PRNG (mulberry32). The rain is purely decorative, so it needs cheap noise,
+// not cryptographic randomness; a seeded generator keeps it out of the security-sensitive
+// `Math.random` path while looking just as lively. Seeded once per load for variety.
+function mulberry32(seed: number): () => number {
+  let a = seed >>> 0;
+  return () => {
+    a = (a + 0x6d2b79f5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+const rng = mulberry32((typeof Date === "undefined" ? 1 : Date.now()) || 0x9e3779b9);
+
 interface Stream {
   headPx: number; // continuous pixel position of the leading glyph
   cell: number; // last integer cell the head has crossed (drives glyph shift-in)
@@ -44,10 +58,10 @@ interface Stream {
 }
 
 function pick<T>(arr: T[]): T {
-  return arr[Math.floor(Math.random() * arr.length)] as T;
+  return arr[Math.floor(rng() * arr.length)] as T;
 }
 function randGlyph(): number {
-  return Math.floor(Math.random() * GLYPHS.length);
+  return Math.floor(rng() * GLYPHS.length);
 }
 
 /** The vertical flow: dim at the top, brightest ~45% down, fading a little toward the bottom. */
@@ -104,14 +118,14 @@ export function MatrixRain(): null {
     let streams: Stream[] = [];
 
     const makeStream = (initial: boolean): Stream => {
-      const startPx = initial ? -Math.random() * height : -FONT_PX * TRAIL;
+      const startPx = initial ? -rng() * height : -FONT_PX * TRAIL;
       return {
         headPx: startPx,
         cell: Math.floor(startPx / FONT_PX),
         chars: Array.from({ length: TRAIL + 1 }, randGlyph),
         nextMutate: 0,
         color: pick(palette),
-        active: Math.random() < ACTIVE_FRACTION,
+        active: rng() < ACTIVE_FRACTION,
         respawnAt: 0
       };
     };
@@ -143,17 +157,62 @@ export function MatrixRain(): null {
     const drawStatic = (): void => {
       ctx.clearRect(0, 0, width, height);
       for (let c = 0; c < columns; c += 1) {
-        if (Math.random() > ACTIVE_FRACTION) {
+        if (rng() > ACTIVE_FRACTION) {
           continue;
         }
         const x = c * COLUMN_GAP + 4;
-        const count = 2 + Math.floor(Math.random() * 4);
+        const count = 2 + Math.floor(rng() * 4);
         for (let i = 0; i < count; i += 1) {
-          const y = Math.random() * height;
+          const y = rng() * height;
           drawGlyph(randGlyph(), x, y, GLOBAL_ALPHA * envelope(y / height) * 0.7, pick(palette));
         }
       }
       ctx.globalAlpha = 1;
+    };
+
+    // Restart a spent column after a randomized idle gap.
+    const respawnStream = (index: number, now: number): void => {
+      const s = streams[index];
+      if (s === undefined) {
+        return;
+      }
+      if (s.respawnAt === 0) {
+        s.respawnAt = now + RESPAWN_MIN_MS + rng() * (RESPAWN_MAX_MS - RESPAWN_MIN_MS);
+      } else if (now >= s.respawnAt) {
+        streams[index] = { ...makeStream(false), active: true };
+      }
+    };
+
+    // Glide a stream, shifting a fresh glyph in per crossed cell + a slow inner shimmer.
+    // Returns false (and deactivates) once its tail clears the bottom.
+    const advanceStream = (s: Stream, now: number, dt: number): boolean => {
+      s.headPx += (FALL_PX_PER_SEC * dt) / 1000;
+      const cellNow = Math.floor(s.headPx / FONT_PX);
+      for (let k = s.cell; k < cellNow; k += 1) {
+        s.chars.unshift(randGlyph());
+        s.chars.pop();
+      }
+      s.cell = cellNow;
+      if (now >= s.nextMutate) {
+        s.chars[1 + Math.floor(rng() * TRAIL)] = randGlyph();
+        s.nextMutate = now + GLYPH_MUTATE_MS * (0.6 + rng() * 0.8);
+      }
+      if (s.headPx - TRAIL * FONT_PX > height) {
+        s.active = false;
+        s.respawnAt = 0;
+        return false;
+      }
+      return true;
+    };
+
+    // Draw head + tail; brightness is the screen-position envelope, with a light tail fade and
+    // a brighter honey head so it still reads as a leading glyph.
+    const drawStream = (s: Stream, x: number): void => {
+      for (let t = 0; t <= TRAIL; t += 1) {
+        const y = s.headPx - t * FONT_PX;
+        const tail = t === 0 ? 1 : 1 - 0.5 * (t / TRAIL);
+        drawGlyph(s.chars[t] ?? 0, x, y, GLOBAL_ALPHA * envelope(y / height) * tail, t === 0 ? headColor : s.color);
+      }
     };
 
     let raf = 0;
@@ -163,59 +222,15 @@ export function MatrixRain(): null {
       const dt = last === 0 ? 16 : Math.min(now - last, 50); // cap so a tab-refocus never jumps
       last = now;
       ctx.clearRect(0, 0, width, height);
-
       for (let c = 0; c < columns; c += 1) {
         const s = streams[c];
         if (s === undefined) {
           continue;
         }
-        const x = c * COLUMN_GAP + 4;
-
         if (!s.active) {
-          if (s.respawnAt === 0) {
-            s.respawnAt = now + RESPAWN_MIN_MS + Math.random() * (RESPAWN_MAX_MS - RESPAWN_MIN_MS);
-          } else if (now >= s.respawnAt) {
-            streams[c] = { ...makeStream(false), active: true };
-          }
-          continue;
-        }
-
-        // Continuous glide.
-        s.headPx += (FALL_PX_PER_SEC * dt) / 1000;
-
-        // Shift a fresh glyph into the head each time it crosses into a new cell.
-        const cellNow = Math.floor(s.headPx / FONT_PX);
-        for (let k = s.cell; k < cellNow; k += 1) {
-          s.chars.unshift(randGlyph());
-          s.chars.pop();
-        }
-        s.cell = cellNow;
-
-        // Slow inner shimmer, independent of the fall.
-        if (now >= s.nextMutate) {
-          s.chars[1 + Math.floor(Math.random() * TRAIL)] = randGlyph();
-          s.nextMutate = now + GLYPH_MUTATE_MS * (0.6 + Math.random() * 0.8);
-        }
-
-        if (s.headPx - TRAIL * FONT_PX > height) {
-          s.active = false;
-          s.respawnAt = 0;
-          continue;
-        }
-
-        // Draw head + tail; brightness is the screen-position envelope, with a light tail fade
-        // and a brighter honey head so it still reads as a leading glyph.
-        for (let t = 0; t <= TRAIL; t += 1) {
-          const y = s.headPx - t * FONT_PX;
-          const env = envelope(y / height);
-          const tail = t === 0 ? 1 : 1 - 0.5 * (t / TRAIL);
-          drawGlyph(
-            s.chars[t] ?? 0,
-            x,
-            y,
-            GLOBAL_ALPHA * env * tail,
-            t === 0 ? headColor : s.color
-          );
+          respawnStream(c, now);
+        } else if (advanceStream(s, now, dt)) {
+          drawStream(s, c * COLUMN_GAP + 4);
         }
       }
       ctx.globalAlpha = 1;

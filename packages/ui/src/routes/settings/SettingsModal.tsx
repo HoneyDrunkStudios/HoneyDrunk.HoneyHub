@@ -1,6 +1,12 @@
 import { useEffect, useRef, useState, type ReactElement } from "react";
 import type { BackendCapability } from "@honeydrunk/honeyhub-types";
-import { BridgeSettings } from "../../BridgeSettings";
+import {
+  PairingSettings,
+  ProvidersModelsSettings,
+  WorkspaceRootsSettings
+} from "../../BridgeSettings";
+import { ConnectorsSettings } from "./ConnectorsSettings";
+import { PlansSettings } from "./PlansSettings";
 import { NotificationsSettings } from "../../NotificationsSettings";
 import { ThemeSettings } from "../../ThemeSettings";
 import type { NotificationPrefs } from "../../notifications";
@@ -14,13 +20,26 @@ import {
   type PagePrefs
 } from "../../pagePrefs";
 
-/** The settings sections, shown as a left-hand vertical nav. Order matters. */
-type SectionId = "general" | "pages" | "bridge" | "notifications";
+/** The settings sections, shown as a left-hand vertical nav. Order matters. The former single
+    "Bridge" pane is split into five top-level sections so each concern is its own page. */
+type SectionId =
+  | "general"
+  | "pages"
+  | "pairing"
+  | "workspace"
+  | "providers"
+  | "connectors"
+  | "plans"
+  | "notifications";
 
 const SECTIONS: { id: SectionId; label: string }[] = [
   { id: "general", label: "General" },
   { id: "pages", label: "Pages" },
-  { id: "bridge", label: "Bridge" },
+  { id: "pairing", label: "Pairing & devices" },
+  { id: "workspace", label: "Workspace roots" },
+  { id: "providers", label: "Providers & models" },
+  { id: "connectors", label: "Connectors" },
+  { id: "plans", label: "Plans & costs" },
   { id: "notifications", label: "Notifications" }
 ];
 
@@ -100,7 +119,7 @@ export function SettingsModal({
     <>
       <button
         type="button"
-        className="ws-backdrop"
+        className="settings-modal-backdrop"
         aria-label="Close settings"
         onClick={onClose}
       />
@@ -113,9 +132,22 @@ export function SettingsModal({
         // still applies margin:auto, padding:1em, color:CanvasText, and inset-inline-end:0.
         // `.settings-modal` doesn't override those, so neutralize them inline (styles.css is
         // owned elsewhere) to render exactly where the previous <div role="dialog"> did.
-        style={{ margin: 0, padding: 0, color: "inherit", insetInlineEnd: "auto" }}
+        // `display:flex` (a left-nav row) + a bounded height is the scroll fix: the body flex
+        // child needs `minHeight:0` to shrink so its own `overflow-y:auto` can scroll.
+        style={{
+          margin: 0,
+          padding: 0,
+          color: "inherit",
+          insetInlineEnd: "auto",
+          display: "flex",
+          maxHeight: "85vh"
+        }}
       >
-        <nav className="settings-modal-nav" aria-label="Settings sections">
+        <nav
+          className="settings-modal-nav"
+          aria-label="Settings sections"
+          style={{ flex: "0 0 200px" }}
+        >
           {SECTIONS.map((entry) => (
             <button
               key={entry.id}
@@ -129,7 +161,7 @@ export function SettingsModal({
           ))}
         </nav>
 
-        <div className="settings-modal-body">
+        <div className="settings-modal-body" style={{ flex: 1, minHeight: 0, overflowY: "auto" }}>
           <div className="settings-modal-head">
             <h2>Settings</h2>
             <button
@@ -169,19 +201,37 @@ export function SettingsModal({
             </section>
           )}
 
-          {/* Kept mounted so its FolderBrowser / ConnectPhone bridge subscriptions stay live while
-              the Bridge section is open; hidden (not unmounted) when another section shows. */}
-          <div hidden={section !== "bridge"}>
-            <BridgeSettings
+          {/* Each bridge concern is now its own section. The active-gated bridge subscriptions
+              (ConnectPhone QR, FolderBrowser) mount only when their page is shown. */}
+          {section === "pairing" && (
+            <PairingSettings
+              state={settings}
+              onChange={onSettingsChange}
+              client={client}
+              active={section === "pairing"}
+            />
+          )}
+
+          {section === "workspace" && (
+            <WorkspaceRootsSettings
+              state={settings}
+              onChange={onSettingsChange}
+              client={client}
+              active={section === "workspace"}
+            />
+          )}
+
+          {section === "providers" && (
+            <ProvidersModelsSettings
               state={settings}
               onChange={onSettingsChange}
               catalog={catalog}
-              client={client}
-              active={section === "bridge"}
-              plans={plans}
-              onPlansChange={onPlansChange}
             />
-          </div>
+          )}
+
+          {section === "connectors" && <ConnectorsSettings client={client} />}
+
+          {section === "plans" && <PlansSettings plans={plans} onChange={onPlansChange} />}
 
           {section === "notifications" && (
             <NotificationsSettings

@@ -3,6 +3,27 @@ import { describe, expect, it, vi } from "vitest";
 import { MockWireClient } from "../../wire/mockClient";
 import { RepositoriesView } from "./RepositoriesView";
 
+// Monaco can't render in jsdom, so stub the lazy CodeEditor with a plain textarea that mirrors
+// its props contract (value/onChange/onSave/readOnly). Its aria-label carries the file's basename
+// so tests can target "Edit <file>", and it's directly editable, matching the new no-"Edit"-button
+// flow where a file opens straight into the editor.
+vi.mock("./CodeEditor", () => ({
+  default: (props: {
+    path: string;
+    value: string;
+    onChange: (value: string) => void;
+    onSave: () => void;
+    readOnly?: boolean;
+  }) => (
+    <textarea
+      aria-label={`Edit ${props.path.split(/[\\/]/).pop() ?? props.path}`}
+      value={props.value}
+      readOnly={props.readOnly ?? false}
+      onChange={(event) => props.onChange(event.target.value)}
+    />
+  )
+}));
+
 /** Records the writes the component makes so tests can assert the bridge calls, and exposes
     an `emitFsChanged` hook + browse/overview counters for the refresh paths. */
 class CapturingClient extends MockWireClient {
@@ -161,39 +182,47 @@ describe("RepositoriesView", () => {
     await waitFor(() => expect(screen.queryByRole("button", { name: "README.md" })).toBeNull());
   });
 
-  it("opens a file from the tree, edits it, and saves through writeFile", async () => {
+  it("opens a file directly in the editor and saves an edit through writeFile", async () => {
     const client = new CapturingClient();
     renderRepos(client);
 
     fireEvent.click(await screen.findByRole("button", { name: "HoneyHub" }));
     fireEvent.click(await screen.findByRole("button", { name: "README.md" }));
-    await waitFor(() => expect(screen.getByText("A scripted demo readme.")).toBeTruthy());
+    // The file opens straight into the editor, seeded with its on-disk contents.
+    const editor = (await screen.findByLabelText("Edit README.md")) as HTMLTextAreaElement;
+    expect(editor.value).toBe("# HoneyHub\n\nA scripted demo readme.\n");
 
-    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
-    const editor = await screen.findByLabelText("Edit README.md");
     fireEvent.change(editor, { target: { value: "Edited in HoneyHub." } });
     fireEvent.click(screen.getByRole("button", { name: "Save" }));
 
     await waitFor(() => expect(client.writeFileCalls).toHaveLength(1));
     expect(client.writeFileCalls[0]?.content).toBe("Edited in HoneyHub.");
-    await waitFor(() => expect(screen.getByRole("button", { name: "Edit" })).toBeTruthy());
+    // After the save round-trips, the editor re-seeds from disk → not dirty → Save disabled.
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Save" }).hasAttribute("disabled")).toBe(true)
+    );
   });
 
-  it("cancels an edit without writing the file", async () => {
+  it("reverts an unsaved edit without writing the file", async () => {
     const client = new CapturingClient();
     renderRepos(client);
 
     fireEvent.click(await screen.findByRole("button", { name: "HoneyHub" }));
     fireEvent.click(await screen.findByRole("button", { name: "README.md" }));
-    await waitFor(() => expect(screen.getByText("A scripted demo readme.")).toBeTruthy());
+    const editor = (await screen.findByLabelText("Edit README.md")) as HTMLTextAreaElement;
 
-    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
-    const editor = await screen.findByLabelText("Edit README.md");
     fireEvent.change(editor, { target: { value: "throwaway" } });
-    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Revert" }).hasAttribute("disabled")).toBe(false)
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Revert" }));
 
-    // Back to read mode, and nothing was written.
-    await waitFor(() => expect(screen.getByRole("button", { name: "Edit" })).toBeTruthy());
+    // The editor snaps back to the on-disk text, and nothing was written.
+    await waitFor(() =>
+      expect((screen.getByLabelText("Edit README.md") as HTMLTextAreaElement).value).toBe(
+        "# HoneyHub\n\nA scripted demo readme.\n"
+      )
+    );
     expect(client.writeFileCalls).toHaveLength(0);
   });
 
@@ -211,16 +240,13 @@ describe("RepositoriesView", () => {
 
     fireEvent.click(await screen.findByRole("button", { name: "HoneyHub" }));
     fireEvent.click(await screen.findByRole("button", { name: "README.md" }));
-    await waitFor(() => expect(screen.getByText("A scripted demo readme.")).toBeTruthy());
-
-    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
     const editor = await screen.findByLabelText("Edit README.md");
     fireEvent.change(editor, { target: { value: "changed" } });
     fireEvent.click(screen.getByRole("button", { name: "Save" }));
 
-    // The error shows and we stay in edit mode (Save/Cancel still present).
+    // The error shows and the edit stays dirty (Revert still enabled).
     await waitFor(() => expect(screen.getByText("disk was full")).toBeTruthy());
-    expect(screen.getByRole("button", { name: "Cancel" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Revert" }).hasAttribute("disabled")).toBe(false);
   });
 
   it("surfaces a save failure when writeFile rejects", async () => {
@@ -233,9 +259,6 @@ describe("RepositoriesView", () => {
 
     fireEvent.click(await screen.findByRole("button", { name: "HoneyHub" }));
     fireEvent.click(await screen.findByRole("button", { name: "README.md" }));
-    await waitFor(() => expect(screen.getByText("A scripted demo readme.")).toBeTruthy());
-
-    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
     const editor = await screen.findByLabelText("Edit README.md");
     fireEvent.change(editor, { target: { value: "changed" } });
     fireEvent.click(screen.getByRole("button", { name: "Save" }));
@@ -324,7 +347,7 @@ describe("RepositoriesView", () => {
     await waitFor(() => expect(screen.getByRole("alert").textContent).toBe("read boom"));
   });
 
-  it("disables editing for a truncated (too large) file", async () => {
+  it("opens a truncated (too large) file read-only", async () => {
     class TruncatedFileClient extends CapturingClient {
       override readFile(path: string): Promise<void> {
         this.emitDevice({
@@ -340,7 +363,9 @@ describe("RepositoriesView", () => {
     fireEvent.click(await screen.findByRole("button", { name: "README.md" }));
 
     await waitFor(() => expect(screen.getByText("truncated (too large to edit)")).toBeTruthy());
-    expect(screen.getByRole("button", { name: "Edit" }).hasAttribute("disabled")).toBe(true);
+    const editor = (await screen.findByLabelText("Edit README.md")) as HTMLTextAreaElement;
+    expect(editor.readOnly).toBe(true);
+    expect(screen.getByRole("button", { name: "Save" }).hasAttribute("disabled")).toBe(true);
   });
 
   it("ctrl-clicks a changed file into the multi-select bulk bar and bulk-stages/unstages", async () => {
@@ -394,8 +419,8 @@ describe("RepositoriesView", () => {
     fireEvent.contextMenu(fileButton);
     let menu = await screen.findByRole("menu", { name: "File actions" });
     fireEvent.click(within(menu).getByRole("menuitem", { name: "Open file" }));
-    // Opening the file reads it into the center pane's file view.
-    await waitFor(() => expect(screen.getByText("Edit")).toBeTruthy());
+    // Opening the file reads it into the center pane's editor.
+    await screen.findByLabelText("Edit App.tsx");
 
     fireEvent.contextMenu(await screen.findByText("packages/ui/src/App.tsx"));
     menu = await screen.findByRole("menu", { name: "File actions" });
@@ -411,7 +436,7 @@ describe("RepositoriesView", () => {
     const row = (await screen.findByText("packages/ui/src/App.tsx")).closest("li") as HTMLElement;
     fireEvent.click(within(row).getByRole("button", { name: "Discard" }));
 
-    // First cancel the confirm — nothing is discarded.
+    // First cancel the confirm; nothing is discarded.
     let dialog = await screen.findByRole("dialog", { name: "Confirm action" });
     fireEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
     await waitFor(() => expect(screen.queryByRole("dialog", { name: "Confirm action" })).toBeNull());

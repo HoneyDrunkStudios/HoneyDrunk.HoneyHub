@@ -17,28 +17,28 @@ describe("pagePrefs", () => {
     expect(isPageVisible({}, "spend")).toBe(true);
   });
 
-  it("hides runs and goals by default", () => {
-    for (const view of DEFAULT_HIDDEN_PAGES) {
-      expect(isPageVisible({}, view)).toBe(false);
+  it("has no default-hidden pages (every toggleable page defaults visible)", () => {
+    expect(DEFAULT_HIDDEN_PAGES).toEqual([]);
+    for (const page of TOGGLEABLE_PAGES) {
+      expect(isPageVisible({}, page.view)).toBe(true);
     }
-    expect(isPageVisible({}, "runs")).toBe(false);
-    expect(isPageVisible({}, "goals")).toBe(false);
   });
 
   it("respects an explicit false on a normally-visible page", () => {
     expect(isPageVisible({ repositories: false }, "repositories")).toBe(false);
   });
 
-  it("respects an explicit true on a default-hidden page", () => {
-    expect(isPageVisible({ runs: true }, "runs")).toBe(true);
-    expect(isPageVisible({ goals: true }, "goals")).toBe(true);
+  it("honors an explicit true", () => {
+    expect(isPageVisible({ groups: true }, "groups")).toBe(true);
   });
 
-  it("lists the expected toggleable pages without core pages", () => {
+  it("lists the expected toggleable pages without core or removed pages", () => {
     const views = TOGGLEABLE_PAGES.map((page) => page.view);
-    expect(views).toContain("runs");
-    expect(views).toContain("goals");
+    expect(views).toContain("groups");
     expect(views).toContain("repositories");
+    // Runs and Goals were removed entirely (driven from chat instead).
+    expect(views).not.toContain("runs");
+    expect(views).not.toContain("goals");
     for (const core of ["hub", "run", "settings", "updates", "notifications"]) {
       expect(views).not.toContain(core);
     }
@@ -54,12 +54,12 @@ describe("pagePrefs", () => {
       key: () => null,
       length: 0
     });
-    savePagePrefs({ runs: true, spend: false });
-    expect(loadPagePrefs()).toEqual({ runs: true, spend: false });
+    savePagePrefs({ groups: true, spend: false });
+    expect(loadPagePrefs()).toEqual({ groups: true, spend: false });
 
     // Only boolean values survive; everything else is dropped.
-    store.set("honeyhub.pagePrefs.v1", '{"runs":true,"goals":"yes","work":3}');
-    expect(loadPagePrefs()).toEqual({ runs: true });
+    store.set("honeyhub.pagePrefs.v1", '{"groups":true,"observe":"yes","work":3}');
+    expect(loadPagePrefs()).toEqual({ groups: true });
 
     store.set("honeyhub.pagePrefs.v1", "not json");
     expect(loadPagePrefs()).toEqual({});
@@ -69,6 +69,6 @@ describe("pagePrefs", () => {
     vi.stubGlobal("localStorage", undefined);
     expect(loadPagePrefs()).toEqual({});
     // Best-effort save must not throw when storage is unavailable.
-    expect(() => savePagePrefs({ runs: true })).not.toThrow();
+    expect(() => savePagePrefs({ groups: true })).not.toThrow();
   });
 });

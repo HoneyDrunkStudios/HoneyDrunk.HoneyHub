@@ -43,7 +43,7 @@ describe("SettingsModal", () => {
     fireEvent.click(screen.getByRole("button", { name: "Pages" }));
     const list = screen.getByRole("list", { name: "Toggle pages" });
     expect(within(list).getByLabelText("Repositories")).toBeTruthy();
-    expect(within(list).getByLabelText("Runs")).toBeTruthy();
+    expect(within(list).getByLabelText("Groups")).toBeTruthy();
   });
 
   it("toggles a page off through onPagePrefsChange", () => {
@@ -54,13 +54,14 @@ describe("SettingsModal", () => {
     expect(onPagePrefsChange).toHaveBeenCalledWith({ repositories: false });
   });
 
-  it("shows a default-hidden page toggle as off and turns it on", () => {
+  it("shows every toggleable page as visible by default and turns one off", () => {
     const { onPagePrefsChange } = renderModal();
     fireEvent.click(screen.getByRole("button", { name: "Pages" }));
-    const runs = screen.getByLabelText("Runs") as HTMLInputElement;
-    expect(runs.checked).toBe(false);
-    fireEvent.click(runs);
-    expect(onPagePrefsChange).toHaveBeenCalledWith({ runs: true });
+    // No default-hidden pages remain: Groups starts checked (visible), and clicking hides it.
+    const groups = screen.getByLabelText("Groups") as HTMLInputElement;
+    expect(groups.checked).toBe(true);
+    fireEvent.click(groups);
+    expect(onPagePrefsChange).toHaveBeenCalledWith({ groups: false });
   });
 
   it("closes on backdrop click and on Escape", () => {
@@ -71,10 +72,47 @@ describe("SettingsModal", () => {
     expect(onClose).toHaveBeenCalledTimes(2);
   });
 
-  it("reaches the Bridge section (device pairing)", () => {
+  it("lists every top-level settings section in the left nav", () => {
     renderModal();
-    fireEvent.click(screen.getByRole("button", { name: "Bridge" }));
+    for (const label of [
+      "General",
+      "Pages",
+      "Pairing & devices",
+      "Workspace roots",
+      "Providers & models",
+      "Connectors",
+      "Plans & costs",
+      "Notifications"
+    ]) {
+      expect(screen.getByRole("button", { name: label })).toBeTruthy();
+    }
+  });
+
+  it("reaches the Pairing & devices section (device pairing)", () => {
+    renderModal();
+    fireEvent.click(screen.getByRole("button", { name: "Pairing & devices" }));
     expect(screen.getByLabelText("Device name")).toBeTruthy();
+  });
+
+  it("reaches the Workspace roots section", () => {
+    renderModal();
+    fireEvent.click(screen.getByRole("button", { name: "Workspace roots" }));
+    expect(screen.getByRole("list", { name: "Workspace roots" })).toBeTruthy();
+    expect(screen.getByLabelText("Or enter an absolute path")).toBeTruthy();
+  });
+
+  it("reaches the Providers & models section", () => {
+    renderModal();
+    fireEvent.click(screen.getByRole("button", { name: "Providers & models" }));
+    expect(screen.getByRole("heading", { name: "Providers & models" })).toBeTruthy();
+    // The backend toggles render (at least one provider checkbox).
+    expect(screen.getAllByRole("checkbox").length).toBeGreaterThan(0);
+  });
+
+  it("reaches the Plans & costs section", () => {
+    renderModal();
+    fireEvent.click(screen.getByRole("button", { name: "Plans & costs" }));
+    expect(screen.getByLabelText("Claude Code plan")).toBeTruthy();
   });
 
   it("reaches the Notifications section", () => {
