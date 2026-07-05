@@ -1,7 +1,7 @@
 import { useCallback, useRef } from "react";
 import type { ReactElement } from "react";
 import Editor, { loader } from "@monaco-editor/react";
-import type { BeforeMount, OnChange, OnMount } from "@monaco-editor/react";
+import type { BeforeMount, Monaco, OnChange, OnMount } from "@monaco-editor/react";
 import * as monaco from "monaco-editor";
 import editorWorker from "monaco-editor/esm/vs/editor/editor.worker?worker";
 import jsonWorker from "monaco-editor/esm/vs/language/json/json.worker?worker";
@@ -200,26 +200,54 @@ const HONEYPUNK_THEME: monaco.editor.IStandaloneThemeData = {
   }
 };
 
-let configured = false;
+let themeDefined = false;
 
-// Run once, right before the first editor mounts. Registers the theme and, because the model only
-// ever holds the single open file, silences project-wide semantic diagnostics (they would surface
-// false "cannot find module" errors). Syntax highlighting and in-file IntelliSense stay on.
-const configureMonaco: BeforeMount = (m) => {
-  if (configured) {
+/** Register the honeypunk theme once. */
+function defineHoneypunkTheme(m: Monaco): void {
+  if (themeDefined) {
     return;
   }
-  configured = true;
+  themeDefined = true;
   m.editor.defineTheme("honeypunk", HONEYPUNK_THEME);
-  const ts = m.languages.typescript;
-  for (const defaults of [ts.typescriptDefaults, ts.javascriptDefaults]) {
-    defaults.setDiagnosticsOptions({ noSemanticValidation: true, noSyntaxValidation: false });
-    defaults.setCompilerOptions({
-      ...defaults.getCompilerOptions(),
-      jsx: ts.JsxEmit.React,
-      allowNonTsExtensions: true
-    });
+}
+
+let languageDefaultsConfigured = false;
+
+/**
+ * Tune Monaco's built-in TypeScript/JavaScript language service for the best IN-FILE IntelliSense
+ * (completions, hover, signature help stay on). Runs once; guarded against double-registration.
+ *
+ * Diagnostics: only the single open file is ever in the model, so cross-file semantic checks would
+ * surface false "cannot find module" errors. We keep syntax squiggles but drop semantic validation.
+ * Project-aware IntelliSense across files is a later LSP effort; this is the in-file service.
+ */
+export function configureLanguageDefaults(m: Monaco): void {
+  if (languageDefaultsConfigured) {
+    return;
   }
+  languageDefaultsConfigured = true;
+  const ts = m.languages.typescript;
+  const compilerOptions = {
+    target: ts.ScriptTarget.ESNext,
+    module: ts.ModuleKind.ESNext,
+    moduleResolution: ts.ModuleResolutionKind.NodeJs,
+    jsx: ts.JsxEmit.React,
+    allowNonTsExtensions: true,
+    esModuleInterop: true,
+    allowJs: true,
+    checkJs: false
+  };
+  for (const defaults of [ts.typescriptDefaults, ts.javascriptDefaults]) {
+    defaults.setCompilerOptions({ ...defaults.getCompilerOptions(), ...compilerOptions });
+    defaults.setDiagnosticsOptions({ noSemanticValidation: true, noSyntaxValidation: false });
+    defaults.setEagerModelSync(true);
+  }
+}
+
+/** Run once, right before the first editor mounts: theme + language-service tuning. */
+const configureMonaco: BeforeMount = (m) => {
+  defineHoneypunkTheme(m);
+  configureLanguageDefaults(m);
 };
 
 export interface CodeEditorProps {

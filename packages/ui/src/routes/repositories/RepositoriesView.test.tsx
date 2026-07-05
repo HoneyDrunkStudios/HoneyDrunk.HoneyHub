@@ -236,6 +236,41 @@ describe("RepositoriesView", () => {
     expect(client.writeFileCalls).toHaveLength(0);
   });
 
+  it("toggles a markdown file between the editor and a rendered preview of the live draft", async () => {
+    renderRepos();
+
+    fireEvent.click(await screen.findByRole("button", { name: "HoneyHub" }));
+    fireEvent.click(await screen.findByRole("button", { name: "README.md" }));
+    // A markdown file defaults to Edit: the mocked editor shows the raw source.
+    const editor = (await screen.findByLabelText("Edit README.md")) as HTMLTextAreaElement;
+    expect(editor.value).toBe("# HoneyHub\n\nA scripted demo readme.\n");
+
+    // Edit the draft, then preview: the preview must reflect the UNSAVED draft, not the disk text.
+    fireEvent.change(editor, { target: { value: "# Draft\n\nlive preview body" } });
+    fireEvent.click(screen.getByRole("button", { name: "Preview" }));
+
+    // The editor is unmounted; the rendered markdown shows inside .markdown-body.
+    expect(screen.queryByLabelText("Edit README.md")).toBeNull();
+    const rendered = await screen.findByText("live preview body");
+    expect(rendered.closest("article")?.className).toContain("markdown-body");
+
+    // Toggling back to Edit restores the editor, still holding the unsaved draft.
+    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    const back = (await screen.findByLabelText("Edit README.md")) as HTMLTextAreaElement;
+    expect(back.value).toBe("# Draft\n\nlive preview body");
+  });
+
+  it("shows no markdown preview toggle for a non-markdown file", async () => {
+    renderRepos();
+
+    fireEvent.click(await screen.findByRole("button", { name: "HoneyHub" }));
+    fireEvent.click(await screen.findByRole("button", { name: "src" }));
+    fireEvent.click(await screen.findByRole("button", { name: "main.ts" }));
+
+    await screen.findByLabelText("Edit main.ts");
+    expect(screen.queryByRole("button", { name: "Preview" })).toBeNull();
+  });
+
   it("surfaces a save failure reported as an ok:false file_written result", async () => {
     class FailingSaveEventClient extends MockWireClient {
       override writeFile(path: string, _content: string): Promise<void> {

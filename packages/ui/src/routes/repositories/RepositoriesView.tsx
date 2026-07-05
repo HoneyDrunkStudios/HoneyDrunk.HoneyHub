@@ -15,6 +15,7 @@ import type { WireClient } from "../../wire/client";
 import { basename, isWithin } from "../../paths";
 import { resolveDefaultWorkspaceRoot } from "../../settingsModel";
 import { diffStat, groupFiles, replaceRepoStatus, toDiffLines } from "../git/gitModel";
+import { isMarkdownFile, renderMarkdown } from "../browse/fileView";
 
 // Monaco is heavy, so the file editor is loaded only once a file is opened. The base bundle
 // (and the mobile PWA that never touches a file) stays light; a <Suspense> fallback covers the
@@ -1421,7 +1422,9 @@ interface FilePaneProps {
 /** The center pane's file editor: the file opens directly in a Monaco editor (honeypunk theme,
     syntax highlighting, IntelliSense). Save (button or Ctrl/Cmd+S) crosses the bridge's
     `write_file` boundary (ADR-0097); Revert restores the on-disk text. A truncated (too-large)
-    file opens read-only. Monaco is lazy-loaded, so the pane shows a fallback on first open. */
+    file opens read-only. Monaco is lazy-loaded, so the pane shows a fallback on first open.
+    Markdown files add an Edit/Preview toggle: Preview renders the live draft as HTML so unsaved
+    edits show, while Save still writes from Edit. */
 function FilePane({
   file,
   loading,
@@ -1434,6 +1437,14 @@ function FilePane({
   onSave,
   onRevert
 }: Readonly<FilePaneProps>): ReactElement {
+  const [previewMode, setPreviewMode] = useState(false);
+  const path = file?.path;
+  const markdown = path !== undefined && isMarkdownFile(path);
+  // Each newly opened file defaults to Edit; reset the toggle whenever the open file changes.
+  useEffect(() => {
+    setPreviewMode(false);
+  }, [path]);
+
   if (loading) {
     return <div className="file-viewer empty">Loading…</div>;
   }
@@ -1450,6 +1461,8 @@ function FilePane({
     return <div className="file-viewer empty">Select a file to open it in the editor.</div>;
   }
 
+  const showPreview = markdown && previewMode;
+
   return (
     <div className="file-viewer">
       <header className="file-viewer-head">
@@ -1458,6 +1471,26 @@ function FilePane({
           {dirty ? " •" : ""}
         </span>
         <span className="file-viewer-actions">
+          {markdown && (
+            <span className="file-viewer-modes" role="group" aria-label="Markdown view">
+              <button
+                type="button"
+                className={`file-viewer-mode${showPreview ? "" : " is-active"}`}
+                aria-pressed={!showPreview}
+                onClick={() => setPreviewMode(false)}
+              >
+                Edit
+              </button>
+              <button
+                type="button"
+                className={`file-viewer-mode${showPreview ? " is-active" : ""}`}
+                aria-pressed={showPreview}
+                onClick={() => setPreviewMode(true)}
+              >
+                Preview
+              </button>
+            </span>
+          )}
           <span className="file-viewer-meta">{file.truncated ? "truncated (too large to edit)" : ""}</span>
           <button type="button" className="git-link" onClick={onRevert} disabled={saving || !dirty}>
             Revert
@@ -1479,17 +1512,21 @@ function FilePane({
         </p>
       )}
 
-      <div className="repos-editor-host">
-        <Suspense fallback={<div className="file-viewer empty">Loading editor…</div>}>
-          <CodeEditor
-            path={file.path}
-            value={draft}
-            onChange={onDraft}
-            onSave={onSave}
-            readOnly={file.truncated}
-          />
-        </Suspense>
-      </div>
+      {showPreview ? (
+        <article className="markdown-body" dangerouslySetInnerHTML={{ __html: renderMarkdown(draft) }} />
+      ) : (
+        <div className="repos-editor-host">
+          <Suspense fallback={<div className="file-viewer empty">Loading editor…</div>}>
+            <CodeEditor
+              path={file.path}
+              value={draft}
+              onChange={onDraft}
+              onSave={onSave}
+              readOnly={file.truncated}
+            />
+          </Suspense>
+        </div>
+      )}
     </div>
   );
 }

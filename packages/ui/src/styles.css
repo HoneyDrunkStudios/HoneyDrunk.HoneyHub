@@ -7764,6 +7764,43 @@ button:focus-visible,
   gap: 8px;
 }
 
+/* Markdown Edit/Preview segmented toggle (shown only for .md files). */
+.file-viewer-modes {
+  display: inline-flex;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+}
+
+.file-viewer-mode {
+  padding: 3px 10px;
+  border: none;
+  background: var(--panel-2);
+  color: var(--text-muted);
+  font: inherit;
+  font-size: 0.76rem;
+  cursor: pointer;
+}
+
+.file-viewer-mode + .file-viewer-mode {
+  border-left: 1px solid var(--border);
+}
+
+.file-viewer-mode:hover {
+  color: var(--text);
+  background: var(--hover);
+}
+
+.file-viewer-mode.is-active {
+  color: var(--honey-bright);
+  background: var(--honey-glow);
+}
+
+.file-viewer-mode:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px var(--honey-glow) inset;
+}
+
 @media (max-width: 860px) {
   .repos-body {
     grid-template-columns: 44px minmax(0, 1fr);

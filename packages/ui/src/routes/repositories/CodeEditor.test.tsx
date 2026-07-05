@@ -12,7 +12,33 @@ vi.mock("monaco-editor/esm/vs/language/css/css.worker?worker", () => ({ default:
 vi.mock("monaco-editor/esm/vs/language/html/html.worker?worker", () => ({ default: class {} }));
 vi.mock("monaco-editor/esm/vs/language/typescript/ts.worker?worker", () => ({ default: class {} }));
 
-import CodeEditor, { languageForPath } from "./CodeEditor";
+import CodeEditor, { configureLanguageDefaults, languageForPath } from "./CodeEditor";
+
+/** A minimal fake of Monaco's `languages.typescript` namespace with spies on the two language
+    defaults, so we can assert `configureLanguageDefaults` wires the compiler + diagnostics. */
+function makeDefaults() {
+  return {
+    getCompilerOptions: vi.fn(() => ({})),
+    setCompilerOptions: vi.fn(),
+    setDiagnosticsOptions: vi.fn(),
+    setEagerModelSync: vi.fn()
+  };
+}
+
+function makeMonaco() {
+  return {
+    languages: {
+      typescript: {
+        typescriptDefaults: makeDefaults(),
+        javascriptDefaults: makeDefaults(),
+        ScriptTarget: { ESNext: 99 },
+        ModuleKind: { ESNext: 99 },
+        ModuleResolutionKind: { NodeJs: 2 },
+        JsxEmit: { React: 2 }
+      }
+    }
+  };
+}
 
 describe("languageForPath", () => {
   it("maps common extensions to Monaco language ids", () => {
@@ -42,6 +68,43 @@ describe("languageForPath", () => {
     expect(languageForPath("LICENSE")).toBe("plaintext");
     expect(languageForPath("notes.mystery")).toBe("plaintext");
     expect(languageForPath(".gitignore")).toBe("plaintext");
+  });
+});
+
+describe("configureLanguageDefaults", () => {
+  it("tunes the TS/JS language service once (guarded against re-registration)", () => {
+    const first = makeMonaco();
+    configureLanguageDefaults(first as never);
+
+    const tsd = first.languages.typescript.typescriptDefaults;
+    const jsd = first.languages.typescript.javascriptDefaults;
+
+    // Both language defaults get the in-file compiler options...
+    expect(tsd.setCompilerOptions).toHaveBeenCalledTimes(1);
+    expect(tsd.setCompilerOptions.mock.calls[0]?.[0]).toMatchObject({
+      target: 99,
+      module: 99,
+      moduleResolution: 2,
+      jsx: 2,
+      allowNonTsExtensions: true,
+      esModuleInterop: true,
+      allowJs: true,
+      checkJs: false
+    });
+    // ...single-file semantic diagnostics off, syntax on...
+    expect(tsd.setDiagnosticsOptions).toHaveBeenCalledWith({
+      noSemanticValidation: true,
+      noSyntaxValidation: false
+    });
+    // ...eager model sync on, mirrored onto javascript defaults.
+    expect(tsd.setEagerModelSync).toHaveBeenCalledWith(true);
+    expect(jsd.setCompilerOptions).toHaveBeenCalledTimes(1);
+    expect(jsd.setEagerModelSync).toHaveBeenCalledWith(true);
+
+    // The guard means a second call is a no-op (the service is process-wide, configured once).
+    const second = makeMonaco();
+    configureLanguageDefaults(second as never);
+    expect(second.languages.typescript.typescriptDefaults.setCompilerOptions).not.toHaveBeenCalled();
   });
 });
 
