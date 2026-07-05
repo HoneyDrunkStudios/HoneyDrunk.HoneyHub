@@ -188,17 +188,67 @@ describe("RunScreen", () => {
     expect(screen.getByText(/Light task/)).toBeTruthy();
   });
 
-  it("checks plan usage from the config panel and renders the meters", async () => {
+  it("auto-probes plan usage on mount and re-checks on demand, rendering the meters", async () => {
     render(<RunScreen client={new MockWireClient()} availableBackends={ALL_BACKENDS} />);
     openConfigPanel();
 
-    // Fire both probes; the mock answers with scripted vendor meters.
-    fireEvent.click(screen.getByRole("button", { name: "Check Claude Code" }));
-    expect(await screen.findByText(/Current session \(5h\): 34% used/)).toBeTruthy();
+    // Wave E: the composer auto-probes each backend's plan usage on mount (feeding the
+    // router's cap-awareness), so the meters render without a manual click — one report
+    // per backend, both scripted with the same vendor meters by the mock.
+    expect(
+      (await screen.findAllByText(/Current session \(5h\): 34% used/)).length
+    ).toBeGreaterThanOrEqual(2);
     expect(screen.getByText(/Claude Code · as of/)).toBeTruthy();
+    expect(screen.getByText(/Codex · as of/)).toBeTruthy();
 
-    fireEvent.click(screen.getByRole("button", { name: "Check Codex" }));
-    await waitFor(() => expect(screen.getByText(/Codex · as of/)).toBeTruthy());
+    // The manual "Check" buttons still re-probe on demand via the same usage_probe path.
+    fireEvent.click(screen.getByRole("button", { name: "Check Claude Code" }));
+    await waitFor(() =>
+      expect(screen.getAllByText(/Current session \(5h\): 34% used/).length).toBeGreaterThanOrEqual(2)
+    );
+  });
+
+  it("shifts the optimize pick to the freshly-reset backend using auto-probed headroom", async () => {
+    // The router only sees headroom because the composer auto-probes on mount. Script
+    // per-backend meters so Codex reads freshly reset (0% used) and Claude half-burned.
+    class SplitHeadroomClient extends MockWireClient {
+      override async probeUsage(backend: AgentBackend): Promise<void> {
+        const usedPercent = backend === "codex.local" ? 0 : 50;
+        this.emitDevice({
+          kind: "usage_probe",
+          report: {
+            backend,
+            ok: true,
+            windows: [{ line: `Current week: ${usedPercent}% used`, usedPercent }],
+            raw: "(demo) usage panel capture",
+            capturedAt: "2026-07-05T00:00:00Z"
+          }
+        });
+      }
+    }
+    render(
+      <RunScreen
+        client={new SplitHeadroomClient()}
+        availableBackends={ALL_BACKENDS}
+        // Both flat plans collapse cost to zero, so headroom is what decides.
+        plans={{ "claude.local": { type: "flat" }, "codex.local": { type: "flat" } }}
+      />
+    );
+    fireEvent.change(screen.getByLabelText("Task"), { target: { value: "Fix a typo" } });
+    openConfigPanel();
+
+    // Codex wins on headroom, and the rationale says so in the operator's words.
+    await waitFor(() => {
+      const rationale = document.querySelector(".panel-rationale")?.textContent ?? "";
+      expect(rationale).toMatch(/more headroom/);
+    });
+    const rationale = document.querySelector(".panel-rationale")?.textContent ?? "";
+    expect(rationale).toMatch(/Codex/);
+    expect(rationale).toMatch(/just reset/);
+    // The config chip reflects the routed backend.
+    expect(screen.getByRole("button", { name: "Configure run" }).textContent).toContain(
+      "Optimize · Codex"
+    );
   });
 
   it("degrades a usage probe to the raw capture (or the failure) when parsing found nothing", async () => {

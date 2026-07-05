@@ -1,11 +1,26 @@
 import { describe, expect, it } from "vitest";
-import type { AgentBackend } from "@honeydrunk/honeyhub-types";
-import { estimateComplexity, recommendBackend } from "./router";
+import type { AgentBackend, UsageProbeReport } from "@honeydrunk/honeyhub-types";
+import { estimateComplexity, headroomFromReport, recommendBackend } from "./router";
 import { loadRoutingSnapshot } from "./routingSnapshot";
 
 const ALL: AgentBackend[] = ["claude.local", "codex.local", "copilot.local"];
 // The loaded snapshot (v1: the bundled JSON projection) under test.
 const BUNDLED_SNAPSHOT = loadRoutingSnapshot();
+
+/** Build a scripted usage_probe report with the given per-window "% used" values (an
+    `undefined` entry stands for a line the host could not parse a percent from). */
+function usageReport(backend: AgentBackend, used: (number | undefined)[]): UsageProbeReport {
+  return {
+    backend,
+    ok: true,
+    windows: used.map((percent, index) => ({
+      line: `window ${index}`,
+      ...(percent === undefined ? {} : { usedPercent: percent })
+    })),
+    raw: "",
+    capturedAt: "2026-07-05T00:00:00Z"
+  };
+}
 
 describe("estimateComplexity", () => {
   it("scores keyword-heavy refactors high and light edits low", () => {
@@ -205,5 +220,183 @@ describe("recommendBackend", () => {
     expect(recommendBackend(input, BUNDLED_SNAPSHOT)).toEqual(
       recommendBackend(input, BUNDLED_SNAPSHOT)
     );
+  });
+
+  describe("headroom-aware cost optimization (Wave E)", () => {
+    // Two flat plans collapse cost to 0 for both, so without usage Claude wins the light
+    // task on the capability tiebreak — the operator's confusing case.
+    const FLAT_BOTH = {
+      "claude.local": { type: "flat" as const, monthlyUsd: 20 },
+      "codex.local": { type: "flat" as const, monthlyUsd: 20 }
+    };
+    const LIGHT_TASK = "Fix a typo and reformat a comment";
+
+    it("flips a light task to the freshly-reset backend when flat plans collapse cost", () => {
+      // Codex just reset (100% headroom); Claude is half-burned (50%). With both on flat
+      // plans, cost is a wash, so headroom decides: Codex should win.
+      const rec = recommendBackend(
+        {
+          task: LIGHT_TASK,
+          availableBackends: ["claude.local", "codex.local"],
+          plans: FLAT_BOTH,
+          usageByBackend: {
+            "codex.local": { remainingPercent: 100 },
+            "claude.local": { remainingPercent: 50 }
+          }
+        },
+        BUNDLED_SNAPSHOT
+      );
+      expect(rec.backend).toBe("codex.local");
+      expect(rec.rationale).toMatch(/more headroom/);
+      expect(rec.rationale).toMatch(/just reset/);
+      // Codex leads the ranking now.
+      expect(rec.ranked[0]?.backend).toBe("codex.local");
+    });
+
+    it("reproduces today's static pick exactly when usage data is absent", () => {
+      const withUsage = {
+        task: LIGHT_TASK,
+        availableBackends: ["claude.local", "codex.local"] as AgentBackend[],
+        plans: FLAT_BOTH
+      };
+      const rec = recommendBackend(withUsage, BUNDLED_SNAPSHOT);
+      // No probed headroom → the flat-plan tie falls to the capability tiebreak (Claude),
+      // exactly as before Wave E, and no headroom wording appears.
+      expect(rec.backend).toBe("claude.local");
+      expect(rec.rationale).not.toMatch(/headroom/);
+    });
+
+    it("leaves an UNPROBED backend neutral (absent usage never loses a static winner)", () => {
+      // Only Codex is probed (fresh). Claude is unprobed → treated as neutral, so it keeps
+      // its capability-tiebreak win; a fresh probe alone does not beat an unknown backend.
+      const rec = recommendBackend(
+        {
+          task: LIGHT_TASK,
+          availableBackends: ["claude.local", "codex.local"],
+          plans: FLAT_BOTH,
+          usageByBackend: { "codex.local": { remainingPercent: 100 } }
+        },
+        BUNDLED_SNAPSHOT
+      );
+      expect(rec.backend).toBe("claude.local");
+      expect(rec.rationale).not.toMatch(/more headroom/);
+    });
+
+    it("never lets headroom override a genuinely cheaper backend", () => {
+      // Metered plans keep the real cost gap (Codex tier 1 vs Claude tier 3). Even with
+      // Codex nearly exhausted and Claude fresh, the cost primary (×100) still wins Codex
+      // the light task — headroom (max ~50) can only break a cost tie.
+      const rec = recommendBackend(
+        {
+          task: LIGHT_TASK,
+          availableBackends: ["claude.local", "codex.local"],
+          usageByBackend: {
+            "codex.local": { remainingPercent: 5 },
+            "claude.local": { remainingPercent: 100 }
+          }
+        },
+        BUNDLED_SNAPSHOT
+      );
+      expect(rec.backend).toBe("codex.local");
+    });
+  });
+
+  describe("headroom-aware capability routing (Wave E)", () => {
+    const COMPLEX_TASK =
+      "Redesign and refactor the concurrency model; debug the race condition";
+
+    it("routes complex work off a nearly-exhausted top backend to a capable one with room", () => {
+      // Claude leads on capability but is at 95% used; Codex (still capable) has room.
+      const rec = recommendBackend(
+        {
+          task: COMPLEX_TASK,
+          availableBackends: ["claude.local", "codex.local"],
+          usageByBackend: {
+            "claude.local": { remainingPercent: 5 },
+            "codex.local": { remainingPercent: 90 }
+          }
+        },
+        BUNDLED_SNAPSHOT
+      );
+      expect(rec.backend).toBe("codex.local");
+      expect(rec.rationale).toMatch(/near its limit/);
+      expect(rec.rationale).toMatch(/Codex/);
+    });
+
+    it("keeps a MODERATELY-used top backend on complex work (penalty stays negligible)", () => {
+      // Claude at 50% used is not near its cap, so it still wins the complex task.
+      const rec = recommendBackend(
+        {
+          task: COMPLEX_TASK,
+          availableBackends: ["claude.local", "codex.local"],
+          usageByBackend: {
+            "claude.local": { remainingPercent: 50 },
+            "codex.local": { remainingPercent: 90 }
+          }
+        },
+        BUNDLED_SNAPSHOT
+      );
+      expect(rec.backend).toBe("claude.local");
+      expect(rec.rationale).not.toMatch(/near its limit/);
+    });
+
+    it("affirms ample headroom when the top backend wins with room to spare", () => {
+      const rec = recommendBackend(
+        {
+          task: COMPLEX_TASK,
+          availableBackends: ["claude.local", "codex.local"],
+          usageByBackend: {
+            "claude.local": { remainingPercent: 80 },
+            "codex.local": { remainingPercent: 70 }
+          }
+        },
+        BUNDLED_SNAPSHOT
+      );
+      expect(rec.backend).toBe("claude.local");
+      expect(rec.rationale).toMatch(/ample headroom/);
+    });
+
+    it("keeps the top backend when EVERY capable option is nearly exhausted", () => {
+      // Both near their caps → capability still leads (no roomy alternative to route to).
+      const rec = recommendBackend(
+        {
+          task: COMPLEX_TASK,
+          availableBackends: ["claude.local", "codex.local"],
+          usageByBackend: {
+            "claude.local": { remainingPercent: 8 },
+            "codex.local": { remainingPercent: 8 }
+          }
+        },
+        BUNDLED_SNAPSHOT
+      );
+      expect(rec.backend).toBe("claude.local");
+      expect(rec.rationale).not.toMatch(/near its limit/);
+    });
+  });
+});
+
+describe("headroomFromReport", () => {
+  it("takes the MOST-used window as the binding constraint", () => {
+    // session 34% / week 61% / model 12% → the 61%-used window governs → 39% remaining.
+    const usage = headroomFromReport(usageReport("claude.local", [34, 61, 12]));
+    expect(usage).toEqual({ remainingPercent: 39 });
+  });
+
+  it("ignores windows with no parsed percent", () => {
+    const usage = headroomFromReport(usageReport("codex.local", [undefined, 80, undefined]));
+    expect(usage).toEqual({ remainingPercent: 20 });
+  });
+
+  it("returns undefined when no window carried a percent (unparseable / failed probe)", () => {
+    expect(headroomFromReport(usageReport("claude.local", []))).toBeUndefined();
+    expect(headroomFromReport(usageReport("claude.local", [undefined]))).toBeUndefined();
+    const failed: UsageProbeReport = {
+      backend: "codex.local",
+      ok: false,
+      windows: [],
+      raw: "could not launch codex",
+      capturedAt: "2026-07-05T00:00:00Z"
+    };
+    expect(headroomFromReport(failed)).toBeUndefined();
   });
 });

@@ -1,4 +1,5 @@
 import {
+  useCallback,
   useEffect,
   useMemo,
   useRef,
@@ -27,7 +28,7 @@ import { backendLabel } from "../../backends";
 import { resolveDefaultWorkspaceRoot } from "../../settingsModel";
 import { getPlan, type Plans } from "../../plans";
 import { describeEstimate, estimateRunCost, resolveCatalogModel } from "./costEstimate";
-import { recommendBackend } from "../routing/router";
+import { recommendBackend, headroomFromReport, type BackendUsage } from "../routing/router";
 import { loadRoutingSnapshot } from "../routing/routingSnapshot";
 import { SessionDiagnostics } from "./SessionDiagnostics";
 import { WorkspacePicker } from "./WorkspacePicker";
@@ -67,6 +68,13 @@ import type { WireClient } from "../../wire/client";
 // launchable. The full configurable set lives in `settingsModel.allBackends` (the
 // Bridge settings UI), not duplicated here.
 const INITIAL_BACKENDS: AgentBackend[] = ["claude.local"];
+
+// Auto-probe cadence (Wave E cap-aware routing). Probing drives a real vendor CLI in a
+// hidden PTY, so it is rate-limited: the composer probes on mount and refreshes after a
+// run, but never re-hits a backend more often than these windows allow.
+const PROBE_TTL_MS = 5 * 60_000; // mount/refresh: at most one probe per backend / 5 min
+const POST_RUN_FLOOR_MS = 30_000; // after a run finishes, refresh only if last probe > 30s ago
+const PROBE_SAFETY_VALVE_MS = 45_000; // re-enable a stuck "Checking…" if a report never lands
 
 export interface RunScreenProps {
   client: WireClient;
@@ -262,14 +270,38 @@ export function RunScreen({
   const [attachError, setAttachError] = useState<string | undefined>(undefined);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
+  // Plan-usage probe reports per backend (the Usage section of the drop-up), plus
+  // which backends have a probe in flight (cleared when its report lands). Also feeds
+  // the router's cap-awareness (Wave E) — see `usageByBackend` below.
+  const [usageReports, setUsageReports] = useState<Record<string, UsageProbeReport>>({});
+  const [probing, setProbing] = useState<Record<string, boolean>>({});
+
   // The routing snapshot, loaded once through the consumption seam (a fetch-shaped
   // loader; v1 returns the bundled JSON projection).
   const snapshot = useMemo(() => loadRoutingSnapshot(), []);
-  // The router's suggestion for the current task (app-tier, ADR-0092 D3). Recomputed
-  // as the task text changes; a pure function of the task + the snapshot.
+  // Probed plan headroom per backend, distilled from the usage reports the auto-probe
+  // (and manual "Check" buttons) collect. Absent/unparseable reports drop out, so the
+  // router sees a backend only when there is a real meter to reason about (graceful
+  // fallback for the rest). This is what makes "Optimize cost" cap-aware.
+  const usageByBackend = useMemo(() => {
+    const out: Partial<Record<AgentBackend, BackendUsage>> = {};
+    for (const report of Object.values(usageReports)) {
+      const usage = headroomFromReport(report);
+      if (usage !== undefined) {
+        out[report.backend] = usage;
+      }
+    }
+    return out;
+  }, [usageReports]);
+  // The router's suggestion for the current task (app-tier, ADR-0092 D3). Recomputed as
+  // the task text — or the probed headroom — changes; a pure function of its inputs.
   const recommendation = useMemo(
-    () => recommendBackend({ task, availableBackends: routableBackends, plans }, snapshot),
-    [task, routableBackends, snapshot, plans]
+    () =>
+      recommendBackend(
+        { task, availableBackends: routableBackends, plans, usageByBackend },
+        snapshot
+      ),
+    [task, routableBackends, snapshot, plans, usageByBackend]
   );
   // The backend a run will launch on. In optimize mode it is the router's live
   // suggestion; in manual mode the user's pick (ignored — falling back to the
@@ -349,10 +381,6 @@ export function RunScreen({
   // The composer's config drop-up (source/mode/agent/model + routing rationale) —
   // one chip instead of two rows of controls plus a note.
   const [configOpen, setConfigOpen] = useState(false);
-  // Plan-usage probe reports per backend (the Usage section of the drop-up), plus
-  // which backends have a probe in flight (cleared when its report lands).
-  const [usageReports, setUsageReports] = useState<Record<string, UsageProbeReport>>({});
-  const [probing, setProbing] = useState<Record<string, boolean>>({});
   // One search box governs BOTH thread lists (local + synced), so the history reads as
   // one surface. Without a query: pinned threads always show plus the newest few; with
   // one: every match shows.
@@ -541,6 +569,83 @@ export function RunScreen({
     void client.listSessions().catch(() => undefined);
     return unsubscribe;
   }, [client]);
+
+  // --- Auto-probe plan usage (Wave E) -------------------------------------------------
+  // Refs expose the current probe state to the effects below WITHOUT making them re-run
+  // each time a report lands or an in-flight flag flips (which would risk a probe loop).
+  const lastProbeAt = useRef<Record<string, number>>({});
+  const probingRef = useRef(probing);
+  probingRef.current = probing;
+  const usageReportsRef = useRef(usageReports);
+  usageReportsRef.current = usageReports;
+
+  // Fire one usage probe for a backend, exactly like the manual "Check" button: mark it
+  // in flight, arm a safety valve (in case the report never lands, e.g. a bridge restart
+  // mid-probe), and let the report arrive through the usage_probe subscription above.
+  // Fire-and-forget — it never blocks the UI.
+  const probeBackend = useCallback(
+    (backend: AgentBackend): void => {
+      lastProbeAt.current[backend] = Date.now();
+      setProbing((prev) => ({ ...prev, [backend]: true }));
+      window.setTimeout(
+        () =>
+          setProbing((prev) =>
+            prev[backend] === true ? { ...prev, [backend]: false } : prev
+          ),
+        PROBE_SAFETY_VALVE_MS
+      );
+      void client.probeUsage(backend).catch(() =>
+        setProbing((prev) => ({ ...prev, [backend]: false }))
+      );
+    },
+    [client]
+  );
+
+  // Probe a backend only when it is worth it: skip Copilot (no usage surface), skip a
+  // probe already in flight, and skip one probed OR reported more recently than
+  // `minAgeMs`. This is the debounce/cache that keeps the CLI from being hammered.
+  const maybeProbe = useCallback(
+    (backend: AgentBackend, minAgeMs: number): void => {
+      if (backend === "copilot.local" || probingRef.current[backend] === true) {
+        return;
+      }
+      const now = Date.now();
+      if (now - (lastProbeAt.current[backend] ?? 0) < minAgeMs) {
+        return;
+      }
+      const report = usageReportsRef.current[backend];
+      if (report !== undefined) {
+        const capturedMs = Date.parse(report.capturedAt);
+        if (Number.isFinite(capturedMs) && now - capturedMs < minAgeMs) {
+          return;
+        }
+      }
+      probeBackend(backend);
+    },
+    [probeBackend]
+  );
+
+  // On mount (and whenever the offered backends change), probe each backend's plan
+  // headroom so "Optimize cost" is cap-aware from the first keystroke — TTL-cached so
+  // remounting the composer does not re-hit the CLI.
+  useEffect(() => {
+    for (const backend of routableBackends) {
+      maybeProbe(backend, PROBE_TTL_MS);
+    }
+  }, [routableBackends, maybeProbe]);
+
+  // A finished run has consumed real headroom, so refresh the probes when a run reaches
+  // a terminal state (guarded by a short floor so a burst of quick runs cannot spam it).
+  const prevRunStateRef = useRef(runState);
+  useEffect(() => {
+    const prev = prevRunStateRef.current;
+    prevRunStateRef.current = runState;
+    if (isTerminal(runState) && !isTerminal(prev)) {
+      for (const backend of routableBackends) {
+        maybeProbe(backend, POST_RUN_FLOOR_MS);
+      }
+    }
+  }, [runState, routableBackends, maybeProbe]);
 
   // Agents runnable on the selected provider (Claude `--agent`; Codex has no agent
   // flag, so the picker is empty/disabled for it). One entry per name.
@@ -1346,24 +1451,7 @@ export function RunScreen({
                                 type="button"
                                 className="chip-button"
                                 disabled={probing[backend] === true}
-                                onClick={() => {
-                                  setProbing((prev) => ({ ...prev, [backend]: true }));
-                                  // Safety valve: if the report never arrives (bridge
-                                  // restart mid-probe), re-enable the button rather
-                                  // than leaving it stuck on "Checking…" forever.
-                                  window.setTimeout(
-                                    () =>
-                                      setProbing((prev) =>
-                                        prev[backend] === true
-                                          ? { ...prev, [backend]: false }
-                                          : prev
-                                      ),
-                                    45_000
-                                  );
-                                  void client.probeUsage(backend).catch(() =>
-                                    setProbing((prev) => ({ ...prev, [backend]: false }))
-                                  );
-                                }}
+                                onClick={() => probeBackend(backend)}
                               >
                                 {probing[backend] === true
                                   ? `Checking ${backendLabel(backend)}…`
