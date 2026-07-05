@@ -77,41 +77,41 @@ describe("SettingsModal", () => {
     for (const label of [
       "General",
       "Pages",
-      "Pairing & devices",
-      "Workspace roots",
-      "Providers & models",
+      "Pairing & Devices",
+      "Workspace Roots",
+      "Providers & Models",
       "Connectors",
-      "Plans & costs",
+      "Plans & Costs",
       "Notifications"
     ]) {
       expect(screen.getByRole("button", { name: label })).toBeTruthy();
     }
   });
 
-  it("reaches the Pairing & devices section (device pairing)", () => {
+  it("reaches the Pairing & Devices section (device pairing)", () => {
     renderModal();
-    fireEvent.click(screen.getByRole("button", { name: "Pairing & devices" }));
+    fireEvent.click(screen.getByRole("button", { name: "Pairing & Devices" }));
     expect(screen.getByLabelText("Device name")).toBeTruthy();
   });
 
-  it("reaches the Workspace roots section", () => {
+  it("reaches the Workspace Roots section", () => {
     renderModal();
-    fireEvent.click(screen.getByRole("button", { name: "Workspace roots" }));
-    expect(screen.getByRole("list", { name: "Workspace roots" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Workspace Roots" }));
+    expect(screen.getByRole("list", { name: "Workspace Roots" })).toBeTruthy();
     expect(screen.getByLabelText("Or enter an absolute path")).toBeTruthy();
   });
 
-  it("reaches the Providers & models section", () => {
+  it("reaches the Providers & Models section", () => {
     renderModal();
-    fireEvent.click(screen.getByRole("button", { name: "Providers & models" }));
-    expect(screen.getByRole("heading", { name: "Providers & models" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Providers & Models" }));
+    expect(screen.getByRole("heading", { name: "Providers & Models" })).toBeTruthy();
     // The backend toggles render (at least one provider checkbox).
     expect(screen.getAllByRole("checkbox").length).toBeGreaterThan(0);
   });
 
-  it("reaches the Plans & costs section", () => {
+  it("reaches the Plans & Costs section", () => {
     renderModal();
-    fireEvent.click(screen.getByRole("button", { name: "Plans & costs" }));
+    fireEvent.click(screen.getByRole("button", { name: "Plans & Costs" }));
     expect(screen.getByLabelText("Claude Code plan")).toBeTruthy();
   });
 

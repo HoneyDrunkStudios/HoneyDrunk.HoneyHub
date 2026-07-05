@@ -78,7 +78,7 @@ export function Onboarding({
             free until you hit its cap, so "Optimize cost" can prefer it. Optional: you
             can set this later in Settings.
           </p>
-          <PlansSettings plans={plans} onChange={setPlans} heading="Your subscription plans" />
+          <PlansSettings plans={plans} onChange={setPlans} heading="Your Subscription Plans" />
           <div className="onboarding-actions spread">
             <button type="button" className="onboarding-back" onClick={() => setStep("repos")}>
               Back

@@ -35,11 +35,11 @@ type SectionId =
 const SECTIONS: { id: SectionId; label: string }[] = [
   { id: "general", label: "General" },
   { id: "pages", label: "Pages" },
-  { id: "pairing", label: "Pairing & devices" },
-  { id: "workspace", label: "Workspace roots" },
-  { id: "providers", label: "Providers & models" },
+  { id: "pairing", label: "Pairing & Devices" },
+  { id: "workspace", label: "Workspace Roots" },
+  { id: "providers", label: "Providers & Models" },
   { id: "connectors", label: "Connectors" },
-  { id: "plans", label: "Plans & costs" },
+  { id: "plans", label: "Plans & Costs" },
   { id: "notifications", label: "Notifications" }
 ];
 

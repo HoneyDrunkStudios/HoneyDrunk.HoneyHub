@@ -89,7 +89,7 @@ describe("App", () => {
       true
     );
     // Reach a real control: the bridge concerns are their own sections now.
-    fireEvent.click(screen.getByRole("button", { name: "Pairing & devices" }));
+    fireEvent.click(screen.getByRole("button", { name: "Pairing & Devices" }));
     expect(screen.getByLabelText("Device name")).toBeTruthy();
   });
 
@@ -106,9 +106,9 @@ describe("App", () => {
     renderCockpit();
 
     openConfig("Settings");
-    fireEvent.click(screen.getByRole("button", { name: "Plans & costs" }));
+    fireEvent.click(screen.getByRole("button", { name: "Plans & Costs" }));
 
-    // The plans editor (wired via `plans` + `onPlansChange`) renders in the Plans & costs section.
+    // The plans editor (wired via `plans` + `onPlansChange`) renders in the Plans & Costs section.
     const claudePlan = screen.getByLabelText("Claude Code plan") as HTMLSelectElement;
     expect(claudePlan).toBeTruthy();
 

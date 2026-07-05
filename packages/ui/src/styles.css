@@ -3054,16 +3054,55 @@ h2 {
   box-shadow: 0 0 0 3px var(--honey-glow);
 }
 
+/* Buttons in the settings pages. The DEFAULT is a quiet honey-ghost (secondary/utility:
+   Remove, Revoke, Done) — a thin honey outline over the dark panel that lights up on hover.
+   The single primary action per section (Pair device, Add root) opts into `.is-primary` for
+   the solid honey fill, so a page reads as one clear CTA plus quiet helpers rather than a row
+   of saturated yellow slabs. */
 .bridge-settings button {
   justify-self: start;
-  padding: 9px 16px;
-  border: 1px solid var(--honey);
+  padding: 7px 14px;
+  border: 1px solid var(--honey-line);
   border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--honey-soft);
+  font: inherit;
+  font-size: 0.85rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.12s ease, border-color 0.12s ease, color 0.12s ease;
+}
+
+.bridge-settings button:hover:not(:disabled) {
+  background: var(--honey-glow);
+  border-color: var(--honey);
+  color: var(--honey-bright);
+}
+
+.bridge-settings button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.bridge-settings button:focus-visible {
+  outline: none;
+  border-color: var(--honey);
+  box-shadow: 0 0 0 3px var(--honey-glow);
+}
+
+/* The one solid honey call-to-action per section. */
+.bridge-settings button.is-primary {
+  border-color: var(--honey);
   background: linear-gradient(180deg, var(--honey-bright), var(--honey));
   color: #2a1a04;
-  font: inherit;
   font-weight: 700;
-  cursor: pointer;
+}
+
+.bridge-settings button.is-primary:hover:not(:disabled) {
+  background: linear-gradient(180deg, var(--honey-bright), var(--honey));
+  border-color: var(--honey);
+  color: #2a1a04;
+  filter: brightness(1.05);
 }
 
 .bridge-settings ul {
@@ -4046,6 +4085,98 @@ h2 {
   display: flex;
   flex-direction: column;
   gap: 1px;
+}
+
+/* Folder-browser controls, scoped so they win over the `.bridge-settings button` fill when the
+   browser is embedded in Workspace Roots (a bare `.crumb`/`.folder-use`/`.entry` selector loses
+   to it on specificity, which is what made every row and button a saturated honey slab). The
+   look here is the honeypunk secondary set: a quiet honey-ghost "Up", a soft honey-tinted "Use
+   this folder", and clean rows that only wash honey + grow a honey left-edge when hovered or
+   focused — a subtle selected state, not a full-yellow bar. */
+.folder-browser .crumb {
+  padding: 5px 12px;
+  border: 1px solid var(--honey-line);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--honey-soft);
+  font: inherit;
+  font-size: 0.78rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.12s ease, border-color 0.12s ease, color 0.12s ease;
+}
+
+.folder-browser .crumb:hover:not(:disabled) {
+  background: var(--honey-glow);
+  border-color: var(--honey);
+  color: var(--honey-bright);
+}
+
+.folder-browser .crumb:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.folder-browser .crumb:focus-visible {
+  outline: none;
+  border-color: var(--honey);
+  box-shadow: 0 0 0 3px var(--honey-glow);
+}
+
+.folder-browser .folder-use {
+  flex: 0 0 auto;
+  padding: 5px 12px;
+  border: 1px solid var(--honey-line);
+  border-radius: var(--radius-sm);
+  background: var(--honey-glow);
+  color: var(--honey-bright);
+  font: inherit;
+  font-weight: 600;
+  font-size: 0.8rem;
+  cursor: pointer;
+  transition: background 0.12s ease, border-color 0.12s ease;
+}
+
+.folder-browser .folder-use:hover:not(:disabled) {
+  background: var(--honey-line);
+  border-color: var(--honey);
+}
+
+.folder-browser .folder-use:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.folder-browser .folder-use:focus-visible {
+  outline: none;
+  border-color: var(--honey);
+  box-shadow: 0 0 0 3px var(--honey-glow);
+}
+
+.folder-browser .entry {
+  padding: 7px 10px;
+  border: 1px solid transparent;
+  border-left: 2px solid transparent;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.1s ease, border-color 0.1s ease;
+}
+
+.folder-browser .entry:hover {
+  background: var(--honey-glow);
+  border-color: var(--honey-line);
+  border-left-color: var(--honey);
+}
+
+.folder-browser .entry:focus-visible {
+  outline: none;
+  background: var(--honey-glow);
+  border-color: var(--honey-line);
+  border-left-color: var(--honey);
 }
 
 .picked-roots {

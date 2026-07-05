@@ -82,8 +82,8 @@ export function PairingSettings({
   };
 
   return (
-    <section className="bridge-settings" aria-label="Pairing & devices">
-      <h2>Pairing &amp; devices</h2>
+    <section className="bridge-settings" aria-label="Pairing & Devices">
+      <h2>Pairing &amp; Devices</h2>
       <p className="settings-group-hint">
         Pair a phone or another device with this cockpit, and manage the devices you have granted
         access.
@@ -103,7 +103,7 @@ export function PairingSettings({
           value={deviceName}
           onChange={(event) => setDeviceName(event.target.value)}
         />
-        <button type="button" onClick={onPair}>
+        <button type="button" className="is-primary" onClick={onPair}>
           Pair device
         </button>
 
@@ -198,8 +198,8 @@ export function WorkspaceRootsSettings({
   };
 
   return (
-    <section className="bridge-settings" aria-label="Workspace roots">
-      <h2>Workspace roots</h2>
+    <section className="bridge-settings" aria-label="Workspace Roots">
+      <h2>Workspace Roots</h2>
       <p className="settings-group-hint">
         The repository folders the agent may read and launch in. Add a root by browsing or by
         absolute path.
@@ -223,10 +223,10 @@ export function WorkspaceRootsSettings({
         value={workspaceRoot}
         onChange={(event) => setWorkspaceRoot(event.target.value)}
       />
-      <button type="button" onClick={onAddRoot}>
+      <button type="button" className="is-primary" onClick={onAddRoot}>
         Add root
       </button>
-      <ul aria-label="Workspace roots">
+      <ul aria-label="Workspace Roots">
         {state.workspaceRoots.map((root) => (
           <li key={root}>
             <code>{root}</code>
@@ -285,8 +285,8 @@ export function ProvidersModelsSettings({
   };
 
   return (
-    <section className="bridge-settings" aria-label="Providers & models">
-      <h2>Providers &amp; models</h2>
+    <section className="bridge-settings" aria-label="Providers & Models">
+      <h2>Providers &amp; Models</h2>
       <p className="settings-group-hint">
         Enable the agent CLIs you have installed, then choose which of their models to allow.
       </p>

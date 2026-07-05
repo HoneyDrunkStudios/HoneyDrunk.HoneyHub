@@ -60,7 +60,7 @@ describe("WorkspaceRootsSettings", () => {
     });
     fireEvent.click(screen.getByRole("button", { name: "Add root" }));
 
-    const roots = screen.getByRole("list", { name: "Workspace roots" });
+    const roots = screen.getByRole("list", { name: "Workspace Roots" });
     expect(within(roots).getByText("/home/dev/work")).toBeTruthy();
   });
 });
