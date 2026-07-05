@@ -58,11 +58,36 @@ struct Host {
     /// Backends with a usage probe in flight (single-flight: each probe boots a full
     /// vendor TUI, so repeated clicks or multiple cockpits must not stack them).
     active_probes: Mutex<std::collections::HashSet<String>>,
+    /// Live language servers, one per (canonical root, language) — long-lived supervised
+    /// subprocesses reused across files, killed on stop / root-removal / shutdown (ADR-0102).
+    active_lsp: Mutex<HashMap<LspKey, honeyhub_bridge::LspServer>>,
     events: broadcast::Sender<BridgeEvent>,
     /// The live filesystem watcher (the recommended OS-native backend) plus the roots it is
     /// currently watching. Re-pointed whenever the workspace allowlist changes. `None` until
     /// the watcher is installed in `serve`, or if the platform watcher could not start.
     watcher: Mutex<Option<(RecommendedWatcher, Vec<String>)>>,
+}
+
+/// Identity of a language server: its workspace root (canonicalized so two spellings of
+/// the same tree share one server) and the language it serves.
+#[derive(Clone, PartialEq, Eq, Hash)]
+struct LspKey {
+    root: String,
+    language_id: String,
+}
+
+impl LspKey {
+    fn new(root: &str, language_id: &str) -> Self {
+        // Canonicalize the root so "C:/work" and "C:\work\." key the same server; fall back
+        // to the raw string when the path can't be canonicalized (matches `spawn_check`).
+        let root = std::fs::canonicalize(root)
+            .map(|path| path.to_string_lossy().into_owned())
+            .unwrap_or_else(|_| root.to_string());
+        Self {
+            root,
+            language_id: language_id.to_string(),
+        }
+    }
 }
 
 struct AppState {
@@ -102,6 +127,7 @@ pub async fn serve(
         active_runs: Mutex::new(std::collections::HashSet::new()),
         active_checks: Mutex::new(std::collections::HashSet::new()),
         active_probes: Mutex::new(std::collections::HashSet::new()),
+        active_lsp: Mutex::new(HashMap::new()),
         events: events_tx,
         watcher: Mutex::new(None),
     });
@@ -371,10 +397,27 @@ async fn handle_command(
     frame_id: &str,
     outbound_tx: &mpsc::Sender<WireFrame>,
 ) {
+    // LSP send/stop touch only the language-server map — never the runtime — so handle them
+    // WITHOUT taking the runtime lock. A completion request on every keystroke must not queue
+    // behind a backend run (or the 80ms poll loop) holding that lock, and a stdin write must
+    // not wedge it (ADR-0102). Start still goes through the main match: it gates the root.
+    if matches!(
+        command,
+        ClientCommand::LspSend { .. } | ClientCommand::LspStop { .. }
+    ) {
+        let result = handle_lsp_command(host, command).await;
+        respond(outbound_tx, frame_id, result).await;
+        return;
+    }
+
     let mut to_register: Option<String> = None;
     // Set when the workspace allowlist changes, so the watcher is re-pointed after the
     // runtime lock is released.
     let mut rewatch: Option<Vec<String>> = None;
+    // Language servers whose root fell out of the allowlist on a `SetWorkspaceRoots`, moved
+    // out under the lock and dropped off-lock below (a supervised server must never outlive
+    // its authorization; the reader-thread join is kept off the async worker).
+    let mut lsp_orphans: Vec<honeyhub_bridge::LspServer> = Vec::new();
     let result: Result<Option<Vec<BridgeEvent>>, BridgeError> = {
         let mut runtime = host.runtime.lock().await;
         match command {
@@ -417,6 +460,21 @@ async fn handle_command(
             ClientCommand::SetWorkspaceRoots { roots } => {
                 rewatch = Some(roots.clone());
                 runtime.set_workspace_roots(roots);
+                // Retire any language server whose root is no longer allowlisted — a
+                // supervised server must not outlive its authorization (ADR-0102). Collect the
+                // orphans while we still hold the runtime lock (so `workspace_allows` reflects
+                // the new set); they are dropped off-lock below.
+                let mut servers = host.active_lsp.lock().await;
+                let orphan_keys: Vec<LspKey> = servers
+                    .keys()
+                    .filter(|key| !runtime.workspace_allows(&key.root))
+                    .cloned()
+                    .collect();
+                for key in orphan_keys {
+                    if let Some(server) = servers.remove(&key) {
+                        lsp_orphans.push(server);
+                    }
+                }
                 Ok(None)
             }
             ClientCommand::BrowseDir { path } => honeyhub_bridge::browse_dir(path.as_deref())
@@ -913,6 +971,21 @@ async fn handle_command(
                 spawn_usage_probe(host, backend, cwd);
                 Ok(None)
             }
+            ClientCommand::LspStart { root, language_id } => {
+                // Starting a language server crosses into running an operator-installed binary,
+                // so gate the root against the allowlist first (the same posture as a check).
+                // Resolve/locate/spawn happen OFF the runtime lock in `spawn_lsp`, which
+                // broadcasts an honest `lsp_status` (running / installed / degraded).
+                require(runtime.workspace_allows(&root), "lsp root").map(|()| {
+                    spawn_lsp(host, root, language_id);
+                    None
+                })
+            }
+            ClientCommand::LspSend { .. } | ClientCommand::LspStop { .. } => {
+                // Handled before the runtime lock (see the early return in `handle_command`);
+                // this arm exists only for match exhaustiveness and is never reached.
+                Ok(None)
+            }
             ClientCommand::Resume { .. } => Err(BridgeError::new(
                 "unsupported_command",
                 "resume is not driven by the host runtime yet",
@@ -927,7 +1000,23 @@ async fn handle_command(
     if let Some(roots) = rewatch {
         apply_watch(host, roots).await;
     }
+    // Tear down any de-authorized language servers off-lock (Drop kills the tree + joins the
+    // reader thread, which we keep off the async worker).
+    for server in lsp_orphans {
+        tokio::task::spawn_blocking(move || drop(server));
+    }
 
+    respond(outbound_tx, frame_id, result).await;
+}
+
+/// Emit a command's result over the wire: any success events followed by an ack, a bare ack
+/// for a no-event success, or a frame-id-tagged error frame so the client can correlate the
+/// failure. Shared by the runtime path and the off-lock LSP path.
+async fn respond(
+    outbound_tx: &mpsc::Sender<WireFrame>,
+    frame_id: &str,
+    result: Result<Option<Vec<BridgeEvent>>, BridgeError>,
+) {
     match result {
         Ok(Some(events)) => {
             for event in events {
@@ -951,6 +1040,190 @@ async fn handle_command(
             let _ = outbound_tx.send(error_frame).await;
         }
     }
+}
+
+/// Handle an LSP send/stop without the runtime lock. Send frames the message to the running
+/// server for (root, language); stop retires + kills it. Both key off the canonical root.
+async fn handle_lsp_command(
+    host: &Arc<Host>,
+    command: ClientCommand,
+) -> Result<Option<Vec<BridgeEvent>>, BridgeError> {
+    match command {
+        ClientCommand::LspSend {
+            root,
+            language_id,
+            message,
+        } => {
+            let key = LspKey::new(&root, &language_id);
+            let mut servers = host.active_lsp.lock().await;
+            match servers.get_mut(&key) {
+                Some(server) => server.write_message(&message).map(|()| None),
+                None => Err(BridgeError::new(
+                    "lsp_not_running",
+                    "no language server is running for this file's language",
+                )),
+            }
+        }
+        ClientCommand::LspStop { root, language_id } => {
+            let key = LspKey::new(&root, &language_id);
+            let removed = host.active_lsp.lock().await.remove(&key);
+            if let Some(server) = removed {
+                // Drop off the async worker — Drop kills the tree and joins the reader thread.
+                tokio::task::spawn_blocking(move || drop(server));
+            }
+            Ok(None)
+        }
+        _ => Err(BridgeError::new(
+            "unsupported_command",
+            "not an lsp command",
+        )),
+    }
+}
+
+/// Resolve + locate + spawn (or reuse) a language server for `language_id` in `root`,
+/// without the runtime lock, then pump its inbound LSP messages to every cockpit. Every exit
+/// path broadcasts a single honest `lsp_status`, so the client always knows whether to light
+/// up LSP features or keep its in-file IntelliSense (ADR-0102 / ADR-0090 D4).
+fn spawn_lsp(host: &Arc<Host>, root: String, language_id: String) {
+    let host = Arc::clone(host);
+    tokio::spawn(async move {
+        let status = |installed: bool, running: bool, server_id: &str, reason: &str| {
+            BridgeEvent::lsp_status(
+                new_id(),
+                now_rfc3339(),
+                honeyhub_bridge::LspStatus {
+                    root: root.clone(),
+                    language_id: language_id.clone(),
+                    server_id: server_id.to_string(),
+                    installed,
+                    running,
+                    reason: reason.to_string(),
+                },
+            )
+        };
+
+        // 1. Resolve the language id against the host's own allowlist (never a command line).
+        let Some(spec) = honeyhub_bridge::lsp::resolve_server(&language_id) else {
+            let _ = host.events.send(status(
+                false,
+                false,
+                "",
+                "no language server is allowlisted for this language",
+            ));
+            return;
+        };
+        let key = LspKey::new(&root, &language_id);
+
+        // 2. Reuse a running server for this (language, root) across files.
+        {
+            let mut servers = host.active_lsp.lock().await;
+            if let Some(server) = servers.get_mut(&key) {
+                if server.poll_exit().is_none() {
+                    let server_id = server.server_id().to_string();
+                    let _ = host.events.send(status(
+                        true,
+                        true,
+                        &server_id,
+                        "language server already running",
+                    ));
+                    return;
+                }
+                // A dead husk lingered — drop it and re-spawn below.
+                let dead = servers.remove(&key);
+                drop(dead);
+            }
+        }
+
+        // 3. Locate the operator-installed binary (honest "not installed" when absent).
+        let Some(program) = honeyhub_bridge::lsp::locate(&spec) else {
+            let _ = host.events.send(status(
+                false,
+                false,
+                spec.server_id,
+                "language server not installed (the bridge locates, never downloads) — in-file IntelliSense stays on",
+            ));
+            return;
+        };
+
+        // 4. Spawn shell-free, in its own process group, scoped to the allowlisted root.
+        let (server, inbound) =
+            match honeyhub_bridge::LspServer::spawn(program, spec.args, &root, spec.server_id) {
+                Ok(pair) => pair,
+                Err(error) => {
+                    let _ = host.events.send(status(
+                        true,
+                        false,
+                        spec.server_id,
+                        &format!("could not start language server: {}", error.message),
+                    ));
+                    return;
+                }
+            };
+
+        // 5. Register (reconciling a start race: if a concurrent start won, drop ours).
+        {
+            let mut servers = host.active_lsp.lock().await;
+            if servers.contains_key(&key) {
+                tokio::task::spawn_blocking(move || drop(server));
+                let _ = host.events.send(status(
+                    true,
+                    true,
+                    spec.server_id,
+                    "language server already running",
+                ));
+                return;
+            }
+            servers.insert(key.clone(), server);
+        }
+        pump_lsp(&host, key, root.clone(), language_id.clone(), inbound);
+        let _ = host.events.send(status(
+            true,
+            true,
+            spec.server_id,
+            "language server running",
+        ));
+    });
+}
+
+/// Pump one server's inbound LSP messages to every cockpit until it exits, then retire it and
+/// broadcast an `lsp_status` so the client falls back to in-file IntelliSense. Runs on a
+/// blocking thread (the reader channel is synchronous); `blocking_lock` is the sanctioned way
+/// to touch the async map from there.
+fn pump_lsp(
+    host: &Arc<Host>,
+    key: LspKey,
+    root: String,
+    language_id: String,
+    inbound: std::sync::mpsc::Receiver<serde_json::Value>,
+) {
+    let host = Arc::clone(host);
+    tokio::task::spawn_blocking(move || {
+        while let Ok(message) = inbound.recv() {
+            let _ = host.events.send(BridgeEvent::lsp_message(
+                new_id(),
+                now_rfc3339(),
+                root.clone(),
+                language_id.clone(),
+                message,
+            ));
+        }
+        // The channel disconnected => the server's stdout hit EOF => it exited. Retire it (a
+        // no-op if `LspStop`/root-removal already removed it) and signal the fallback.
+        let removed = host.active_lsp.blocking_lock().remove(&key);
+        drop(removed);
+        let _ = host.events.send(BridgeEvent::lsp_status(
+            new_id(),
+            now_rfc3339(),
+            honeyhub_bridge::LspStatus {
+                root,
+                language_id,
+                server_id: String::new(),
+                installed: true,
+                running: false,
+                reason: "language server exited".to_string(),
+            },
+        ));
+    });
 }
 
 async fn send_frame(

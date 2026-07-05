@@ -13,6 +13,7 @@ use crate::jobs::{JobProbe, JobSnapshot};
 use crate::keyvault::{
     AzureSubscriptionList, ExpiringObjects, KeyVaultList, SecretReveal, VaultObjects,
 };
+use crate::lsp::LspStatus;
 use crate::network::NetworkInfo;
 use crate::roadmap::RoadmapSnapshot;
 use crate::sentry::SentrySummary;
@@ -559,6 +560,35 @@ pub enum ClientCommand {
         /// an opaque bad-frame error.
         #[serde(alias = "command")]
         check: String,
+    },
+    /// **LSP** (ADR-0102): start (or reuse) an allowlisted language server for
+    /// `language_id`, scoped to the allowlisted workspace `root`. The client sends only a
+    /// language id; the host resolves it against its own server allowlist (never a command
+    /// line), locates the operator-installed binary on `PATH`, and spawns it shell-free in
+    /// its own process group. One server per (language, root) is reused across files. The
+    /// host answers with a single [`BridgeEventPayload::LspStatus`] (running / installed /
+    /// degraded) — an absent server is an honest `installed: false`, not an error (the
+    /// cockpit's in-file IntelliSense stays on).
+    LspStart {
+        root: String,
+        language_id: String,
+    },
+    /// **LSP**: forward one LSP JSON-RPC `message` (request / response / notification) to the
+    /// running server for (`language_id`, `root`). The host frames it (Content-Length) and
+    /// writes it to the server's stdin; the server's replies arrive asynchronously as
+    /// [`BridgeEventPayload::LspMessage`] broadcasts. Acked with no inline event. No running
+    /// server for that key answers with an `lsp_not_running` error the client folds into
+    /// graceful degradation. The payload is opaque to the bridge — a dumb, host-gated pipe.
+    LspSend {
+        root: String,
+        language_id: String,
+        message: serde_json::Value,
+    },
+    /// **LSP**: stop the language server for (`language_id`, `root`), killing its process
+    /// group. Acked.
+    LspStop {
+        root: String,
+        language_id: String,
     },
 }
 
@@ -1353,6 +1383,46 @@ impl BridgeEvent {
         }
     }
 
+    /// A device-wide LSP message from a running language server. Host-synthesized, so
+    /// `session_id`/`run_id` are empty and `sequence` is `0`.
+    pub fn lsp_message(
+        id: impl Into<String>,
+        created_at: impl Into<String>,
+        root: String,
+        language_id: String,
+        message: serde_json::Value,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            session_id: String::new(),
+            run_id: String::new(),
+            sequence: 0,
+            created_at: created_at.into(),
+            payload: BridgeEventPayload::LspMessage {
+                root,
+                language_id,
+                message,
+            },
+        }
+    }
+
+    /// A device-wide LSP lifecycle / capability status. Host-synthesized, so
+    /// `session_id`/`run_id` are empty and `sequence` is `0`.
+    pub fn lsp_status(
+        id: impl Into<String>,
+        created_at: impl Into<String>,
+        status: LspStatus,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            session_id: String::new(),
+            run_id: String::new(),
+            sequence: 0,
+            created_at: created_at.into(),
+            payload: BridgeEventPayload::LspStatus { status },
+        }
+    }
+
     /// A device-wide persisted-session-list event. Not scoped to a run or session, so
     /// `session_id`/`run_id` are empty and `sequence` is `0`.
     pub fn session_list(
@@ -1586,6 +1656,22 @@ pub enum BridgeEventPayload {
     },
     CheckResult {
         result: CheckOutcome,
+    },
+    /// One LSP JSON-RPC message from a running language server (a response, or a server
+    /// notification such as `textDocument/publishDiagnostics`). Host-synthesized and
+    /// device-wide (empty session/run ids, `sequence = 0`); the cockpit routes it to the
+    /// matching (`language_id`, `root`) client. Rejected from backend streams by the stream
+    /// validator, like every host-synthesized channel.
+    LspMessage {
+        root: String,
+        #[serde(rename = "languageId")]
+        language_id: String,
+        message: serde_json::Value,
+    },
+    /// A language-server lifecycle / capability signal (running / installed / exited) — the
+    /// honest degradation flag (ADR-0090 D4). Host-synthesized, device-wide.
+    LspStatus {
+        status: LspStatus,
     },
 }
 
@@ -1960,6 +2046,57 @@ mod tests {
                 check: "npm test".to_string(),
             }
         );
+    }
+
+    #[test]
+    fn lsp_commands_and_events_use_camel_case_and_carry_opaque_payloads() {
+        // The command fields camelCase on the wire (`languageId`) and the message is carried
+        // verbatim as an opaque JSON value.
+        let send = ClientCommand::LspSend {
+            root: "C:/work".to_string(),
+            language_id: "typescript".to_string(),
+            message: json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize" }),
+        };
+        let encoded = serde_json::to_value(&send).expect("encode lsp_send");
+        assert_eq!(encoded["kind"], json!("lsp_send"));
+        assert_eq!(encoded["languageId"], json!("typescript"));
+        assert_eq!(encoded["message"]["method"], json!("initialize"));
+        let decoded: ClientCommand = serde_json::from_value(encoded).expect("decode lsp_send");
+        assert_eq!(decoded, send);
+
+        // The message event mirrors the same camelCase key and opaque payload.
+        let event = BridgeEvent::lsp_message(
+            "e1",
+            "2026-06-07T12:00:00Z",
+            "C:/work".to_string(),
+            "rust".to_string(),
+            json!({ "jsonrpc": "2.0", "method": "textDocument/publishDiagnostics" }),
+        );
+        let encoded = serde_json::to_value(&event.payload).expect("encode lsp_message");
+        assert_eq!(encoded["kind"], json!("lsp_message"));
+        assert_eq!(encoded["languageId"], json!("rust"));
+        assert_eq!(
+            encoded["message"]["method"],
+            json!("textDocument/publishDiagnostics")
+        );
+
+        // The status event carries the honest degradation flags.
+        let status = BridgeEvent::lsp_status(
+            "e2",
+            "2026-06-07T12:00:00Z",
+            crate::lsp::LspStatus {
+                root: "C:/work".to_string(),
+                language_id: "python".to_string(),
+                server_id: String::new(),
+                installed: false,
+                running: false,
+                reason: "no language server is allowlisted for this language".to_string(),
+            },
+        );
+        let encoded = serde_json::to_value(&status.payload).expect("encode lsp_status");
+        assert_eq!(encoded["kind"], json!("lsp_status"));
+        assert_eq!(encoded["status"]["languageId"], json!("python"));
+        assert_eq!(encoded["status"]["installed"], json!(false));
     }
 
     #[test]

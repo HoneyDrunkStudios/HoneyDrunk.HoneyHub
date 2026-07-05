@@ -1650,6 +1650,12 @@ export function RepositoriesView({
               saveError={activeFile?.saveError}
               revealLine={revealForActive?.line}
               revealNonce={revealForActive?.nonce}
+              lspClient={client}
+              repoRoot={
+                activeFile === undefined
+                  ? undefined
+                  : repoForFile(overview?.repos ?? [], activeFile.path)
+              }
               onDraft={setActiveDraft}
               onSave={saveDraft}
               onRevert={revertDraft}
@@ -2052,6 +2058,10 @@ interface FilePaneProps {
   revealLine?: number | undefined;
   /** Bumps to force a re-reveal of the same line. */
   revealNonce?: number | undefined;
+  /** The bridge wire client, threaded to the editor for LSP code intelligence (ADR-0102). */
+  lspClient?: WireClient | undefined;
+  /** The open file's owning repo root, scoping its language server. */
+  repoRoot?: string | undefined;
   onDraft: (value: string) => void;
   onSave: () => void;
   onRevert: () => void;
@@ -2073,16 +2083,25 @@ function FilePane({
   saveError,
   revealLine,
   revealNonce,
+  lspClient,
+  repoRoot,
   onDraft,
   onSave,
   onRevert
 }: Readonly<FilePaneProps>): ReactElement {
   const [previewMode, setPreviewMode] = useState(false);
+  // A quiet, honest note when a language server is not running/installed for this file
+  // (undefined when a server is running or no LSP applies). Shown unobtrusively in the header.
+  const [lspNote, setLspNote] = useState<string | undefined>(undefined);
   const path = file?.path;
   const markdown = path !== undefined && isMarkdownFile(path);
   // Each newly opened file defaults to Edit; reset the toggle whenever the open file changes.
   useEffect(() => {
     setPreviewMode(false);
+  }, [path]);
+  // Clear the stale note when the open file changes; the editor re-reports for the new file.
+  useEffect(() => {
+    setLspNote(undefined);
   }, [path]);
 
   if (loading) {
@@ -2131,7 +2150,9 @@ function FilePane({
               </button>
             </span>
           )}
-          <span className="file-viewer-meta">{file.truncated ? "truncated (too large to edit)" : ""}</span>
+          <span className="file-viewer-meta">
+            {file.truncated ? "truncated (too large to edit)" : lspNote !== undefined ? lspNote : ""}
+          </span>
           <button type="button" className="git-link" onClick={onRevert} disabled={saving || !dirty}>
             Revert
           </button>
@@ -2165,6 +2186,9 @@ function FilePane({
               readOnly={file.truncated}
               revealLine={revealLine}
               revealNonce={revealNonce}
+              lspClient={lspClient}
+              repoRoot={repoRoot}
+              onLspStatus={setLspNote}
             />
           </Suspense>
         </div>

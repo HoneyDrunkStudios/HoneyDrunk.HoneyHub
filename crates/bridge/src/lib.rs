@@ -18,6 +18,7 @@ pub mod git;
 pub mod grafana;
 pub mod jobs;
 pub mod keyvault;
+pub mod lsp;
 pub mod network;
 pub mod notify;
 pub mod pairing;
@@ -86,6 +87,7 @@ pub use keyvault::{
     AzureSubscription, AzureSubscriptionList, ExpiringObject, ExpiringObjects, KeyVault,
     KeyVaultList, SecretReveal, VaultObject, VaultObjectKind, VaultObjects,
 };
+pub use lsp::{LspServer, LspStatus, ServerSpec};
 pub use network::{reachable_addresses, NetAddress, NetAddressKind, NetworkInfo};
 pub use notify::{
     notification_for_artifact, notification_for_state, Notification, NotificationCenter,
