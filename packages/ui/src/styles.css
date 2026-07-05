@@ -871,6 +871,15 @@ button:not([class]):disabled {
   padding: 34px 36px 56px;
 }
 
+/* Repositories runs as a full-window IDE: drop the 1080px reading cap and trim the side padding
+   so the editor uses the whole content area (window minus the left nav + chat dock). Applied only
+   while the Repositories view is active, so every other page keeps its centred reading column. */
+.content-inner--wide {
+  width: 100%;
+  max-width: none;
+  padding: 14px 20px 16px;
+}
+
 /* shared section eyebrow + title — mono cyan label (cyberpunk cue) */
 .eyebrow {
   margin: 0 0 6px;
@@ -7721,6 +7730,12 @@ button:focus-visible,
   height: calc(100vh - 120px);
 }
 
+/* In the full-window (wide) layout the content padding is trimmed, so the IDE can claim almost
+   the whole viewport height (leaving only the wide top/bottom padding). */
+.content-inner--wide .repos {
+  height: calc(100vh - 34px);
+}
+
 .repos-header {
   display: flex;
   align-items: center;
@@ -8000,6 +8015,36 @@ button:focus-visible,
   flex-direction: column;
 }
 
+/* The editor/diff body fills the viewer beneath the tab strip. Scoped to the Repositories viewer
+   so the shared `.file-viewer`/`.git-diff` blocks elsewhere are untouched. */
+.repos-viewer > .file-viewer,
+.repos-viewer > .git-diff {
+  flex: 1 1 auto;
+  min-height: 0;
+  height: auto;
+}
+
+.repos-viewer > .git-diff {
+  display: flex;
+  flex-direction: column;
+}
+
+.repos-viewer > .git-diff .git-diff-head {
+  flex: none;
+}
+
+/* The unified-patch fallback (no side-by-side versions) scrolls inside the fixed-height pane. */
+.repos-viewer > .git-diff .diff-figure {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+}
+
+/* The markdown Preview needs a shrinkable flex box so its own overflow:auto can scroll. */
+.repos-viewer > .file-viewer .markdown-body {
+  min-height: 0;
+}
+
 /* The Monaco editor host: fills the remaining pane height so Monaco's automaticLayout can
    measure a real box, and carries the editor's own dark background so nothing flashes behind
    the lazy chunk on first open. */
@@ -8008,6 +8053,135 @@ button:focus-visible,
   min-height: 0;
   position: relative;
   background: #0b0a11;
+}
+
+/* ---- Editor tab strip (VS Code style) ---- */
+.repos-tabs {
+  display: flex;
+  align-items: stretch;
+  overflow-x: auto;
+  overflow-y: hidden;
+  flex: none;
+  min-height: 34px;
+  border-bottom: 1px solid var(--border-hair);
+  background: var(--panel-2);
+  scrollbar-width: thin;
+}
+
+.repos-tab {
+  display: inline-flex;
+  align-items: center;
+  flex: none;
+  max-width: 220px;
+  border-right: 1px solid var(--border-hair);
+  color: var(--text-muted);
+  background: transparent;
+  position: relative;
+}
+
+.repos-tab:hover {
+  background: var(--hover);
+  color: var(--text);
+}
+
+/* The active tab blends into the editor's own dark background, with a honey top accent. */
+.repos-tab.is-active {
+  background: #0b0a11;
+  color: var(--honey-bright);
+  box-shadow: inset 0 2px 0 var(--honey);
+}
+
+.repos-tab-open {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  padding: 6px 4px 6px 12px;
+  border: none;
+  background: none;
+  color: inherit;
+  font: inherit;
+  font-family: var(--font-mono);
+  font-size: 0.8rem;
+  cursor: pointer;
+}
+
+.repos-tab-icon {
+  display: inline-flex;
+  flex: none;
+}
+
+.repos-tab-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.repos-tab-close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  margin: 0 6px 0 2px;
+  padding: 0;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: none;
+  color: inherit;
+  cursor: pointer;
+  position: relative;
+}
+
+.repos-tab-close:hover {
+  background: var(--hover);
+  color: var(--danger);
+}
+
+/* A dirty tab shows a filled dot; on hover (of the tab) it flips to the close ✕. A clean tab
+   shows the ✕ (dimmed until hovered). */
+.repos-tab-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--honey-bright);
+}
+
+.repos-tab-x {
+  display: none;
+  font-size: 0.7rem;
+  line-height: 1;
+}
+
+.repos-tab:not(.is-dirty) .repos-tab-dot {
+  display: none;
+}
+
+.repos-tab:not(.is-dirty) .repos-tab-x {
+  display: inline;
+  opacity: 0.55;
+}
+
+.repos-tab:hover .repos-tab-dot {
+  display: none;
+}
+
+.repos-tab:hover .repos-tab-x {
+  display: inline;
+  opacity: 1;
+}
+
+/* ---- File-type icons (tree rows + tabs) ---- */
+.file-icon {
+  display: block;
+  flex: none;
+}
+
+.repos-tree-icon {
+  display: inline-flex;
+  flex: none;
+  width: 16px;
+  justify-content: center;
 }
 
 .repos-monaco {

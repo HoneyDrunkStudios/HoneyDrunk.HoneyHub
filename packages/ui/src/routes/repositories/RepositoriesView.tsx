@@ -17,6 +17,8 @@ import { basename, isWithin } from "../../paths";
 import { resolveDefaultWorkspaceRoot } from "../../settingsModel";
 import { diffStat, groupFiles, replaceRepoStatus, toDiffLines } from "../git/gitModel";
 import { isMarkdownFile, renderMarkdown } from "../browse/fileView";
+import { fileIcon, folderIcon } from "./fileIcons";
+import EditorTabs from "./EditorTabs";
 
 // Monaco is heavy, so the file editor is loaded only once a file is opened. The base bundle
 // (and the mobile PWA that never touches a file) stays light; a <Suspense> fallback covers the
@@ -25,6 +27,47 @@ const CodeEditor = lazy(() => import("./CodeEditor"));
 // The Monaco side-by-side diff is likewise lazy — only fetched once a changed file's diff is
 // opened, so the base bundle stays light.
 const DiffViewer = lazy(() => import("./DiffViewer"));
+
+/**
+ * One open file in the editor tab strip. The editor holds several files at once (VS Code model):
+ * each tab carries its own on-disk `file`, live `draft`, and load/save status, so switching tabs
+ * never loses an edit. `activeFilePath` (in the component) selects which tab's editor shows.
+ */
+interface OpenFile {
+  /** The file's absolute path (the tab's identity). */
+  path: string;
+  /** The on-disk contents (undefined while the first read is in flight). */
+  file: FileContents | undefined;
+  /** The live editor text, seeded from disk and compared against it to derive the dirty dot. */
+  draft: string;
+  /** True while the initial read is in flight. */
+  loading: boolean;
+  /** A read error for this tab, if the file couldn't be opened. */
+  error: string | undefined;
+  /** True while a save is in flight. */
+  saving: boolean;
+  /** A save error for this tab, if the last write failed. */
+  saveError: string | undefined;
+}
+
+/** A freshly opened (still loading) tab for `path`. */
+function newOpenFile(path: string): OpenFile {
+  return { path, file: undefined, draft: "", loading: true, error: undefined, saving: false, saveError: undefined };
+}
+
+/** Unsaved edits: a non-truncated open file whose editor text has diverged from disk. */
+function isDirtyTab(tab: OpenFile): boolean {
+  return tab.file !== undefined && !tab.file.truncated && tab.draft !== tab.file.content;
+}
+
+/** Apply a partial patch to the open file at `path` (a no-op if that tab isn't open). */
+function patchOpenFile(
+  setOpenFiles: Dispatch<SetStateAction<OpenFile[]>>,
+  path: string,
+  patch: Partial<OpenFile>
+): void {
+  setOpenFiles((prev) => prev.map((tab) => (tab.path === path ? { ...tab, ...patch } : tab)));
+}
 
 export interface RepositoriesViewProps {
   client: WireClient;
@@ -140,74 +183,30 @@ function refreshRepoTree(
   }
 }
 
-/** The centre-pane setters + correlation refs, bundled so the file/diff/editor handlers can live
-    at module scope (keeping the component's cognitive complexity down). */
-interface ViewerControls {
+/** The diff pane's setters + correlation ref, bundled so `openDiffInView` can live at module
+    scope. The file editor is driven separately through the open-files list. */
+interface DiffControls {
   client: WireClient;
   setViewerMode: Dispatch<SetStateAction<"file" | "diff">>;
-  setFile: Dispatch<SetStateAction<FileContents | undefined>>;
-  setFileLoading: Dispatch<SetStateAction<boolean>>;
-  setFileError: Dispatch<SetStateAction<string | undefined>>;
   setDiff: Dispatch<SetStateAction<GitDiff | undefined>>;
   setFileVersions: Dispatch<SetStateAction<GitFileVersions | undefined>>;
-  setSaving: Dispatch<SetStateAction<boolean>>;
-  setSaveError: Dispatch<SetStateAction<string | undefined>>;
-  pendingFile: RefObject<string | undefined>;
   pendingDiff: RefObject<{ root: string; path?: string } | undefined>;
-  savingPath: RefObject<string | undefined>;
-}
-
-/** Open a file straight into the centre pane's editor, correlating the async reply by path.
-    The editor's initial draft is seeded from the file contents when they arrive (see
-    `applyFileContents`). */
-function openFileInView(v: ViewerControls, path: string): void {
-  v.setViewerMode("file");
-  v.setSaveError(undefined);
-  v.pendingFile.current = path;
-  v.setFile(undefined);
-  v.setFileError(undefined);
-  v.setFileLoading(true);
-  void v.client.readFile(path).catch((cause: unknown) => {
-    if (v.pendingFile.current === path) {
-      v.setFileLoading(false);
-      v.setFileError(errorMessage(cause, "could not read file"));
-    }
-  });
 }
 
 /** Open a changed file's diff into the centre pane. The unified `git_diff` still supplies the
     +/- stat header; a per-file diff additionally fetches both file versions (`git_file_versions`)
     to feed the side-by-side Monaco `DiffEditor`. The repo-level "all changes" case (no path) has
-    no single pair of versions, so it stays on the unified patch. */
-function openDiffInView(v: ViewerControls, repoRoot: string, path?: string): void {
+    no single pair of versions, so it stays on the unified patch. A rejected read leaves the pane
+    on its loading placeholder. */
+function openDiffInView(v: DiffControls, repoRoot: string, path?: string): void {
   v.setViewerMode("diff");
   v.setDiff(undefined);
   v.setFileVersions(undefined);
-  v.setFileError(undefined);
   v.pendingDiff.current = path === undefined ? { root: repoRoot } : { root: repoRoot, path };
-  void v.client.gitDiff(repoRoot, path).catch(() => v.setFileError("could not read the diff"));
+  void v.client.gitDiff(repoRoot, path).catch(() => undefined);
   if (path !== undefined) {
-    void v.client
-      .gitFileVersions(repoRoot, path)
-      .catch(() => v.setFileError("could not read the diff"));
+    void v.client.gitFileVersions(repoRoot, path).catch(() => undefined);
   }
-}
-
-/** Save the editor draft through the bridge's write_file boundary (ADR-0097). */
-function saveFileDraft(v: ViewerControls, file: FileContents | undefined, draft: string): void {
-  if (file === undefined) {
-    return;
-  }
-  v.setSaving(true);
-  v.setSaveError(undefined);
-  v.savingPath.current = file.path;
-  void v.client.writeFile(file.path, draft).catch((cause: unknown) => {
-    if (v.savingPath.current === file.path) {
-      v.setSaving(false);
-      v.savingPath.current = undefined;
-      v.setSaveError(errorMessage(cause, "could not save the file"));
-    }
-  });
 }
 
 /** Run a git write op: mark busy, clear stale feedback, and gate behind the confirm modal when a
@@ -238,15 +237,12 @@ interface RepoEventContext {
   client: WireClient;
   folderRef: RefObject<string>;
   activeRef: RefObject<boolean>;
-  pendingFile: RefObject<string | undefined>;
   pendingDiff: RefObject<{ root: string; path?: string } | undefined>;
-  savingPath: RefObject<string | undefined>;
+  savingPaths: RefObject<Set<string>>;
   refreshOverviewRef: RefObject<() => void>;
   refreshTreeRef: RefObject<() => void>;
   setListings: Dispatch<SetStateAction<Record<string, DirListing>>>;
-  setFile: Dispatch<SetStateAction<FileContents | undefined>>;
-  setFileLoading: Dispatch<SetStateAction<boolean>>;
-  setFileError: Dispatch<SetStateAction<string | undefined>>;
+  setOpenFiles: Dispatch<SetStateAction<OpenFile[]>>;
   setOverview: Dispatch<SetStateAction<GitOverview | undefined>>;
   setBranches: Dispatch<SetStateAction<GitBranches | undefined>>;
   setDiff: Dispatch<SetStateAction<GitDiff | undefined>>;
@@ -254,22 +250,31 @@ interface RepoEventContext {
   setFeedback: Dispatch<SetStateAction<GitOpResult | undefined>>;
   setBusy: Dispatch<SetStateAction<boolean>>;
   setCommitMessage: Dispatch<SetStateAction<string>>;
-  setSaving: Dispatch<SetStateAction<boolean>>;
-  setDraft: Dispatch<SetStateAction<string>>;
-  setSaveError: Dispatch<SetStateAction<string | undefined>>;
 }
 
 type FileWrittenResult = Extract<BridgeEvent["payload"], { kind: "file_written" }>["result"];
 
+/** Fold freshly-read file contents into whichever open tab asked for them (matched by path).
+    The functional update naturally scopes to open tabs, so contents read by another surface are
+    ignored. The draft is re-seeded from disk unless the tab is dirty — the refresh path never
+    re-reads a dirty file, so first-open, save-reread, and clean-refresh all re-seed correctly,
+    while a genuine unsaved edit is preserved. */
 function applyFileContents(file: FileContents, ctx: RepoEventContext): void {
-  if (ctx.pendingFile.current === undefined || file.path === ctx.pendingFile.current) {
-    ctx.setFile(file);
-    ctx.setFileLoading(false);
-    ctx.setFileError(undefined);
-    // Seed (or re-seed, after a save) the editor draft from disk. The refresh path won't
-    // re-read an open file while it's dirty, so this never clobbers unsaved edits.
-    ctx.setDraft(file.content);
-  }
+  ctx.setOpenFiles((prev) =>
+    prev.map((tab) => {
+      if (tab.path !== file.path) {
+        return tab;
+      }
+      const keepDraft = isDirtyTab(tab);
+      return {
+        ...tab,
+        file,
+        loading: false,
+        error: undefined,
+        draft: keepDraft ? tab.draft : file.content
+      };
+    })
+  );
 }
 
 function applyGitDiff(diff: GitDiff, ctx: RepoEventContext): void {
@@ -295,19 +300,21 @@ function applyGitOp(result: GitOpResult, ctx: RepoEventContext): void {
 }
 
 function applyFileWritten(result: FileWrittenResult, ctx: RepoEventContext): void {
-  // Our own save came back. Clear the saving state and, on success, re-read the file so the
-  // editor's draft is re-seeded from the persisted content (clearing the dirty indicator).
-  if (result.path !== ctx.savingPath.current) {
+  // Only react to writes this view kicked off (tracked in savingPaths). Clear the tab's saving
+  // state and, on success, re-read the file so its draft re-seeds from the persisted content
+  // (clearing the dirty dot).
+  if (!ctx.savingPaths.current.has(result.path)) {
     return;
   }
-  ctx.setSaving(false);
-  ctx.savingPath.current = undefined;
+  ctx.savingPaths.current.delete(result.path);
   if (result.ok) {
-    ctx.setSaveError(undefined);
-    ctx.pendingFile.current = result.path;
+    patchOpenFile(ctx.setOpenFiles, result.path, { saving: false, saveError: undefined });
     void ctx.client.readFile(result.path).catch(() => undefined);
   } else {
-    ctx.setSaveError(result.message ?? "could not save the file");
+    patchOpenFile(ctx.setOpenFiles, result.path, {
+      saving: false,
+      saveError: result.message ?? "could not save the file"
+    });
   }
 }
 
@@ -768,34 +775,36 @@ export function RepositoriesView({
   // source-control panel. Only one is mounted at a time; the Monaco editor always holds the centre.
   const [leftPanel, setLeftPanel] = useState<LeftPanel>("explorer");
 
-  // Center pane: a file (viewed or edited) or a diff.
+  // Center pane: the editor (a tab strip of open files) or a diff.
   const [viewerMode, setViewerMode] = useState<"file" | "diff">("file");
-  const [file, setFile] = useState<FileContents | undefined>(undefined);
-  const [fileLoading, setFileLoading] = useState(false);
-  const [fileError, setFileError] = useState<string | undefined>(undefined);
   const [diff, setDiff] = useState<GitDiff | undefined>(undefined);
   // The two file versions for the side-by-side Monaco diff (per-file only; the repo-level
   // "all changes" case has no single pair and stays on the unified patch).
   const [fileVersions, setFileVersions] = useState<GitFileVersions | undefined>(undefined);
 
-  // Editor state. The file always opens directly in the editor; `draft` is the live editor text,
-  // seeded from disk and compared against the file to derive the dirty indicator.
-  const [draft, setDraft] = useState("");
-  const [saving, setSaving] = useState(false);
-  const [saveError, setSaveError] = useState<string | undefined>(undefined);
+  // Editor tabs: the ordered list of open files (each with its own draft + status) and which one
+  // is active. Opening a file adds/activates its tab; the active tab's editor holds the centre.
+  const [openFiles, setOpenFiles] = useState<OpenFile[]>([]);
+  const [activeFilePath, setActiveFilePath] = useState<string | undefined>(undefined);
 
-  const error = fileError;
-  // Unsaved edits: a non-truncated open file whose editor text has diverged from disk.
-  const dirty = file !== undefined && !file.truncated && draft !== file.content;
+  const activeFile = openFiles.find((tab) => tab.path === activeFilePath);
+  const activeDirty = activeFile !== undefined && isDirtyTab(activeFile);
 
   // Refs so the [client]-only subscription reads the latest without re-subscribing.
   const folderRef = useRef(folder);
   folderRef.current = folder;
   const activeRef = useRef(active);
   activeRef.current = active;
-  const pendingFile = useRef<string | undefined>(undefined);
   const pendingDiff = useRef<{ root: string; path?: string } | undefined>(undefined);
-  const savingPath = useRef<string | undefined>(undefined);
+  // Paths with a save in flight, tracked synchronously so `file_written` events (which can arrive
+  // before React re-renders) correlate to the tab that asked for the write.
+  const savingPaths = useRef<Set<string>>(new Set());
+  // Mirror of the open-files list + active path, read synchronously by the open/close handlers so
+  // they can decide (e.g. "is this file already open?") without waiting for a re-render.
+  const openFilesRef = useRef(openFiles);
+  openFilesRef.current = openFiles;
+  const activeFilePathRef = useRef(activeFilePath);
+  activeFilePathRef.current = activeFilePath;
 
   const loadDir = useCallback(
     (path: string) => {
@@ -812,10 +821,10 @@ export function RepositoriesView({
   const refreshOverviewRef = useRef(refreshOverview);
   refreshOverviewRef.current = refreshOverview;
 
-  // Re-read the open file + every expanded directory (so the tree and viewer reflect disk).
+  // Re-read the active open file + every expanded directory (so the tree and viewer reflect disk).
   const refreshTree = useCallback(() => {
-    refreshRepoTree(client, loadDir, folderRef.current, expandedDirs, pendingFile.current, dirty);
-  }, [client, loadDir, expandedDirs, dirty]);
+    refreshRepoTree(client, loadDir, folderRef.current, expandedDirs, activeFile?.path, activeDirty);
+  }, [client, loadDir, expandedDirs, activeFile?.path, activeDirty]);
   const refreshTreeRef = useRef(refreshTree);
   refreshTreeRef.current = refreshTree;
 
@@ -827,25 +836,19 @@ export function RepositoriesView({
       client,
       folderRef,
       activeRef,
-      pendingFile,
       pendingDiff,
-      savingPath,
+      savingPaths,
       refreshOverviewRef,
       refreshTreeRef,
       setListings,
-      setFile,
-      setFileLoading,
-      setFileError,
+      setOpenFiles,
       setOverview,
       setBranches,
       setDiff,
       setFileVersions,
       setFeedback,
       setBusy,
-      setCommitMessage,
-      setSaving,
-      setDraft,
-      setSaveError
+      setCommitMessage
     };
     return client.subscribe((event) => applyRepoEvent(event, ctx));
   }, [client]);
@@ -900,29 +903,74 @@ export function RepositoriesView({
 
   const toggleDir = (path: string) => toggleExpandedDir(setExpandedDirs, listings, loadDir, path);
 
-  // The file/diff/editor handlers live at module scope over this bundle of centre-pane setters.
-  const viewer: ViewerControls = {
-    client,
-    setViewerMode,
-    setFile,
-    setFileLoading,
-    setFileError,
-    setDiff,
-    setFileVersions,
-    setSaving,
-    setSaveError,
-    pendingFile,
-    pendingDiff,
-    savingPath
-  };
-  const openFile = (path: string) => openFileInView(viewer, path);
-  const openDiff = (repoRoot: string, path?: string) => openDiffInView(viewer, repoRoot, path);
-  const saveDraft = () => saveFileDraft(viewer, file, draft);
-  const revertDraft = () => {
-    if (file !== undefined) {
-      setDraft(file.content);
+  const diffControls: DiffControls = { client, setViewerMode, setDiff, setFileVersions, pendingDiff };
+  const openDiff = (repoRoot: string, path?: string) => openDiffInView(diffControls, repoRoot, path);
+
+  // Open a file into a tab: activate it if already open (keeping any unsaved edit), otherwise add
+  // a loading tab and read it. `openFilesRef` is read synchronously so we read from disk exactly
+  // once even though the mock/host may emit `file_contents` before React commits the new tab.
+  const openFile = (path: string): void => {
+    setViewerMode("file");
+    setActiveFilePath(path);
+    if (openFilesRef.current.some((tab) => tab.path === path)) {
+      return;
     }
-    setSaveError(undefined);
+    setOpenFiles((prev) => (prev.some((tab) => tab.path === path) ? prev : [...prev, newOpenFile(path)]));
+    void client.readFile(path).catch((cause: unknown) => {
+      patchOpenFile(setOpenFiles, path, {
+        loading: false,
+        error: errorMessage(cause, "could not read file")
+      });
+    });
+  };
+
+  const activateTab = (path: string): void => {
+    setViewerMode("file");
+    setActiveFilePath(path);
+  };
+
+  // Close a tab; when it was the active tab, fall back to the neighbour (next, else previous).
+  const closeTab = (path: string): void => {
+    const prev = openFilesRef.current;
+    const index = prev.findIndex((tab) => tab.path === path);
+    if (index === -1) {
+      return;
+    }
+    const next = prev.filter((tab) => tab.path !== path);
+    savingPaths.current.delete(path);
+    setOpenFiles(next);
+    if (path === activeFilePathRef.current) {
+      const neighbour = next[index] ?? next[index - 1];
+      setActiveFilePath(neighbour?.path);
+    }
+  };
+
+  // Edit/save/revert operate on the active tab.
+  const setActiveDraft = (value: string): void => {
+    patchOpenFile(setOpenFiles, activeFilePathRef.current ?? "", { draft: value });
+  };
+  const saveDraft = (): void => {
+    const tab = openFilesRef.current.find((candidate) => candidate.path === activeFilePathRef.current);
+    if (tab === undefined || tab.file === undefined || tab.file.truncated) {
+      return;
+    }
+    savingPaths.current.add(tab.path);
+    patchOpenFile(setOpenFiles, tab.path, { saving: true, saveError: undefined });
+    void client.writeFile(tab.path, tab.draft).catch((cause: unknown) => {
+      if (savingPaths.current.has(tab.path)) {
+        savingPaths.current.delete(tab.path);
+        patchOpenFile(setOpenFiles, tab.path, {
+          saving: false,
+          saveError: errorMessage(cause, "could not save the file")
+        });
+      }
+    });
+  };
+  const revertDraft = (): void => {
+    const tab = openFilesRef.current.find((candidate) => candidate.path === activeFilePathRef.current);
+    if (tab?.file !== undefined) {
+      patchOpenFile(setOpenFiles, tab.path, { draft: tab.file.content, saveError: undefined });
+    }
   };
   const runWrite = (op: () => Promise<void>, confirmMessage?: string) =>
     runGitWrite(setBusy, setFeedback, setConfirm, op, confirmMessage);
@@ -966,9 +1014,11 @@ export function RepositoriesView({
               setListings({});
               setOverview(undefined);
               setActiveRepo(undefined);
-              setFile(undefined);
+              setOpenFiles([]);
+              setActiveFilePath(undefined);
+              savingPaths.current.clear();
+              setViewerMode("file");
               setDiff(undefined);
-              setSaveError(undefined);
             }}
           >
             {workspaceRoots.map((option) => (
@@ -1001,7 +1051,7 @@ export function RepositoriesView({
                 rootListing={rootListing}
                 listings={listings}
                 expandedDirs={expandedDirs}
-                openFilePath={file?.path}
+                openFilePath={activeFilePath}
                 onToggleDir={toggleDir}
                 onOpenFile={openFile}
               />
@@ -1038,18 +1088,24 @@ export function RepositoriesView({
         )}
 
         <div className="repos-viewer">
+          <EditorTabs
+            tabs={openFiles.map((tab) => ({ path: tab.path, dirty: isDirtyTab(tab) }))}
+            activePath={viewerMode === "file" ? activeFilePath : undefined}
+            onActivate={activateTab}
+            onClose={closeTab}
+          />
           {viewerMode === "diff" ? (
             <DiffPane diff={diff} fileVersions={fileVersions} />
           ) : (
             <FilePane
-              file={file}
-              loading={fileLoading}
-              error={error}
-              draft={draft}
-              dirty={dirty}
-              saving={saving}
-              saveError={saveError}
-              onDraft={setDraft}
+              file={activeFile?.file}
+              loading={activeFile?.loading ?? false}
+              error={activeFile?.error}
+              draft={activeFile?.draft ?? ""}
+              dirty={activeDirty}
+              saving={activeFile?.saving ?? false}
+              saveError={activeFile?.saveError}
+              onDraft={setActiveDraft}
               onSave={saveDraft}
               onRevert={revertDraft}
             />
@@ -1132,6 +1188,9 @@ function TreeLevel({
             >
               <span className="repos-tree-caret" aria-hidden="true">
                 {caretGlyph(isDir, isOpen)}
+              </span>
+              <span className="repos-tree-icon" aria-hidden="true">
+                {isDir ? folderIcon(isOpen) : fileIcon(entry.name)}
               </span>
               <span className="repos-tree-name">{entry.name}</span>
             </button>

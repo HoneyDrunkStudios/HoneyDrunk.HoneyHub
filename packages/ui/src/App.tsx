@@ -421,7 +421,10 @@ export function App({ client }: AppProps = {}) {
     >
       <MatrixRain />
       <main className="content">
-        <div className="content-inner">
+        {/* Repositories is HoneyHub's IDE surface, so it drops the shared 1080px reading column
+            and fills the content area (window minus the left nav + chat dock). Every other view
+            keeps the capped, centred column. */}
+        <div className={view === "repositories" ? "content-inner content-inner--wide" : "content-inner"}>
           {/* Both panels stay mounted; visibility is toggled so in-progress state
               survives a tab switch. */}
           <div hidden={view !== "hub"}>

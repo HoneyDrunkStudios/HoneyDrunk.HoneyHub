@@ -11,6 +11,8 @@ vi.mock("monaco-editor/esm/vs/language/json/json.worker?worker", () => ({ defaul
 vi.mock("monaco-editor/esm/vs/language/css/css.worker?worker", () => ({ default: class {} }));
 vi.mock("monaco-editor/esm/vs/language/html/html.worker?worker", () => ({ default: class {} }));
 vi.mock("monaco-editor/esm/vs/language/typescript/ts.worker?worker", () => ({ default: class {} }));
+vi.mock("monaco-yaml/yaml.worker?worker", () => ({ default: class {} }));
+vi.mock("monaco-yaml", () => ({ configureMonacoYaml: vi.fn() }));
 
 import CodeEditor, { configureLanguageDefaults, languageForPath } from "./CodeEditor";
 
@@ -57,6 +59,18 @@ describe("languageForPath", () => {
     expect(languageForPath("deploy.yaml")).toBe("yaml");
     expect(languageForPath("run.sh")).toBe("shell");
     expect(languageForPath("build.ps1")).toBe("powershell");
+  });
+
+  it("maps the IDE-wave languages (html, razor, sql, yaml, json) from their extensions", () => {
+    expect(languageForPath("index.html")).toBe("html");
+    expect(languageForPath("layout.htm")).toBe("html");
+    expect(languageForPath("Index.cshtml")).toBe("razor");
+    expect(languageForPath("Counter.razor")).toBe("razor");
+    expect(languageForPath("migrate.sql")).toBe("sql");
+    expect(languageForPath("ci.yml")).toBe("yaml");
+    expect(languageForPath("compose.yaml")).toBe("yaml");
+    expect(languageForPath("tsconfig.jsonc")).toBe("json");
+    expect(languageForPath("appsettings.json")).toBe("json");
   });
 
   it("matches extension-less names by their full lowercased name", () => {

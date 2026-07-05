@@ -680,6 +680,68 @@ describe("RepositoriesView", () => {
     await waitFor(() => expect(client.gitOverviewCount).toBeGreaterThan(afterRefreshOverview));
   });
 
+  it("opens files as tabs, switches between them via the tab strip, and closes a tab", async () => {
+    renderRepos();
+
+    // Open README.md → one tab, active.
+    fireEvent.click(await screen.findByRole("button", { name: "HoneyHub" }));
+    fireEvent.click(await screen.findByRole("button", { name: "README.md" }));
+    await screen.findByLabelText("Edit README.md");
+    expect(screen.getByRole("tab", { name: "README.md" }).getAttribute("aria-selected")).toBe("true");
+
+    // Open src/main.ts → two tabs, main.ts becomes active.
+    fireEvent.click(await screen.findByRole("button", { name: "src" }));
+    fireEvent.click(await screen.findByRole("button", { name: "main.ts" }));
+    await screen.findByLabelText("Edit main.ts");
+    expect(screen.getByRole("tab", { name: "README.md" })).toBeTruthy();
+    expect(screen.getByRole("tab", { name: "main.ts" }).getAttribute("aria-selected")).toBe("true");
+
+    // Click the README tab to switch back.
+    fireEvent.click(screen.getByRole("tab", { name: "README.md" }));
+    await screen.findByLabelText("Edit README.md");
+    expect(screen.getByRole("tab", { name: "README.md" }).getAttribute("aria-selected")).toBe("true");
+
+    // Close the active README tab → main.ts remains and becomes active again.
+    fireEvent.click(screen.getByRole("button", { name: "Close README.md" }));
+    await waitFor(() => expect(screen.queryByRole("tab", { name: "README.md" })).toBeNull());
+    expect(screen.getByRole("tab", { name: "main.ts" })).toBeTruthy();
+    await screen.findByLabelText("Edit main.ts");
+  });
+
+  it("flags a tab dirty while its buffer has unsaved edits", async () => {
+    renderRepos();
+
+    fireEvent.click(await screen.findByRole("button", { name: "HoneyHub" }));
+    fireEvent.click(await screen.findByRole("button", { name: "README.md" }));
+    const editor = await screen.findByLabelText("Edit README.md");
+
+    const tabEl = () => screen.getByRole("tab", { name: "README.md" }).closest(".repos-tab") as HTMLElement;
+    expect(tabEl().className).not.toContain("is-dirty");
+
+    fireEvent.change(editor, { target: { value: "unsaved change" } });
+    await waitFor(() => expect(tabEl().className).toContain("is-dirty"));
+  });
+
+  it("re-activates an already-open file (keeping its unsaved edit) instead of duplicating the tab", async () => {
+    renderRepos();
+
+    fireEvent.click(await screen.findByRole("button", { name: "HoneyHub" }));
+    fireEvent.click(await screen.findByRole("button", { name: "README.md" }));
+    const editor = (await screen.findByLabelText("Edit README.md")) as HTMLTextAreaElement;
+    fireEvent.change(editor, { target: { value: "work in progress" } });
+
+    // Switch away to another file…
+    fireEvent.click(await screen.findByRole("button", { name: "src" }));
+    fireEvent.click(await screen.findByRole("button", { name: "main.ts" }));
+    await screen.findByLabelText("Edit main.ts");
+
+    // …then re-open README from the tree: same single tab, unsaved draft intact.
+    fireEvent.click(screen.getByRole("button", { name: "README.md" }));
+    const back = (await screen.findByLabelText("Edit README.md")) as HTMLTextAreaElement;
+    expect(back.value).toBe("work in progress");
+    expect(screen.getAllByRole("tab", { name: "README.md" })).toHaveLength(1);
+  });
+
   it("resets to an empty-folder state when the workspace folder changes", async () => {
     render(
       <RepositoriesView
