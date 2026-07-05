@@ -9,6 +9,7 @@ pub mod backend_catalog;
 pub mod checks;
 pub mod clock;
 pub mod coaching;
+pub mod contentsearch;
 pub mod core;
 pub mod dispatch;
 pub mod environment;
@@ -52,6 +53,9 @@ pub use checks::{
     parse_extra_checks, resolve_check, run_check, CheckDenialReason, CheckDisposition, CheckOutcome,
 };
 pub use coaching::{coach, CoachingSnapshot};
+pub use contentsearch::{
+    search_content, ContentMatch, ContentSearchEngine, ContentSearchOptions, ContentSearchResults,
+};
 pub use core::{BridgeRuntime, ManagedRun, ReplyOutcome};
 pub use dispatch::{
     audit_dispatch, backend_id, child_cap_from_env, dispatch_backends_from_env, parse_backend,

@@ -1,6 +1,11 @@
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
-import type { DirListing, GitStatus } from "@honeydrunk/honeyhub-types";
+import type {
+  BridgeEventPayload,
+  ContentMatch,
+  DirListing,
+  GitStatus
+} from "@honeydrunk/honeyhub-types";
 import { MockWireClient } from "../../wire/mockClient";
 import { RepositoriesView, repoForFile } from "./RepositoriesView";
 
@@ -900,5 +905,185 @@ describe("RepositoriesView", () => {
     await waitFor(() => expect(client.writeFileCalls).toHaveLength(2));
     const written = client.writeFileCalls.map((call) => call.path).sort();
     expect(written).toEqual(["/demo/HoneyHub/README.md", "/demo/HoneyHub/src/main.ts"]);
+  });
+});
+
+/** Records the read + content-search calls, turns `searchContent` into a no-op (so only the events
+    a test pushes drive the panel), and exposes a `pushSearch` hook for crafted result events. */
+class SearchClient extends CapturingClient {
+  readFileCalls: string[] = [];
+  searchContentCalls: Array<{
+    root: string;
+    query: string;
+    options?: { caseSensitive?: boolean; wholeWord?: boolean; isRegex?: boolean } | undefined;
+  }> = [];
+
+  override readFile(path: string): Promise<void> {
+    this.readFileCalls.push(path);
+    return super.readFile(path);
+  }
+
+  override searchContent(
+    root: string,
+    query: string,
+    options?: { caseSensitive?: boolean; wholeWord?: boolean; isRegex?: boolean }
+  ): Promise<void> {
+    this.searchContentCalls.push({ root, query, options });
+    return Promise.resolve();
+  }
+
+  pushSearch(payload: BridgeEventPayload): void {
+    this.emitDevice(payload);
+  }
+}
+
+/** The scripted match set for the grouped-render tests: two files, three matches. */
+function demoMatches(): ContentMatch[] {
+  return [
+    { path: "/demo/HoneyHub/src/main.ts", line: 1, column: 14, lineText: 'export const greeting = "hello";' },
+    { path: "/demo/HoneyHub/src/main.ts", line: 2, column: 22, lineText: "export const other = greeting;" },
+    { path: "/demo/HoneyHub/README.md", line: 4, column: 9, lineText: "The hub greeting lives here." }
+  ];
+}
+
+/** Switch to the Search panel and type a query (the component debounces the real call). */
+function openSearch(query: string): void {
+  fireEvent.click(screen.getByRole("button", { name: "Search" }));
+  fireEvent.change(screen.getByLabelText("Search in files"), { target: { value: query } });
+}
+
+describe("RepositoriesView search panel", () => {
+  it("renders content-search results grouped by file with the match highlighted", async () => {
+    const client = new SearchClient();
+    renderRepos(client);
+
+    openSearch("greeting");
+    client.pushSearch({
+      kind: "content_search_results",
+      results: {
+        root: "/demo",
+        query: "greeting",
+        caseSensitive: false,
+        wholeWord: false,
+        isRegex: false,
+        matches: demoMatches(),
+        fileCount: 2,
+        truncated: false,
+        engine: "fallback"
+      }
+    });
+
+    // A summary line reports total matches + distinct files.
+    await waitFor(() => expect(screen.getByText("3 results in 2 files")).toBeTruthy());
+
+    // Each file is a collapsible header showing its basename + a per-file match count.
+    const mainHead = screen.getByRole("button", { name: /main\.ts/ });
+    expect(within(mainHead).getByText("2")).toBeTruthy();
+    const readmeHead = screen.getByRole("button", { name: /README\.md/ });
+    expect(within(readmeHead).getByText("1")).toBeTruthy();
+
+    // Match rows carry the 1-based line numbers (targeted by their "path:line" title).
+    expect(screen.getByTitle("/demo/HoneyHub/src/main.ts:1")).toBeTruthy();
+    expect(screen.getByTitle("/demo/HoneyHub/src/main.ts:2")).toBeTruthy();
+    expect(screen.getByTitle("/demo/HoneyHub/README.md:4")).toBeTruthy();
+
+    // The matched substring is highlighted in a <mark> on every row.
+    const marks = screen.getAllByText("greeting", { selector: "mark" });
+    expect(marks.length).toBe(3);
+  });
+
+  it("shows the truncation notice when the result set is capped", async () => {
+    const client = new SearchClient();
+    renderRepos(client);
+
+    openSearch("greeting");
+    client.pushSearch({
+      kind: "content_search_results",
+      results: {
+        root: "/demo",
+        query: "greeting",
+        caseSensitive: false,
+        wholeWord: false,
+        isRegex: false,
+        matches: demoMatches(),
+        fileCount: 2,
+        truncated: true,
+        engine: "ripgrep"
+      }
+    });
+
+    await waitFor(() => expect(screen.getByText(/showing the first 3/)).toBeTruthy());
+  });
+
+  it("shows a plain No results state when a query matches nothing", async () => {
+    const client = new SearchClient();
+    renderRepos(client);
+
+    openSearch("zzz-nothing");
+    client.pushSearch({
+      kind: "content_search_results",
+      results: {
+        root: "/demo",
+        query: "zzz-nothing",
+        caseSensitive: false,
+        wholeWord: false,
+        isRegex: false,
+        matches: [],
+        fileCount: 0,
+        truncated: false,
+        engine: "fallback"
+      }
+    });
+
+    await waitFor(() => expect(screen.getByText("No results.")).toBeTruthy());
+  });
+
+  it("opens a clicked match in a tab at that line (reuses the open-in-tab read path)", async () => {
+    const client = new SearchClient();
+    renderRepos(client);
+
+    openSearch("greeting");
+    client.pushSearch({
+      kind: "content_search_results",
+      results: {
+        root: "/demo",
+        query: "greeting",
+        caseSensitive: false,
+        wholeWord: false,
+        isRegex: false,
+        matches: demoMatches(),
+        fileCount: 2,
+        truncated: false,
+        engine: "fallback"
+      }
+    });
+
+    const matchRow = await screen.findByTitle("/demo/HoneyHub/src/main.ts:2");
+    fireEvent.click(matchRow);
+
+    // The click routes through the same open-file read path with the match's file...
+    await waitFor(() => expect(client.readFileCalls).toContain("/demo/HoneyHub/src/main.ts"));
+    // ...and threads the match's 1-based line to the editor as the reveal target.
+    await waitFor(() => {
+      const host = document.querySelector(".repos-editor-host");
+      expect(host?.getAttribute("data-reveal-line")).toBe("2");
+    });
+  });
+
+  it("keeps the panel empty for an empty query and debounces a real scoped search", async () => {
+    const client = new SearchClient();
+    renderRepos(client);
+
+    // Opening Search with no query renders neither results nor a No-results state.
+    fireEvent.click(screen.getByRole("button", { name: "Search" }));
+    expect(screen.queryByText("No results.")).toBeNull();
+    expect(screen.queryByText(/results in/)).toBeNull();
+
+    // Typing a query eventually fires the debounced content search, scoped to the folder.
+    fireEvent.change(screen.getByLabelText("Search in files"), { target: { value: "greeting" } });
+    await waitFor(() => expect(client.searchContentCalls.length).toBeGreaterThan(0));
+    const call = client.searchContentCalls.at(-1);
+    expect(call?.root).toBe("/demo");
+    expect(call?.query).toBe("greeting");
   });
 });

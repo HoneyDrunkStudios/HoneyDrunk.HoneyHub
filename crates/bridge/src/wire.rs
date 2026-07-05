@@ -4,6 +4,7 @@ use crate::agents::{AgentDefinition, AgentWriteOutcome};
 use crate::artifact::DispatchArtifact;
 use crate::backend_catalog::BackendCapability;
 use crate::checks::CheckOutcome;
+use crate::contentsearch::ContentSearchResults;
 use crate::environment::EnvironmentInfo;
 use crate::fsbrowse::{DirListing, FileContents, FileWriteResult, SearchResults, WorkspaceFolders};
 use crate::git::{GitBranches, GitDiff, GitFileVersions, GitOpResult, GitOverview, GitStatus};
@@ -200,6 +201,21 @@ pub enum ClientCommand {
     SearchFiles {
         root: String,
         query: String,
+    },
+    /// Repo-wide **content** search (VS Code's "Find in Files"): grep the files under `root` for
+    /// `query`, read-only. `case_sensitive`/`whole_word`/`is_regex` are optional flags (all
+    /// default off). The host gates `root` against the workspace allowlist and answers with a
+    /// [`BridgeEventPayload::ContentSearchResults`] (matches, capped + truncation-flagged, plus the
+    /// engine used). All three flag fields default so an older client that omits them still parses.
+    SearchContent {
+        root: String,
+        query: String,
+        #[serde(default)]
+        case_sensitive: bool,
+        #[serde(default)]
+        whole_word: bool,
+        #[serde(default)]
+        is_regex: bool,
     },
     /// Resolve a VS Code `.code-workspace` file to the repo folders it references, so
     /// the picker can add several repos at once. Read-only; answered with a
@@ -836,6 +852,23 @@ impl BridgeEvent {
         }
     }
 
+    /// A device-wide content-search-results event (repo-wide "Find in Files"). Not scoped to a run
+    /// or session, so `session_id`/`run_id` are empty and `sequence` is `0`.
+    pub fn content_search_results(
+        id: impl Into<String>,
+        created_at: impl Into<String>,
+        results: ContentSearchResults,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            session_id: String::new(),
+            run_id: String::new(),
+            sequence: 0,
+            created_at: created_at.into(),
+            payload: BridgeEventPayload::ContentSearchResults { results },
+        }
+    }
+
     /// A device-wide workspace-folders event (a `.code-workspace`'s repo folders). Not
     /// scoped to a run or session, so `session_id`/`run_id` are empty and `sequence` is `0`.
     pub fn workspace_folders(
@@ -1445,6 +1478,9 @@ pub enum BridgeEventPayload {
     SearchResults {
         results: SearchResults,
     },
+    ContentSearchResults {
+        results: ContentSearchResults,
+    },
     WorkspaceFolders {
         folders: WorkspaceFolders,
     },
@@ -1722,6 +1758,90 @@ mod tests {
         assert!(matches!(
             decoded.payload,
             BridgeEventPayload::FileWritten { .. }
+        ));
+    }
+
+    #[test]
+    fn serializes_search_content_command_and_event() {
+        use crate::contentsearch::{ContentMatch, ContentSearchEngine, ContentSearchResults};
+
+        // The command tag is snake_case and its flag fields camelCase.
+        let command = ClientCommand::SearchContent {
+            root: "C:/repo".to_string(),
+            query: "needle".to_string(),
+            case_sensitive: true,
+            whole_word: false,
+            is_regex: false,
+        };
+        assert_eq!(
+            serde_json::to_value(&command).expect("command serializes"),
+            json!({
+                "kind": "search_content",
+                "root": "C:/repo",
+                "query": "needle",
+                "caseSensitive": true,
+                "wholeWord": false,
+                "isRegex": false
+            })
+        );
+        // A stale client that omits the flag fields still parses (they default to false).
+        let lean: ClientCommand = serde_json::from_value(json!({
+            "kind": "search_content",
+            "root": "C:/repo",
+            "query": "needle"
+        }))
+        .expect("lean command deserializes");
+        assert!(matches!(
+            lean,
+            ClientCommand::SearchContent {
+                case_sensitive: false,
+                whole_word: false,
+                is_regex: false,
+                ..
+            }
+        ));
+
+        // The event payload tag is snake_case; the results' fields camelCase and the optional
+        // `column` is omitted when absent.
+        let event = BridgeEvent::content_search_results(
+            "e",
+            "2026-07-05T00:00:00Z",
+            ContentSearchResults {
+                root: "C:/repo".to_string(),
+                query: "needle".to_string(),
+                case_sensitive: true,
+                whole_word: false,
+                is_regex: false,
+                matches: vec![ContentMatch {
+                    path: "C:/repo/a.rs".to_string(),
+                    line: 12,
+                    column: Some(5),
+                    line_text: "    let needle = 1;".to_string(),
+                }],
+                file_count: 1,
+                truncated: false,
+                engine: ContentSearchEngine::Ripgrep,
+            },
+        );
+        let value = serde_json::to_value(&event).expect("event serializes");
+        assert_eq!(value["payload"]["kind"], json!("content_search_results"));
+        assert_eq!(value["payload"]["results"]["fileCount"], json!(1));
+        assert_eq!(value["payload"]["results"]["engine"], json!("ripgrep"));
+        assert_eq!(value["payload"]["results"]["matches"][0]["line"], json!(12));
+        assert_eq!(
+            value["payload"]["results"]["matches"][0]["lineText"],
+            json!("    let needle = 1;")
+        );
+        assert_eq!(
+            value["payload"]["results"]["matches"][0]["column"],
+            json!(5)
+        );
+
+        // And it round-trips back to the same variant.
+        let decoded: BridgeEvent = serde_json::from_value(value).expect("event deserializes");
+        assert!(matches!(
+            decoded.payload,
+            BridgeEventPayload::ContentSearchResults { .. }
         ));
     }
 

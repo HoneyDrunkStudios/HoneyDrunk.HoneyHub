@@ -458,6 +458,58 @@ export class MockWireClient implements WireClient {
     });
   }
 
+  async searchContent(
+    root: string,
+    query: string,
+    options?: { caseSensitive?: boolean; wholeWord?: boolean; isRegex?: boolean }
+  ): Promise<void> {
+    const caseSensitive = options?.caseSensitive ?? false;
+    const wholeWord = options?.wholeWord ?? false;
+    const isRegex = options?.isRegex ?? false;
+    // The scripted demo corpus (a couple of files) so the offline cockpit can show grouped
+    // content-search results without a bridge.
+    const corpus: Record<string, string> = {
+      "/demo/HoneyHub/README.md": "# HoneyHub\n\nA scripted demo readme.\nThe hub greeting lives here.\n",
+      "/demo/HoneyHub/src/main.ts": "export const greeting = \"hello\";\nexport const other = greeting;\n"
+    };
+    const needle = query.trim();
+    const matches =
+      needle.length === 0
+        ? []
+        : Object.entries(corpus).flatMap(([path, content]) =>
+            content
+              .split("\n")
+              .map((lineText, index) => ({ lineText, line: index + 1 }))
+              .filter(({ lineText }) => {
+                const hay = caseSensitive ? lineText : lineText.toLowerCase();
+                return hay.includes(caseSensitive ? needle : needle.toLowerCase());
+              })
+              .map(({ lineText, line }) => ({
+                path,
+                line,
+                column: (caseSensitive ? lineText : lineText.toLowerCase()).indexOf(
+                  caseSensitive ? needle : needle.toLowerCase()
+                ) + 1,
+                lineText
+              }))
+          );
+    const fileCount = new Set(matches.map((m) => m.path)).size;
+    this.emitDevice({
+      kind: "content_search_results",
+      results: {
+        root,
+        query,
+        caseSensitive,
+        wholeWord,
+        isRegex,
+        matches,
+        fileCount,
+        truncated: false,
+        engine: "fallback"
+      }
+    });
+  }
+
   async resolveWorkspaceFile(path: string): Promise<void> {
     // The scripted demo workspace points at the one demo repo.
     this.emitDevice({
