@@ -200,4 +200,17 @@ describe("App", () => {
 
     expect(await screen.findByRole("heading", { name: "Agents" })).toBeTruthy();
   });
+
+  it("orders the primary nav Hub → Repositories → Work", () => {
+    renderCockpit();
+    openHive();
+
+    // The honeycomb renders one menuitem per visible primary view, in array order (the mobileOnly
+    // Chat hex is dropped on the wide/test viewport).
+    const labels = screen.getAllByRole("menuitem").map((item) => item.textContent?.trim());
+    const hub = labels.indexOf("Hub");
+    expect(hub).toBeGreaterThanOrEqual(0);
+    expect(labels[hub + 1]).toBe("Repositories");
+    expect(labels[hub + 2]).toBe("Work");
+  });
 });

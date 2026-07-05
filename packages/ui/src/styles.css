@@ -6225,6 +6225,62 @@ button:focus-visible,
   color: var(--text-muted);
   margin-top: 2px;
 }
+
+/* "Changes in progress": repos with uncommitted work. Each row jumps into Repositories, opening
+   that repo's Source Control. */
+.hub-changes {
+  margin-top: 18px;
+}
+.hub-changes-title {
+  font-size: 0.78rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-muted);
+  margin: 0 0 8px;
+}
+.hub-changes-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.hub-change-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  text-align: left;
+  padding: 8px 12px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--honey);
+  background: var(--bg);
+  color: var(--text);
+  cursor: pointer;
+  font: inherit;
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+.hub-change-row:hover {
+  border-color: var(--honey-line);
+  box-shadow: 0 0 0 3px var(--honey-glow);
+}
+.hub-change-name {
+  font-family: var(--font-mono);
+  font-weight: 600;
+}
+.hub-change-branch {
+  font-size: 0.78rem;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+}
+.hub-change-count {
+  margin-left: auto;
+  font-size: 0.74rem;
+  color: var(--honey-bright);
+  white-space: nowrap;
+}
 .updated-stamp {
   font-size: 0.72rem;
   color: var(--text-muted);
@@ -7776,6 +7832,7 @@ button:focus-visible,
 }
 
 .repos-rail-btn {
+  position: relative;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -7787,6 +7844,27 @@ button:focus-visible,
   background: none;
   color: var(--text-muted);
   cursor: pointer;
+}
+
+/* Change-count badge on the Source control icon: a small honey pill in the top-right corner. */
+.repos-rail-badge {
+  position: absolute;
+  top: -3px;
+  right: -3px;
+  min-width: 15px;
+  height: 15px;
+  padding: 0 4px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  background: var(--honey);
+  color: #1a1206;
+  font-size: 0.62rem;
+  font-weight: 700;
+  line-height: 1;
+  font-family: var(--font-mono);
+  box-shadow: 0 0 0 1px var(--honey-line);
 }
 
 .repos-rail-btn:hover {
@@ -8056,6 +8134,43 @@ button:focus-visible,
 }
 
 /* ---- Editor tab strip (VS Code style) ---- */
+/* The tab strip and the editor-wide actions (unsaved count + Save all) share one bar; the tabs
+   scroll and grow while the actions stay pinned to the right. */
+.repos-editor-tabbar {
+  display: flex;
+  align-items: stretch;
+  flex: none;
+  min-height: 34px;
+  border-bottom: 1px solid var(--border-hair);
+  background: var(--panel-2);
+}
+
+.repos-editor-tabbar > .repos-tabs {
+  flex: 1 1 auto;
+  min-width: 0;
+  border-bottom: none;
+  background: transparent;
+}
+
+.repos-editor-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: none;
+  padding: 0 12px;
+  white-space: nowrap;
+}
+
+.repos-unsaved {
+  font-size: 0.74rem;
+  font-family: var(--font-mono);
+  color: var(--honey-bright);
+}
+
+.repos-save-all {
+  flex: none;
+}
+
 .repos-tabs {
   display: flex;
   align-items: stretch;

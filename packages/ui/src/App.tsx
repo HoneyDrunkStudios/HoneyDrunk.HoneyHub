@@ -99,14 +99,16 @@ interface NavItem {
 const PRIMARY_NAV: NavItem[] = [
   { view: "hub", label: "Hub", icon: <IconHome /> },
   // On desktop the right-hand dock IS the chat; the Chat page exists for phones,
-  // where the dock does not fit. The nav item is CSS-hidden on wide screens.
+  // where the dock does not fit. The nav item is CSS-hidden on wide screens, so on desktop
+  // Repositories is the first surface after the Hub.
   { view: "run", label: "Chat", icon: <IconChat />, mobileOnly: true },
+  // Repositories (the IDE surface) and Work lead the agent-first nav, right after the Hub.
+  { view: "repositories", label: "Repositories", icon: <IconFiles /> },
+  { view: "work", label: "Work", icon: <IconInbox /> },
   { view: "groups", label: "Groups", icon: <IconGroups /> },
   { view: "plan", label: "Plan", icon: <IconMap /> },
-  { view: "work", label: "Work", icon: <IconInbox /> },
   { view: "jobs", label: "Jobs", icon: <IconPulse /> },
   { view: "observe", label: "Observe", icon: <IconGauge /> },
-  { view: "repositories", label: "Repositories", icon: <IconFiles /> },
   { view: "spend", label: "Spend", icon: <IconCoins /> },
   { view: "coaching", label: "Coaching", icon: <IconSpark /> },
   { view: "agents", label: "Agents", icon: <IconGrid /> }
@@ -192,6 +194,10 @@ export function App({ client }: AppProps = {}) {
   // Settings is a true modal over the current page (decoupled from `view`, so the page behind
   // stays mounted + visible). The honeycomb header gear opens it; Escape / backdrop / ✕ close it.
   const [settingsOpen, setSettingsOpen] = useState(false);
+  // A repo target lifted from the Hub's "Changes in progress" list: set when a row is clicked,
+  // handed to RepositoriesView as a one-shot `selectedRepo`, and cleared once that view honors it
+  // (so a later manual repo pick inside Repositories is not overridden on every render).
+  const [repoTarget, setRepoTarget] = useState<string | undefined>(undefined);
 
   // Aggregate all run events into the runs dashboard, whatever transport is active. The Groups
   // view consumes this summary; there is no standalone Runs page anymore.
@@ -431,7 +437,16 @@ export function App({ client }: AppProps = {}) {
             <HubView
               client={wireClient}
               active={view === "hub"}
-              onNavigate={(next) => setView(next)}
+              workspaceRoots={settings.workspaceRoots}
+              {...(settings.defaultWorkspaceRoot === undefined
+                ? {}
+                : { defaultWorkspaceRoot: settings.defaultWorkspaceRoot })}
+              onNavigate={(next, repo) => {
+                if (repo !== undefined) {
+                  setRepoTarget(repo);
+                }
+                setView(next);
+              }}
             />
           </div>
 
@@ -499,6 +514,8 @@ export function App({ client }: AppProps = {}) {
               {...(settings.defaultWorkspaceRoot === undefined
                 ? {}
                 : { defaultWorkspaceRoot: settings.defaultWorkspaceRoot })}
+              {...(repoTarget === undefined ? {} : { selectedRepo: repoTarget })}
+              onSelectedRepoConsumed={() => setRepoTarget(undefined)}
             />
           </div>
 

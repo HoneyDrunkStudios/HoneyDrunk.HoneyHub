@@ -1,7 +1,8 @@
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
+import type { DirListing, GitStatus } from "@honeydrunk/honeyhub-types";
 import { MockWireClient } from "../../wire/mockClient";
-import { RepositoriesView } from "./RepositoriesView";
+import { RepositoriesView, repoForFile } from "./RepositoriesView";
 
 // Monaco can't render in jsdom, so stub the lazy CodeEditor with a plain textarea that mirrors
 // its props contract (value/onChange/onSave/readOnly). Its aria-label carries the file's basename
@@ -150,9 +151,67 @@ function renderRepos(client = new MockWireClient()) {
 }
 
 // The VS Code activity rail shows only one left panel at a time. Explorer is the default; switch
-// to "Source control" before any git interaction, back to "Explorer" for tree interaction.
+// to "Source control" before any git interaction, back to "Explorer" for tree interaction. The
+// Source control icon's accessible name gains a "(N changes)" suffix once the overview loads, so
+// match it by prefix.
 function showPanel(name: "Explorer" | "Source control"): void {
-  fireEvent.click(screen.getByRole("button", { name }));
+  const matcher = name === "Source control" ? /^Source control/ : name;
+  fireEvent.click(screen.getByRole("button", { name: matcher }));
+}
+
+/** A two-repo folder (both dirty) plus a browse tree with a file under each, so opening a file in
+    one repo can be observed to switch Source Control to that repo. */
+class TwoRepoClient extends MockWireClient {
+  override gitOverview(root: string): Promise<void> {
+    const repos: GitStatus[] = [
+      {
+        root: `${root}/HoneyHub`,
+        branch: "main",
+        ahead: 0,
+        behind: 0,
+        files: [{ path: "a.ts", status: " M", staged: false, untracked: false }],
+        clean: false
+      },
+      {
+        root: `${root}/HoneyDrunk.AI`,
+        branch: "main",
+        ahead: 0,
+        behind: 0,
+        files: [{ path: "b.ts", status: " M", staged: false, untracked: false }],
+        clean: false
+      }
+    ];
+    this.emitDevice({ kind: "git_overview", overview: { root, repos } });
+    return Promise.resolve();
+  }
+
+  override browseDir(path = ""): Promise<void> {
+    const tree: Record<string, DirListing> = {
+      "/demo": {
+        path: "/demo",
+        entries: [
+          { name: "HoneyHub", kind: "dir" },
+          { name: "HoneyDrunk.AI", kind: "dir" }
+        ],
+        truncated: false
+      },
+      "/demo/HoneyHub": {
+        path: "/demo/HoneyHub",
+        parent: "/demo",
+        entries: [{ name: "a.ts", kind: "file", size: 10 }],
+        truncated: false
+      },
+      "/demo/HoneyDrunk.AI": {
+        path: "/demo/HoneyDrunk.AI",
+        parent: "/demo",
+        entries: [{ name: "b.ts", kind: "file", size: 10 }],
+        truncated: false
+      }
+    };
+    const listing = tree[path] ?? { path, parent: "", entries: [], truncated: false };
+    this.emitDevice({ kind: "dir_listing", listing });
+    return Promise.resolve();
+  }
 }
 
 describe("RepositoriesView", () => {
@@ -757,5 +816,89 @@ describe("RepositoriesView", () => {
     // Switch to a folder the scripted mock has no listing for → empty folder.
     fireEvent.change(screen.getByLabelText("Workspace folder"), { target: { value: "/other" } });
     await waitFor(() => expect(screen.getByText("Empty folder.")).toBeTruthy());
+  });
+
+  describe("repoForFile", () => {
+    const repos: GitStatus[] = [
+      { root: "/w/HoneyHub", ahead: 0, behind: 0, files: [], clean: true },
+      { root: "/w/HoneyHub/nested", ahead: 0, behind: 0, files: [], clean: true },
+      { root: "/w/Other", ahead: 0, behind: 0, files: [], clean: true }
+    ];
+
+    it("picks the longest matching root so a nested repo wins over its parent", () => {
+      expect(repoForFile(repos, "/w/HoneyHub/nested/deep/file.ts")).toBe("/w/HoneyHub/nested");
+      expect(repoForFile(repos, "/w/HoneyHub/src/file.ts")).toBe("/w/HoneyHub");
+      expect(repoForFile(repos, "/w/Other/x.ts")).toBe("/w/Other");
+    });
+
+    it("returns undefined when no repo contains the file", () => {
+      expect(repoForFile(repos, "/elsewhere/x.ts")).toBeUndefined();
+      // Boundary-aware: a sibling that merely shares a name prefix is not a container.
+      expect(repoForFile(repos, "/w/HoneyHubLegacy/x.ts")).toBeUndefined();
+    });
+  });
+
+  it("badges the Source control icon with the active repo's change count", async () => {
+    renderRepos();
+    // The default active repo (HoneyHub) has 2 changed files → a count badge inside the SC button.
+    const scButton = screen.getByRole("button", { name: /^Source control/ });
+    await waitFor(() => expect(within(scButton).getByText("2")).toBeTruthy());
+    // The count also rides the accessible name for assistive tech.
+    expect(screen.getByRole("button", { name: "Source control (2 changes)" })).toBeTruthy();
+  });
+
+  it("follows the opened file's repo: opening a file in another repo switches Source Control", async () => {
+    renderRepos(new TwoRepoClient());
+
+    // Both repos are dirty; the first (HoneyHub) is the default active repo.
+    showPanel("Source control");
+    await waitFor(() =>
+      expect((screen.getByLabelText("Repository") as HTMLSelectElement).value).toBe("/demo/HoneyHub")
+    );
+
+    // Open b.ts, which lives under HoneyDrunk.AI, from the explorer.
+    showPanel("Explorer");
+    fireEvent.click(await screen.findByRole("button", { name: "HoneyDrunk.AI" }));
+    fireEvent.click(await screen.findByRole("button", { name: "b.ts" }));
+    await screen.findByLabelText("Edit b.ts");
+
+    // Source Control now follows the focused file to the HoneyDrunk.AI repo.
+    showPanel("Source control");
+    await waitFor(() =>
+      expect((screen.getByLabelText("Repository") as HTMLSelectElement).value).toBe(
+        "/demo/HoneyDrunk.AI"
+      )
+    );
+  });
+
+  it("saves every dirty open tab through Save all", async () => {
+    const client = new CapturingClient();
+    renderRepos(client);
+
+    // Open README (unedited) → Save all is present but disabled.
+    fireEvent.click(await screen.findByRole("button", { name: "HoneyHub" }));
+    fireEvent.click(await screen.findByRole("button", { name: "README.md" }));
+    await screen.findByLabelText("Edit README.md");
+    expect(screen.getByRole("button", { name: "Save all" }).hasAttribute("disabled")).toBe(true);
+
+    // Open main.ts, edit it, then switch back to README and edit that too → two dirty tabs.
+    fireEvent.click(await screen.findByRole("button", { name: "src" }));
+    fireEvent.click(await screen.findByRole("button", { name: "main.ts" }));
+    const main = (await screen.findByLabelText("Edit main.ts")) as HTMLTextAreaElement;
+    fireEvent.change(main, { target: { value: "// edited main" } });
+
+    fireEvent.click(screen.getByRole("tab", { name: "README.md" }));
+    const readme = (await screen.findByLabelText("Edit README.md")) as HTMLTextAreaElement;
+    fireEvent.change(readme, { target: { value: "edited readme" } });
+
+    await waitFor(() => expect(screen.getByText(/2 unsaved/)).toBeTruthy());
+    const saveAll = screen.getByRole("button", { name: "Save all" });
+    expect(saveAll.hasAttribute("disabled")).toBe(false);
+    fireEvent.click(saveAll);
+
+    // Both dirty tabs are written through the same writeFile path.
+    await waitFor(() => expect(client.writeFileCalls).toHaveLength(2));
+    const written = client.writeFileCalls.map((call) => call.path).sort();
+    expect(written).toEqual(["/demo/HoneyHub/README.md", "/demo/HoneyHub/src/main.ts"]);
   });
 });

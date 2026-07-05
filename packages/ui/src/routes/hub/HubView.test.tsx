@@ -64,4 +64,40 @@ describe("HubView", () => {
     fireEvent.click(workButton as HTMLElement);
     expect(navad).toContain("work");
   });
+
+  it("lists repos with uncommitted changes and opens one in Repositories on click", async () => {
+    // No connectors enabled — the changes list is independent of the connector cards.
+    stubStorage("{}");
+    const client = new MockWireClient();
+    const nav: Array<{ view: string; repo?: string | undefined }> = [];
+    render(
+      <HubView
+        client={client}
+        active
+        workspaceRoots={["/demo"]}
+        defaultWorkspaceRoot="/demo"
+        onNavigate={(view, repo) => nav.push({ view, repo })}
+      />
+    );
+
+    // The scripted overview has one dirty repo (HoneyHub, 2 changes) and one clean (HoneyDrunk.AI).
+    expect(await screen.findByText("Changes in progress")).toBeTruthy();
+    const row = (await screen.findByText("HoneyHub")).closest("button") as HTMLElement;
+    expect(within(row).getByText(/2 changes/)).toBeTruthy();
+    // The clean repo is filtered out of the list.
+    expect(screen.queryByText("HoneyDrunk.AI")).toBeNull();
+
+    // Clicking the row navigates to Repositories with that repo as the target.
+    fireEvent.click(row);
+    expect(nav).toContainEqual({ view: "repositories", repo: "/demo/HoneyHub" });
+  });
+
+  it("shows no changes list when there are no workspace roots", async () => {
+    stubStorage("{}");
+    const client = new MockWireClient();
+    render(<HubView client={client} active onNavigate={() => undefined} />);
+    // With no roots the git overview is never requested, so the section stays absent.
+    await screen.findByText(/No connectors enabled yet/i);
+    expect(screen.queryByText("Changes in progress")).toBeNull();
+  });
 });

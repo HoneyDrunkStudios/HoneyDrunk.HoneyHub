@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { ReactElement } from "react";
+import type { GitStatus } from "@honeydrunk/honeyhub-types";
 import type { WireClient } from "../../wire/client";
 import {
   enabledIds,
@@ -7,13 +8,23 @@ import {
   loadConnectorConfig,
   loadConnectorPrefs
 } from "../../connectors";
+import { basename } from "../../paths";
+import { resolveDefaultWorkspaceRoot } from "../../settingsModel";
 import { attentionTone, formatRelative, type CardTone } from "./hubModel";
+
+/** Where a Hub card / row can jump. Repositories additionally carries a repo target so a
+    changes-in-progress row can open that specific repo. */
+export type HubNavTarget = "work" | "observe" | "repositories";
 
 export interface HubViewProps {
   client: WireClient;
   active: boolean;
-  /** Jump to another tab when a card is clicked. */
-  onNavigate: (view: "work" | "observe") => void;
+  /** Allowlisted workspace roots — the folder whose git overview feeds the changes list. */
+  workspaceRoots?: string[];
+  /** The user's default workspace, preferred as the git-overview folder. */
+  defaultWorkspaceRoot?: string;
+  /** Jump to another tab when a card/row is clicked. A repo root opens that repo in Repositories. */
+  onNavigate: (view: HubNavTarget, repoTarget?: string) => void;
 }
 
 interface SourceState {
@@ -31,13 +42,25 @@ const EMPTY: SourceState = { value: 0, tone: "muted" };
  * a card grid with a per-source "updated" stamp and a Refresh-all. Each card jumps to its
  * detail tab. Nothing is queried for connectors you haven't enabled.
  */
-export function HubView({ client, active, onNavigate }: Readonly<HubViewProps>): ReactElement {
+export function HubView({
+  client,
+  active,
+  workspaceRoots,
+  defaultWorkspaceRoot,
+  onNavigate
+}: Readonly<HubViewProps>): ReactElement {
   const [work, setWork] = useState<SourceState>(EMPTY);
   const [serviceBus, setServiceBus] = useState<SourceState>(EMPTY);
   const [grafana, setGrafana] = useState<SourceState>(EMPTY);
   const [sentry, setSentry] = useState<SourceState>(EMPTY);
   const [now, setNow] = useState<number>(() => Date.now());
+  // Repos with uncommitted changes, from the workspace's git overview — the "Changes in progress"
+  // list. Clicking one opens that repo in Repositories.
+  const [dirtyRepos, setDirtyRepos] = useState<GitStatus[]>([]);
 
+  // The folder the git overview is scoped to (the resolved default workspace root). Held in a ref
+  // so Refresh-all and the event filter read it without re-subscribing.
+  const gitRoot = useRef<string>("");
   // Hold the enabled sets so Refresh-all can re-fire without re-reading storage.
   const enabled = useRef<{ work: string[]; observe: string[] }>({ work: [], observe: [] });
   const grafanaCfg = useRef<{ baseUrl: string; token: string }>({ baseUrl: "", token: "" });
@@ -62,6 +85,9 @@ export function HubView({ client, active, onNavigate }: Readonly<HubViewProps>):
     }
     if (enabled.current.observe.includes("sentry")) {
       void client.sentrySummary(sentryCfg.current).catch(() => undefined);
+    }
+    if (gitRoot.current !== "") {
+      void client.gitOverview(gitRoot.current).catch(() => undefined);
     }
   }, [client]);
 
@@ -94,6 +120,12 @@ export function HubView({ client, active, onNavigate }: Readonly<HubViewProps>):
         } else {
           setSentry({ value: 0, tone: "muted", updatedAt: stamp, error: payload.summary.error ?? "unavailable" });
         }
+      } else if (payload.kind === "git_overview") {
+        // The event bus is device-wide (Repositories requests overviews too), so only fold in the
+        // overview for the folder this Hub asked about, then keep just the repos with changes.
+        if (payload.overview.root === gitRoot.current) {
+          setDirtyRepos(payload.overview.repos.filter((repo) => !repo.clean));
+        }
       }
     });
     return unsubscribe;
@@ -116,10 +148,11 @@ export function HubView({ client, active, onNavigate }: Readonly<HubViewProps>):
         project: s.project ?? "",
         token: s.token ?? ""
       };
+      gitRoot.current = resolveDefaultWorkspaceRoot(workspaceRoots ?? [], defaultWorkspaceRoot);
       setNow(Date.now());
       refreshAll();
     }
-  }, [active, refreshAll]);
+  }, [active, refreshAll, workspaceRoots, defaultWorkspaceRoot]);
 
   // Keep the relative "updated" stamps fresh while the tab is open.
   useEffect(() => {
@@ -174,6 +207,29 @@ export function HubView({ client, active, onNavigate }: Readonly<HubViewProps>):
           ))}
         </div>
       )}
+
+      {dirtyRepos.length > 0 && (
+        <div className="hub-changes" aria-label="Changes in progress">
+          <h3 className="hub-changes-title">Changes in progress</h3>
+          <ul className="hub-changes-list">
+            {dirtyRepos.map((repo) => (
+              <li key={repo.root}>
+                <button
+                  type="button"
+                  className="hub-change-row"
+                  onClick={() => onNavigate("repositories", repo.root)}
+                >
+                  <span className="hub-change-name">{basename(repo.root)}</span>
+                  <span className="hub-change-branch">{repo.branch ?? "(detached)"}</span>
+                  <span className="hub-change-count">
+                    {repo.files.length} {repo.files.length === 1 ? "change" : "changes"}
+                  </span>
+                </button>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
     </section>
   );
 }
@@ -182,7 +238,7 @@ interface HubCard {
   id: string;
   label: string;
   hint: string;
-  view: "work" | "observe";
+  view: HubNavTarget;
   state: SourceState;
 }
 

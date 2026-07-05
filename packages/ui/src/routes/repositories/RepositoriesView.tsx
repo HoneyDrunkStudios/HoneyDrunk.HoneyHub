@@ -76,6 +76,13 @@ export interface RepositoriesViewProps {
   workspaceRoots: string[];
   /** The user's default workspace, pre-selected here. */
   defaultWorkspaceRoot?: string;
+  /** A repo to open on entry (e.g. the Hub's "Changes in progress" list hands one over): switches
+      the folder to its owning workspace root and focuses Source Control on it. One-shot — the
+      parent clears it via {@link onSelectedRepoConsumed} once honored, so a later manual repo pick
+      is not overridden on every render. */
+  selectedRepo?: string;
+  /** Called once {@link selectedRepo} has been honored, so the parent can drop the target. */
+  onSelectedRepoConsumed?: () => void;
 }
 
 interface PendingConfirm {
@@ -125,6 +132,35 @@ function nextActiveRepo(repos: GitStatus[], activeRepo: string | undefined): str
   }
   const fallback = repos.find((candidate) => !candidate.clean) ?? repos[0];
   return fallback?.root ?? activeRepo;
+}
+
+/** The repo among `repos` that owns `filePath`: the one whose `.root` contains the file, picking
+    the LONGEST matching root so a nested repo wins over its parent. `undefined` when none contain
+    it. Used to keep Source Control following whichever file the editor is focused on. Exported for
+    unit tests of the longest-prefix rule. */
+export function repoForFile(repos: GitStatus[], filePath: string): string | undefined {
+  let owner: string | undefined;
+  for (const candidate of repos) {
+    const contains = isWithin(filePath, candidate.root);
+    if (contains && (owner === undefined || candidate.root.length > owner.length)) {
+      owner = candidate.root;
+    }
+  }
+  return owner;
+}
+
+/** The workspace root among `roots` that contains `repoRoot`, longest-prefix so the most specific
+    root wins. `undefined` when none contain it. Lets a repo target pick the folder whose overview
+    lists it. */
+function owningWorkspaceRoot(roots: string[], repoRoot: string): string | undefined {
+  let owner: string | undefined;
+  for (const root of roots) {
+    const contains = isWithin(repoRoot, root);
+    if (contains && (owner === undefined || root.length > owner.length)) {
+      owner = root;
+    }
+  }
+  return owner;
 }
 
 /** Toggle a directory's expanded state, lazily loading its listing the first time it opens. */
@@ -703,12 +739,16 @@ type LeftPanel = "explorer" | "sourceControl";
 
 interface ActivityRailProps {
   active: LeftPanel;
+  /** Changed files in the active repo — surfaced as a small badge on the Source control icon
+      (0 = no badge). */
+  changeCount: number;
   onSelect: (panel: LeftPanel) => void;
 }
 
 /** The far-left activity rail (VS Code model): switches the sidebar between the file explorer and
-    the source-control panel. Only the active icon is highlighted; the panels themselves swap. */
-function ActivityRail({ active, onSelect }: Readonly<ActivityRailProps>): ReactElement {
+    the source-control panel. Only the active icon is highlighted; the panels themselves swap. The
+    Source control icon carries a change-count badge when the active repo has uncommitted files. */
+function ActivityRail({ active, changeCount, onSelect }: Readonly<ActivityRailProps>): ReactElement {
   return (
     <nav className="repos-rail" aria-label="Views">
       <button
@@ -724,12 +764,17 @@ function ActivityRail({ active, onSelect }: Readonly<ActivityRailProps>): ReactE
       <button
         type="button"
         className={`repos-rail-btn${active === "sourceControl" ? " is-active" : ""}`}
-        aria-label="Source control"
+        aria-label={changeCount > 0 ? `Source control (${changeCount} changes)` : "Source control"}
         aria-pressed={active === "sourceControl"}
         title="Source control"
         onClick={() => onSelect("sourceControl")}
       >
         <BranchIcon />
+        {changeCount > 0 && (
+          <span className="repos-rail-badge" aria-hidden="true">
+            {changeCount}
+          </span>
+        )}
       </button>
     </nav>
   );
@@ -748,7 +793,9 @@ export function RepositoriesView({
   client,
   active,
   workspaceRoots,
-  defaultWorkspaceRoot
+  defaultWorkspaceRoot,
+  selectedRepo,
+  onSelectedRepoConsumed
 }: Readonly<RepositoriesViewProps>): ReactElement {
   const [folder, setFolder] = useState<string>(() =>
     resolveDefaultWorkspaceRoot(workspaceRoots, defaultWorkspaceRoot)
@@ -789,12 +836,19 @@ export function RepositoriesView({
 
   const activeFile = openFiles.find((tab) => tab.path === activeFilePath);
   const activeDirty = activeFile !== undefined && isDirtyTab(activeFile);
+  // Every open tab with unsaved edits (drives the "N unsaved" indicator + the Save-all gate).
+  const dirtyTabs = openFiles.filter(isDirtyTab);
+  const dirtyCount = dirtyTabs.length;
 
   // Refs so the [client]-only subscription reads the latest without re-subscribing.
   const folderRef = useRef(folder);
   folderRef.current = folder;
   const activeRef = useRef(active);
   activeRef.current = active;
+  // Latest overview, read synchronously by the follow-file effect so it can derive the owning repo
+  // without re-subscribing when the overview refreshes (which would fight a manual repo pick).
+  const overviewRef = useRef(overview);
+  overviewRef.current = overview;
   const pendingDiff = useRef<{ root: string; path?: string } | undefined>(undefined);
   // Paths with a save in flight, tracked synchronously so `file_written` events (which can arrive
   // before React re-renders) correlate to the tab that asked for the write.
@@ -949,9 +1003,12 @@ export function RepositoriesView({
   const setActiveDraft = (value: string): void => {
     patchOpenFile(setOpenFiles, activeFilePathRef.current ?? "", { draft: value });
   };
-  const saveDraft = (): void => {
-    const tab = openFilesRef.current.find((candidate) => candidate.path === activeFilePathRef.current);
-    if (tab === undefined || tab.file === undefined || tab.file.truncated) {
+  // Write one open tab through the bridge's write_file boundary (shared by single Save + Save all).
+  // A tab with no on-disk contents yet, or a truncated (read-only) file, is skipped. The write path
+  // marks the tab saving, and the `file_written` event (or a rejection) clears it and re-seeds the
+  // draft so the dirty dot lifts.
+  const writeTab = (tab: OpenFile): void => {
+    if (tab.file === undefined || tab.file.truncated) {
       return;
     }
     savingPaths.current.add(tab.path);
@@ -966,6 +1023,20 @@ export function RepositoriesView({
       }
     });
   };
+  const saveDraft = (): void => {
+    const tab = openFilesRef.current.find((candidate) => candidate.path === activeFilePathRef.current);
+    if (tab !== undefined) {
+      writeTab(tab);
+    }
+  };
+  // Save every dirty open tab through the same write path as the single-file Save.
+  const saveAll = (): void => {
+    for (const tab of openFilesRef.current) {
+      if (isDirtyTab(tab)) {
+        writeTab(tab);
+      }
+    }
+  };
   const revertDraft = (): void => {
     const tab = openFilesRef.current.find((candidate) => candidate.path === activeFilePathRef.current);
     if (tab?.file !== undefined) {
@@ -975,6 +1046,21 @@ export function RepositoriesView({
   const runWrite = (op: () => Promise<void>, confirmMessage?: string) =>
     runGitWrite(setBusy, setFeedback, setConfirm, op, confirmMessage);
 
+  // Switch the whole surface to a new workspace folder, resetting the tree, open tabs, and git
+  // state (shared by the folder picker and an incoming repo target).
+  const switchFolder = (next: string): void => {
+    setFolder(next);
+    setExpandedDirs(new Set());
+    setListings({});
+    setOverview(undefined);
+    setActiveRepo(undefined);
+    setOpenFiles([]);
+    setActiveFilePath(undefined);
+    savingPaths.current.clear();
+    setViewerMode("file");
+    setDiff(undefined);
+  };
+
   const repo = overview?.repos.find((candidate) => candidate.root === activeRepo);
   const repoActions = buildRepoActions(repo, client, runWrite, openDiff, openFile, commitMessage);
 
@@ -982,6 +1068,40 @@ export function RepositoriesView({
   useEffect(() => {
     setSelected(new Set());
   }, [activeRepo]);
+
+  // Follow the focused file: when the active tab's file belongs to a different repo than the one
+  // Source Control shows, point Source Control at that repo (longest-prefix match, so a nested repo
+  // wins). Keyed on `activeFilePath` alone — reading the overview through a ref — so it fires only
+  // on a file open/switch and never re-overrides a manual repo pick when the overview refreshes.
+  useEffect(() => {
+    if (activeFilePath === undefined) {
+      return;
+    }
+    const owner = repoForFile(overviewRef.current?.repos ?? [], activeFilePath);
+    if (owner !== undefined) {
+      setActiveRepo((prev) => (owner === prev ? prev : owner));
+    }
+  }, [activeFilePath]);
+
+  // Honor a repo handed in from elsewhere (e.g. the Hub's changes list): move to its owning
+  // workspace folder if that differs, focus Source Control on the repo, and tell the parent it was
+  // consumed so the one-shot target clears (a later manual repo pick then stands). Keyed on
+  // `selectedRepo` so re-selecting the same repo (target: undefined → root) re-fires.
+  useEffect(() => {
+    if (selectedRepo === undefined) {
+      return;
+    }
+    const owningRoot = owningWorkspaceRoot(workspaceRoots, selectedRepo);
+    if (owningRoot !== undefined && owningRoot !== folderRef.current) {
+      switchFolder(owningRoot);
+    }
+    setActiveRepo(selectedRepo);
+    setLeftPanel("sourceControl");
+    onSelectedRepoConsumed?.();
+    // switchFolder/onSelectedRepoConsumed are stable enough for this one-shot; deps intentionally
+    // track only the incoming target.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedRepo]);
 
   const toggleSelected = (path: string) => togglePathInSet(setSelected, path);
 
@@ -1008,18 +1128,7 @@ export function RepositoriesView({
           <select
             aria-label="Workspace folder"
             value={folder}
-            onChange={(event) => {
-              setFolder(event.target.value);
-              setExpandedDirs(new Set());
-              setListings({});
-              setOverview(undefined);
-              setActiveRepo(undefined);
-              setOpenFiles([]);
-              setActiveFilePath(undefined);
-              savingPaths.current.clear();
-              setViewerMode("file");
-              setDiff(undefined);
-            }}
+            onChange={(event) => switchFolder(event.target.value)}
           >
             {workspaceRoots.map((option) => (
               <option key={option} value={option}>
@@ -1041,7 +1150,7 @@ export function RepositoriesView({
       </header>
 
       <div className="repos-body">
-        <ActivityRail active={leftPanel} onSelect={setLeftPanel} />
+        <ActivityRail active={leftPanel} changeCount={repo?.files.length ?? 0} onSelect={setLeftPanel} />
 
         {leftPanel === "explorer" ? (
           <aside className="repos-sidebar" aria-label="Explorer">
@@ -1088,12 +1197,31 @@ export function RepositoriesView({
         )}
 
         <div className="repos-viewer">
-          <EditorTabs
-            tabs={openFiles.map((tab) => ({ path: tab.path, dirty: isDirtyTab(tab) }))}
-            activePath={viewerMode === "file" ? activeFilePath : undefined}
-            onActivate={activateTab}
-            onClose={closeTab}
-          />
+          {openFiles.length > 0 && (
+            <div className="repos-editor-tabbar">
+              <EditorTabs
+                tabs={openFiles.map((tab) => ({ path: tab.path, dirty: isDirtyTab(tab) }))}
+                activePath={viewerMode === "file" ? activeFilePath : undefined}
+                onActivate={activateTab}
+                onClose={closeTab}
+              />
+              <div className="repos-editor-actions">
+                {dirtyCount > 0 && (
+                  <span className="repos-unsaved" aria-live="polite">
+                    • {dirtyCount} unsaved
+                  </span>
+                )}
+                <button
+                  type="button"
+                  className="git-link repos-save-all"
+                  onClick={saveAll}
+                  disabled={dirtyCount === 0}
+                >
+                  Save all
+                </button>
+              </div>
+            </div>
+          )}
           {viewerMode === "diff" ? (
             <DiffPane diff={diff} fileVersions={fileVersions} />
           ) : (
