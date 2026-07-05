@@ -1182,6 +1182,13 @@ fn validate_stream_payload(
                 "a backend stream must not emit device-wide search results",
             ));
         }
+        BridgeEventPayload::ContentSearchResults { .. } => {
+            // Device-wide, host-synthesized content-search result — never streamed.
+            return Err(BridgeError::new(
+                "event_unexpected_content_search_results",
+                "a backend stream must not emit device-wide content search results",
+            ));
+        }
         BridgeEventPayload::WorkspaceFolders { .. } => {
             // Device-wide, host-synthesized workspace-file resolution — never streamed.
             return Err(BridgeError::new(

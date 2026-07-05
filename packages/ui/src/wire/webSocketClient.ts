@@ -263,6 +263,21 @@ export class WebSocketWireClient implements WireClient {
     await this.dispatch({ kind: "search_files", root, query });
   }
 
+  async searchContent(
+    root: string,
+    query: string,
+    options?: { caseSensitive?: boolean; wholeWord?: boolean; isRegex?: boolean }
+  ): Promise<void> {
+    await this.dispatch({
+      kind: "search_content",
+      root,
+      query,
+      caseSensitive: options?.caseSensitive ?? false,
+      wholeWord: options?.wholeWord ?? false,
+      isRegex: options?.isRegex ?? false
+    });
+  }
+
   async resolveWorkspaceFile(path: string): Promise<void> {
     await this.dispatch({ kind: "resolve_workspace_file", path });
   }

@@ -369,6 +369,37 @@ export interface SearchResults {
   truncated: boolean;
 }
 
+/** Which engine produced a content-search result set (ripgrep vs the Rust fallback), surfaced
+    so the UI can be honest about capability — e.g. regex is ripgrep-only. */
+export type ContentSearchEngine = "ripgrep" | "fallback";
+
+/** One content-search match: a file, a 1-based line, an optional 1-based column of the match
+    start, and the matched line's text. One row per matching line (matching ripgrep's default). */
+export interface ContentMatch {
+  path: string;
+  /** 1-based line number. */
+  line: number;
+  /** 1-based column of the match start (character offset), when known. */
+  column?: number;
+  lineText: string;
+}
+
+/** Repo-wide content search results (VS Code's "Find in Files"): the flat match list (the UI
+    groups by `path`), the distinct-file count, whether a cap truncated the walk, and the engine. */
+export interface ContentSearchResults {
+  root: string;
+  query: string;
+  caseSensitive: boolean;
+  wholeWord: boolean;
+  isRegex: boolean;
+  matches: ContentMatch[];
+  /** The number of distinct files in `matches`. */
+  fileCount: number;
+  /** True when the match/file cap was hit before the walk finished (some matches were dropped). */
+  truncated: boolean;
+  engine: ContentSearchEngine;
+}
+
 /** The repo folders a `.code-workspace` file references, resolved to absolute dirs. */
 export interface WorkspaceFolders {
   workspaceFile: string;
@@ -959,6 +990,14 @@ export type ClientCommand =
   | { kind: "read_file"; path: string }
   | { kind: "write_file"; path: string; content: string }
   | { kind: "search_files"; root: string; query: string }
+  | {
+      kind: "search_content";
+      root: string;
+      query: string;
+      caseSensitive?: boolean;
+      wholeWord?: boolean;
+      isRegex?: boolean;
+    }
   | { kind: "resolve_workspace_file"; path: string }
   | {
       kind: "write_agent";
@@ -1103,6 +1142,7 @@ export type BridgeEventPayload =
   | { kind: "file_contents"; file: FileContents }
   | { kind: "file_written"; result: FileWriteResult }
   | { kind: "search_results"; results: SearchResults }
+  | { kind: "content_search_results"; results: ContentSearchResults }
   | { kind: "workspace_folders"; folders: WorkspaceFolders }
   | { kind: "agent_written"; agent: AgentWriteOutcome }
   | { kind: "job_snapshot"; snapshot: JobSnapshot }

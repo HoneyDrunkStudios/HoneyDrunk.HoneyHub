@@ -483,6 +483,36 @@ async fn handle_command(
                         ))
                     })
             }
+            ClientCommand::SearchContent {
+                root,
+                query,
+                case_sensitive,
+                whole_word,
+                is_regex,
+            } => {
+                // Content search (Find in Files) is gated to an allowlisted root exactly like the
+                // filename search — it greps the files under that scope. `workspace_allows`
+                // canonicalizes, so a `..`/symlink escape resolves out of the root and is denied.
+                require(runtime.workspace_allows(&root), "search root")
+                    .and_then(|()| {
+                        honeyhub_bridge::search_content(
+                            &root,
+                            &query,
+                            honeyhub_bridge::ContentSearchOptions {
+                                case_sensitive,
+                                whole_word,
+                                is_regex,
+                            },
+                        )
+                    })
+                    .map(|results| {
+                        one(BridgeEvent::content_search_results(
+                            new_id(),
+                            now_rfc3339(),
+                            results,
+                        ))
+                    })
+            }
             ClientCommand::WriteAgent {
                 name,
                 description,

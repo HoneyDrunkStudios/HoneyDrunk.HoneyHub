@@ -58,6 +58,15 @@ export interface WireClient {
   /** Recursively search a root for files whose name contains `query`. The answer
       arrives as a `search_results` event via `subscribe` (correlate by root+query). */
   searchFiles(root: string, query: string): Promise<void>;
+  /** Repo-wide **content** search (VS Code's "Find in Files"): grep the files under `root` for
+      `query`. Optional `caseSensitive`/`wholeWord`/`isRegex` flags (all default off; regex is
+      ripgrep-only). The answer arrives as a `content_search_results` event via `subscribe`
+      (correlate by root+query). */
+  searchContent(
+    root: string,
+    query: string,
+    options?: { caseSensitive?: boolean; wholeWord?: boolean; isRegex?: boolean }
+  ): Promise<void>;
   /** Resolve a `.code-workspace` file to the repo folders it references. The answer
       arrives as a `workspace_folders` event via `subscribe`. */
   resolveWorkspaceFile(path: string): Promise<void>;

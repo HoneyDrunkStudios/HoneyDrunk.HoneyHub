@@ -1,4 +1,4 @@
-import { useCallback, useRef } from "react";
+import { useCallback, useEffect, useRef } from "react";
 import type { ReactElement } from "react";
 import Editor, { loader } from "@monaco-editor/react";
 import type { BeforeMount, Monaco, OnChange, OnMount } from "@monaco-editor/react";
@@ -107,6 +107,15 @@ const EXTENSION_LANGUAGE: Record<string, string> = {
   cmd: "bat",
   dockerfile: "dockerfile"
 };
+
+/** Scroll a 1-based line into the centre, place the cursor at its start, and focus the editor —
+    the "jump to a search match" gesture. Clamped to line 1 so a stale/0 line never throws. */
+function revealEditorLine(editor: monaco.editor.IStandaloneCodeEditor, line: number): void {
+  const target = Math.max(1, Math.floor(line));
+  editor.revealLineInCenter(target);
+  editor.setPosition({ lineNumber: target, column: 1 });
+  editor.focus();
+}
 
 /** The file extension (lowercased, no dot), or the full name for extension-less files. */
 function extensionOf(path: string): string {
@@ -335,6 +344,11 @@ export interface CodeEditorProps {
   onSave: () => void;
   /** When true, the editor is view-only (e.g. a truncated file). */
   readOnly?: boolean;
+  /** A 1-based line to reveal + place the cursor on (e.g. a search match the user clicked).
+      Re-revealed whenever {@link revealNonce} changes, so clicking the same line again re-scrolls. */
+  revealLine?: number | undefined;
+  /** Bumps to force a re-reveal of {@link revealLine} even when the line number is unchanged. */
+  revealNonce?: number | undefined;
 }
 
 // The app's monospace stack, spelled out (not `var(--font-mono)`) so Monaco's canvas-based glyph
@@ -353,19 +367,39 @@ export default function CodeEditor({
   value,
   onChange,
   onSave,
-  readOnly = false
+  readOnly = false,
+  revealLine,
+  revealNonce
 }: Readonly<CodeEditorProps>): ReactElement {
   // Keep the latest onSave reachable from the editor command without re-registering it.
   const onSaveRef = useRef(onSave);
   onSaveRef.current = onSave;
 
+  // The live editor instance, so a search-match click can scroll to + select a line.
+  const editorRef = useRef<monaco.editor.IStandaloneCodeEditor | null>(null);
+  // The latest reveal target, read on mount so a line requested before Monaco finished loading
+  // still gets revealed once the editor is ready.
+  const revealRef = useRef(revealLine);
+  revealRef.current = revealLine;
+
   const handleMount = useCallback<OnMount>((editor, m) => {
+    editorRef.current = editor;
     // Save on Ctrl/Cmd+S from inside the editor; Monaco swallows the keystroke so the browser
     // never gets its "save page" dialog. Undo/redo (Ctrl/Cmd+Z, Ctrl/Cmd+Shift+Z) and the find/
     // replace widgets (Ctrl/Cmd+F, Ctrl/Cmd+H) are Monaco-native and left enabled — nothing here
     // disables the model's edit history or the find controller.
     editor.addCommand(m.KeyMod.CtrlCmd | m.KeyCode.KeyS, () => onSaveRef.current());
+    if (revealRef.current !== undefined) {
+      revealEditorLine(editor, revealRef.current);
+    }
   }, []);
+
+  // Reveal + select the requested line whenever it (or the nonce) changes, once the editor is up.
+  useEffect(() => {
+    if (revealLine !== undefined && editorRef.current !== null) {
+      revealEditorLine(editorRef.current, revealLine);
+    }
+  }, [revealLine, revealNonce]);
 
   const handleChange = useCallback<OnChange>(
     (next) => {
