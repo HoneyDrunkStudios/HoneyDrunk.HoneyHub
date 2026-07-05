@@ -181,8 +181,9 @@ export function RunScreen({
     [availableBackends]
   );
   const [task, setTask] = useState("");
-  // A varied prompt per mount (time-seeded), intentionally not reactive to clicks.
-  const [promptIndex] = useState(() => Date.now() % COMPOSER_PROMPTS.length);
+  // A varied prompt per mount (time-seeded), intentionally not reactive to clicks. It
+  // is re-rolled only when the user deliberately starts a new chat (startNewChat).
+  const [promptIndex, setPromptIndex] = useState(() => Date.now() % COMPOSER_PROMPTS.length);
   const [workspaceRoot, setWorkspaceRoot] = useState(() =>
     resolveDefaultWorkspaceRoot(workspaceRoots, defaultWorkspaceRoot)
   );
@@ -790,6 +791,35 @@ export function RunScreen({
     }
   };
 
+  // Start a fresh, empty thread from anywhere — an active run, a finished run, or a
+  // history view. The current chat is already persisted by the save effect below, so
+  // it stays in the Chats list and can be reopened; here we just null every piece of
+  // per-run state back to the pristine composer so `renderComposer` shows. `latestUsage`
+  // is derived from `usage`, so clearing usage clears it too. The event handler's
+  // `runIdRef` follows `runId` on the next render, so a still-running old run's events
+  // stop landing on this fresh thread once the id clears.
+  const startNewChat = () => {
+    setOpenedChat(undefined);
+    setRunId(undefined);
+    setRunState(undefined);
+    setRunBackend(undefined);
+    setRunStartedAt("");
+    setMessages([]);
+    setStreaming("");
+    setArtifacts([]);
+    setActivities([]);
+    setUsage([]);
+    setTask("");
+    setReply("");
+    setError(undefined);
+    setAttachments([]);
+    setAttachError(undefined);
+    // Greet the new thread with a different rotating prompt. Cycle to the next one
+    // deterministically (guaranteed different, and no Math.random the Sonar PRNG rule
+    // would flag).
+    setPromptIndex((index) => (index + 1) % COMPOSER_PROMPTS.length);
+  };
+
   // Request a synced session's detail; the subscription reopens it read-only when it
   // arrives. Bound to `client` here so the SyncedHistory list stays a flat presentational
   // component with no nested callbacks.
@@ -1026,13 +1056,18 @@ export function RunScreen({
     <div className="chat-history-view">
           <header className="chat-head">
             <h2 className="chat-title">{chat.task}</h2>
-            <button
-              type="button"
-              className="onboarding-back"
-              onClick={() => setOpenedChat(undefined)}
-            >
-              New chat
-            </button>
+            <div className="chat-head-actions">
+              <button
+                type="button"
+                className="chat-new"
+                aria-label="New chat"
+                title="New chat"
+                onClick={startNewChat}
+              >
+                <IconPlus />
+                <span className="chat-new-label">New chat</span>
+              </button>
+            </div>
           </header>
           <p className="routing-rationale">
             {chat.backend === undefined ? "-" : backendLabel(chat.backend)}
@@ -1311,11 +1346,23 @@ export function RunScreen({
           <div className="chat-main">
             <header className="chat-head">
               <h2 className="chat-title">{task}</h2>
-              {runState !== undefined && (
-                <span className="status-pill" aria-label="Run state">
-                  {runState}
-                </span>
-              )}
+              <div className="chat-head-actions">
+                {runState !== undefined && (
+                  <span className="status-pill" aria-label="Run state">
+                    {runState}
+                  </span>
+                )}
+                <button
+                  type="button"
+                  className="chat-new"
+                  aria-label="New chat"
+                  title="New chat"
+                  onClick={startNewChat}
+                >
+                  <IconPlus />
+                  <span className="chat-new-label">New chat</span>
+                </button>
+              </div>
             </header>
 
             <ol className="transcript" aria-label="Transcript">
@@ -1435,6 +1482,24 @@ export function RunScreen({
       )}
       {body}
     </section>
+  );
+}
+
+function IconPlus(): ReactElement {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      width="16"
+      height="16"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={2.4}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <path d="M12 5v14M5 12h14" />
+    </svg>
   );
 }
 

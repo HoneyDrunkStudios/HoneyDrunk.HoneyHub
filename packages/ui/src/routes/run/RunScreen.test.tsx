@@ -1,5 +1,5 @@
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type {
   AgentBackend,
   BackendCapability,
@@ -42,6 +42,30 @@ const CATALOG: BackendCapability[] = [
     modelSource: "cli_cache"
   }
 ];
+
+/** A minimal in-memory Storage for tests (jsdom here exposes no localStorage), enough
+    for the chat-history store's getItem/setItem round-trip. */
+class MemoryStorage implements Storage {
+  private readonly store = new Map<string, string>();
+  get length(): number {
+    return this.store.size;
+  }
+  clear(): void {
+    this.store.clear();
+  }
+  getItem(key: string): string | null {
+    return this.store.has(key) ? (this.store.get(key) as string) : null;
+  }
+  key(index: number): string | null {
+    return [...this.store.keys()][index] ?? null;
+  }
+  removeItem(key: string): void {
+    this.store.delete(key);
+  }
+  setItem(key: string, value: string): void {
+    this.store.set(key, String(value));
+  }
+}
 
 /** A mock client that records every StartRunRequest it is asked to launch. */
 function recordingClient(): { client: MockWireClient; started: StartRunRequest[] } {
@@ -446,6 +470,41 @@ describe("RunScreen", () => {
     // to a new suggestion — the launched backend is frozen.
     rerender(<RunScreen client={client} availableBackends={["codex.local", "copilot.local"]} />);
     expect(within(diagnostics).getByText(/claude\.local/)).toBeTruthy();
+  });
+
+  it("starts a new chat from an active run and keeps the old thread in the list", async () => {
+    // The save effect persists the live chat through localStorage; jsdom here does not
+    // expose one, so back it with an in-memory store for this test (RecentChats reads it
+    // to list the just-started thread).
+    vi.stubGlobal("localStorage", new MemoryStorage());
+    try {
+      render(<RunScreen client={new MockWireClient()} />);
+      // Launch a run so we are in the live transcript view (not the composer).
+      const task = "Wire the new-chat button";
+      fireEvent.change(screen.getByLabelText("Task"), { target: { value: task } });
+      fireEvent.click(screen.getByRole("button", { name: "Start session" }));
+
+      // We are in the live run: the transcript shows the user's turn and a run-state pill.
+      await waitFor(() =>
+        expect(screen.getByLabelText("Run state").textContent).toBe("needs_input")
+      );
+      const transcript = screen.getByLabelText("Transcript");
+      expect(within(transcript).getByText(task)).toBeTruthy();
+
+      // The always-available header control starts a fresh thread from the active run.
+      fireEvent.click(screen.getByRole("button", { name: "New chat" }));
+
+      // Back at the empty composer: the "Do anything" placeholder shows and the live
+      // transcript is gone.
+      expect(screen.getByPlaceholderText("Do anything")).toBeTruthy();
+      expect(screen.queryByLabelText("Transcript")).toBeNull();
+
+      // The just-started thread was persisted, so it is retrievable from the Chats list.
+      const chats = screen.getByRole("list", { name: "Chats" });
+      expect(within(chats).getByText(task)).toBeTruthy();
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 
   it("stops an active run", async () => {

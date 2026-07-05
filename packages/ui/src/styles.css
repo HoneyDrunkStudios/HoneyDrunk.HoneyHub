@@ -4108,6 +4108,20 @@ h2 {
   text-align: center;
 }
 
+/* Empty-state hero: float the rotating prompt + composer to the vertical center of the
+   pane (a fresh ChatGPT/Claude-style empty state), leaving the "Chats" list to flow
+   beneath. Auto margins above the heading and below the composer soak up the free
+   space, so the pair sits centered with no history and floats in the space above the
+   list when there is some (auto margins take priority over justify-content on the main
+   axis). Scoped to the full pane — the sidebar keeps its own bottom-anchored composer
+   layout defined further below. */
+.chat:not(.chat--sidebar) .chat-start .chat-heading {
+  margin-top: auto;
+}
+.chat:not(.chat--sidebar) .chat-start .composer {
+  margin-bottom: auto;
+}
+
 .composer {
   width: 100%;
   display: grid;
@@ -4824,6 +4838,36 @@ h2 {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* Right-side controls in the chat header (run-state pill + the always-available
+   "New chat" button), kept together against the header's space-between. */
+.chat-head-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 0 0 auto;
+}
+
+/* Start-a-fresh-thread control, present in the active-run and history headers so a new
+   chat is one click away from anywhere. Quiet chrome that matches the header. */
+.chat-new {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-muted);
+  font: inherit;
+  font-size: 0.8rem;
+  cursor: pointer;
+}
+
+.chat-new:hover {
+  color: var(--text);
+  border-color: var(--honey-line);
 }
 
 .chat-main .transcript {
@@ -7100,6 +7144,14 @@ button:focus-visible,
 .chat--sidebar .composer-input {
   min-height: 44px;
   font-size: 0.92rem;
+}
+/* The narrow dock has no room for the "New chat" label; the + icon (plus its
+   aria-label/title) carries it. */
+.chat--sidebar .chat-new {
+  padding: 4px 7px;
+}
+.chat--sidebar .chat-new-label {
+  display: none;
 }
 
 /* Attachment chips (shared by the composer + the follow-up box). */
