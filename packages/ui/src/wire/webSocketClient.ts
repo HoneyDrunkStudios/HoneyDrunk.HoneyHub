@@ -494,6 +494,10 @@ export class WebSocketWireClient implements WireClient {
     );
   }
 
+  async gitFileVersions(root: string, path: string): Promise<void> {
+    await this.dispatch({ kind: "git_file_versions", root, path });
+  }
+
   async gitOverview(root: string): Promise<void> {
     await this.dispatch({ kind: "git_overview", root });
   }

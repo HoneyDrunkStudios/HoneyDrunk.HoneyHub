@@ -183,6 +183,10 @@ export interface WireClient {
   /** Read a repo's read-only diff (allowlist-gated). The answer arrives as a `git_diff`
       event via `subscribe` (correlate by root + path). */
   gitDiff(root: string, path?: string): Promise<void>;
+  /** Read both versions of a single file (its `HEAD` content + working-tree content) for the
+      side-by-side diff view. The answer arrives as a `git_file_versions` event via
+      `subscribe` (correlate by root + path). */
+  gitFileVersions(root: string, path: string): Promise<void>;
   /** Discover the git repos under a folder (or the folder itself when it is a repo) and
       read each one's status. The answer arrives as a `git_overview` event via `subscribe`.
       The multi-repo dashboard. */

@@ -61,10 +61,10 @@ pub use fsbrowse::{
 pub use git::{
     branches as git_branches, checkout as git_checkout, commit as git_commit,
     delete_branch as git_delete_branch, diff as git_diff, discard as git_discard,
-    discard_all as git_discard_all, discover_repos as git_discover_repos, overview as git_overview,
-    pull as git_pull, push as git_push, stage as git_stage, status as git_status,
-    unstage as git_unstage, GitBranches, GitDiff, GitFileStatus, GitOpResult, GitOverview,
-    GitStatus,
+    discard_all as git_discard_all, discover_repos as git_discover_repos,
+    file_versions as git_file_versions, overview as git_overview, pull as git_pull,
+    push as git_push, stage as git_stage, status as git_status, unstage as git_unstage,
+    GitBranches, GitDiff, GitFileStatus, GitFileVersions, GitOpResult, GitOverview, GitStatus,
 };
 pub use grafana::{summary as grafana_summary, GrafanaDashboard, GrafanaSummary};
 pub use jobs::{

@@ -244,8 +244,9 @@ export function configureLanguageDefaults(m: Monaco): void {
   }
 }
 
-/** Run once, right before the first editor mounts: theme + language-service tuning. */
-const configureMonaco: BeforeMount = (m) => {
+/** Run once, right before the first editor mounts: theme + language-service tuning. Exported
+    so the side-by-side `DiffViewer` mounts against the same honeypunk theme + workers. */
+export const configureMonaco: BeforeMount = (m) => {
   defineHoneypunkTheme(m);
   configureLanguageDefaults(m);
 };
@@ -265,7 +266,8 @@ export interface CodeEditorProps {
 
 // The app's monospace stack, spelled out (not `var(--font-mono)`) so Monaco's canvas-based glyph
 // measurement gets a concrete family rather than an unresolved custom property.
-const MONO_FONT = '"JetBrains Mono", "Cascadia Code", ui-monospace, "Courier New", monospace';
+export const MONO_FONT =
+  '"JetBrains Mono", "Cascadia Code", ui-monospace, "Courier New", monospace';
 
 /**
  * A Monaco-backed code editor for the Repositories file pane. Full syntax highlighting via the

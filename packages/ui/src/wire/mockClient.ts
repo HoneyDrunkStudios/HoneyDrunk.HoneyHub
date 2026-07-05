@@ -518,6 +518,19 @@ export class MockWireClient implements WireClient {
     });
   }
 
+  async gitFileVersions(root: string, path: string): Promise<void> {
+    // A scripted before/after for the offline diff demo — a one-line change to App.tsx so
+    // the side-by-side DiffEditor shows a real diff.
+    const original =
+      'const view = "run";\n' + "// unchanged line\n" + "export const app = view;\n";
+    const modified =
+      'const view = "chat";\n' + "// unchanged line\n" + "export const app = view;\n";
+    this.emitDevice({
+      kind: "git_file_versions",
+      result: { root, path, original, modified, existedInHead: true, existedInWork: true }
+    });
+  }
+
   /** A scripted single-repo status (dirty by default) for the offline Git demo. */
   private mockGitStatus(root: string, dirty = true) {
     return {

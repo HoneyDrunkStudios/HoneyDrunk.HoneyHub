@@ -60,6 +60,7 @@ class FakeClient implements WireClient {
   async sentrySummary(): Promise<void> {}
   async gitStatus(): Promise<void> {}
   async gitDiff(): Promise<void> {}
+  async gitFileVersions(): Promise<void> {}
   async gitOverview(): Promise<void> {}
   async gitBranches(): Promise<void> {}
   async gitStage(): Promise<void> {}

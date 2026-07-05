@@ -6,7 +6,7 @@ use crate::backend_catalog::BackendCapability;
 use crate::checks::CheckOutcome;
 use crate::environment::EnvironmentInfo;
 use crate::fsbrowse::{DirListing, FileContents, FileWriteResult, SearchResults, WorkspaceFolders};
-use crate::git::{GitBranches, GitDiff, GitOpResult, GitOverview, GitStatus};
+use crate::git::{GitBranches, GitDiff, GitFileVersions, GitOpResult, GitOverview, GitStatus};
 use crate::grafana::GrafanaSummary;
 use crate::jobs::{JobProbe, JobSnapshot};
 use crate::keyvault::{
@@ -407,6 +407,14 @@ pub enum ClientCommand {
         root: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         path: Option<String>,
+    },
+    /// Read both versions of a single file (its `HEAD` content + working-tree content) for
+    /// the side-by-side diff view. `path` is repo-relative (like [`ClientCommand::GitDiff`]).
+    /// The host gates `root` against the allowlist and answers with
+    /// [`BridgeEventPayload::GitFileVersions`].
+    GitFileVersions {
+        root: String,
+        path: String,
     },
     /// Discover the git repos under a selected folder (or the folder itself when it is a
     /// repo) and read each one's status. The host gates `root` against the allowlist and
@@ -1277,6 +1285,24 @@ impl BridgeEvent {
         }
     }
 
+    /// A device-wide git file-versions event (a single file's `HEAD` + working-tree content
+    /// for the side-by-side diff). Not scoped to a run or session, so `session_id`/`run_id`
+    /// are empty and `sequence` is `0`.
+    pub fn git_file_versions(
+        id: impl Into<String>,
+        created_at: impl Into<String>,
+        result: GitFileVersions,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            session_id: String::new(),
+            run_id: String::new(),
+            sequence: 0,
+            created_at: created_at.into(),
+            payload: BridgeEventPayload::GitFileVersions { result },
+        }
+    }
+
     /// A device-wide group-check result (one declared command run in a repo root). Not scoped
     /// to a run or session, so `session_id`/`run_id` are empty and `sequence` is `0`.
     pub fn check_result(
@@ -1488,6 +1514,9 @@ pub enum BridgeEventPayload {
     GitDiff {
         diff: GitDiff,
     },
+    GitFileVersions {
+        result: GitFileVersions,
+    },
     GitOverview {
         overview: GitOverview,
     },
@@ -1693,6 +1722,56 @@ mod tests {
         assert!(matches!(
             decoded.payload,
             BridgeEventPayload::FileWritten { .. }
+        ));
+    }
+
+    #[test]
+    fn serializes_git_file_versions_command_and_event() {
+        // The command tag is snake_case and its fields camelCase.
+        let command = ClientCommand::GitFileVersions {
+            root: "C:/repo".to_string(),
+            path: "src/app.tsx".to_string(),
+        };
+        assert_eq!(
+            serde_json::to_value(&command).expect("command serializes"),
+            json!({
+                "kind": "git_file_versions",
+                "root": "C:/repo",
+                "path": "src/app.tsx"
+            })
+        );
+        // And the command round-trips back to the same variant.
+        let decoded: ClientCommand =
+            serde_json::from_value(serde_json::to_value(&command).unwrap())
+                .expect("command deserializes");
+        assert!(matches!(decoded, ClientCommand::GitFileVersions { .. }));
+
+        // The event payload tag is snake_case and the result's fields camelCase.
+        let event = BridgeEvent::git_file_versions(
+            "e",
+            "2026-07-05T00:00:00Z",
+            GitFileVersions {
+                root: "C:/repo".to_string(),
+                path: "src/app.tsx".to_string(),
+                original: "old".to_string(),
+                modified: "new".to_string(),
+                existed_in_head: true,
+                existed_in_work: true,
+            },
+        );
+        let value = serde_json::to_value(&event).expect("event serializes");
+        assert_eq!(value["payload"]["kind"], json!("git_file_versions"));
+        assert_eq!(value["payload"]["result"]["path"], json!("src/app.tsx"));
+        assert_eq!(value["payload"]["result"]["original"], json!("old"));
+        assert_eq!(value["payload"]["result"]["modified"], json!("new"));
+        assert_eq!(value["payload"]["result"]["existedInHead"], json!(true));
+        assert_eq!(value["payload"]["result"]["existedInWork"], json!(true));
+
+        // And it round-trips back to the same variant.
+        let decoded: BridgeEvent = serde_json::from_value(value).expect("event deserializes");
+        assert!(matches!(
+            decoded.payload,
+            BridgeEventPayload::GitFileVersions { .. }
         ));
     }
 

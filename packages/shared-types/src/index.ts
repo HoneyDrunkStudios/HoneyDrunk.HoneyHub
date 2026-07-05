@@ -857,6 +857,19 @@ export interface GitDiff {
   truncated: boolean;
 }
 
+/** Both versions of a single file for a side-by-side diff: its content at `HEAD` (the
+    committed baseline) and in the working tree. Powers the Monaco `DiffEditor`, which needs
+    the two full texts rather than a unified patch. `existedInHead` distinguishes a new file
+    (empty original) from an empty one; `existedInWork` distinguishes a deleted file. */
+export interface GitFileVersions {
+  root: string;
+  path: string;
+  original: string;
+  modified: string;
+  existedInHead: boolean;
+  existedInWork: boolean;
+}
+
 /** The status of every repo discovered under a selected folder (or just the one repo when
     the selected root is itself a repo). Powers the multi-repo Git dashboard. */
 export interface GitOverview {
@@ -1015,6 +1028,7 @@ export type ClientCommand =
   | { kind: "sentry_summary"; baseUrl?: string; org: string; project: string; token?: string }
   | { kind: "git_status"; root: string }
   | { kind: "git_diff"; root: string; path?: string }
+  | { kind: "git_file_versions"; root: string; path: string }
   | { kind: "git_overview"; root: string }
   | { kind: "git_branches"; root: string }
   | { kind: "git_stage"; root: string; paths: string[] }
@@ -1105,6 +1119,7 @@ export type BridgeEventPayload =
   | { kind: "sentry_summary"; summary: SentrySummary }
   | { kind: "git_status"; status: GitStatus }
   | { kind: "git_diff"; diff: GitDiff }
+  | { kind: "git_file_versions"; result: GitFileVersions }
   | { kind: "git_overview"; overview: GitOverview }
   | { kind: "git_branches"; branches: GitBranches }
   | { kind: "git_op"; result: GitOpResult }

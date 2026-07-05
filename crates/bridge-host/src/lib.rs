@@ -665,6 +665,17 @@ async fn handle_command(
                     .and_then(|()| honeyhub_bridge::git_diff(&root, path.as_deref()))
                     .map(|diff| one(BridgeEvent::git_diff(new_id(), now_rfc3339(), diff)))
             }
+            ClientCommand::GitFileVersions { root, path } => {
+                require(runtime.workspace_allows(&root), "git root")
+                    .and_then(|()| honeyhub_bridge::git_file_versions(&root, &path))
+                    .map(|result| {
+                        one(BridgeEvent::git_file_versions(
+                            new_id(),
+                            now_rfc3339(),
+                            result,
+                        ))
+                    })
+            }
             ClientCommand::GitOverview { root } => {
                 // Discover repos under the folder + status each (multi-repo dashboard). The
                 // folder is gated, exactly like a single-repo read.

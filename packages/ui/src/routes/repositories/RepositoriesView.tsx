@@ -7,6 +7,7 @@ import type {
   GitBranches,
   GitDiff,
   GitFileStatus,
+  GitFileVersions,
   GitOpResult,
   GitOverview,
   GitStatus
@@ -21,6 +22,9 @@ import { isMarkdownFile, renderMarkdown } from "../browse/fileView";
 // (and the mobile PWA that never touches a file) stays light; a <Suspense> fallback covers the
 // one-time chunk fetch.
 const CodeEditor = lazy(() => import("./CodeEditor"));
+// The Monaco side-by-side diff is likewise lazy — only fetched once a changed file's diff is
+// opened, so the base bundle stays light.
+const DiffViewer = lazy(() => import("./DiffViewer"));
 
 export interface RepositoriesViewProps {
   client: WireClient;
@@ -145,6 +149,7 @@ interface ViewerControls {
   setFileLoading: Dispatch<SetStateAction<boolean>>;
   setFileError: Dispatch<SetStateAction<string | undefined>>;
   setDiff: Dispatch<SetStateAction<GitDiff | undefined>>;
+  setFileVersions: Dispatch<SetStateAction<GitFileVersions | undefined>>;
   setSaving: Dispatch<SetStateAction<boolean>>;
   setSaveError: Dispatch<SetStateAction<string | undefined>>;
   pendingFile: RefObject<string | undefined>;
@@ -170,13 +175,22 @@ function openFileInView(v: ViewerControls, path: string): void {
   });
 }
 
-/** Open a changed file's diff into the centre pane. */
+/** Open a changed file's diff into the centre pane. The unified `git_diff` still supplies the
+    +/- stat header; a per-file diff additionally fetches both file versions (`git_file_versions`)
+    to feed the side-by-side Monaco `DiffEditor`. The repo-level "all changes" case (no path) has
+    no single pair of versions, so it stays on the unified patch. */
 function openDiffInView(v: ViewerControls, repoRoot: string, path?: string): void {
   v.setViewerMode("diff");
   v.setDiff(undefined);
+  v.setFileVersions(undefined);
   v.setFileError(undefined);
   v.pendingDiff.current = path === undefined ? { root: repoRoot } : { root: repoRoot, path };
   void v.client.gitDiff(repoRoot, path).catch(() => v.setFileError("could not read the diff"));
+  if (path !== undefined) {
+    void v.client
+      .gitFileVersions(repoRoot, path)
+      .catch(() => v.setFileError("could not read the diff"));
+  }
 }
 
 /** Save the editor draft through the bridge's write_file boundary (ADR-0097). */
@@ -236,6 +250,7 @@ interface RepoEventContext {
   setOverview: Dispatch<SetStateAction<GitOverview | undefined>>;
   setBranches: Dispatch<SetStateAction<GitBranches | undefined>>;
   setDiff: Dispatch<SetStateAction<GitDiff | undefined>>;
+  setFileVersions: Dispatch<SetStateAction<GitFileVersions | undefined>>;
   setFeedback: Dispatch<SetStateAction<GitOpResult | undefined>>;
   setBusy: Dispatch<SetStateAction<boolean>>;
   setCommitMessage: Dispatch<SetStateAction<string>>;
@@ -261,6 +276,13 @@ function applyGitDiff(diff: GitDiff, ctx: RepoEventContext): void {
   const want = ctx.pendingDiff.current;
   if (diff.root === want?.root && diff.path === want?.path) {
     ctx.setDiff(diff);
+  }
+}
+
+function applyGitFileVersions(result: GitFileVersions, ctx: RepoEventContext): void {
+  const want = ctx.pendingDiff.current;
+  if (result.root === want?.root && result.path === want?.path) {
+    ctx.setFileVersions(result);
   }
 }
 
@@ -327,6 +349,9 @@ function applyRepoEvent(event: BridgeEvent, ctx: RepoEventContext): void {
       break;
     case "git_diff":
       applyGitDiff(payload.diff, ctx);
+      break;
+    case "git_file_versions":
+      applyGitFileVersions(payload.result, ctx);
       break;
     case "git_op":
       applyGitOp(payload.result, ctx);
@@ -749,6 +774,9 @@ export function RepositoriesView({
   const [fileLoading, setFileLoading] = useState(false);
   const [fileError, setFileError] = useState<string | undefined>(undefined);
   const [diff, setDiff] = useState<GitDiff | undefined>(undefined);
+  // The two file versions for the side-by-side Monaco diff (per-file only; the repo-level
+  // "all changes" case has no single pair and stays on the unified patch).
+  const [fileVersions, setFileVersions] = useState<GitFileVersions | undefined>(undefined);
 
   // Editor state. The file always opens directly in the editor; `draft` is the live editor text,
   // seeded from disk and compared against the file to derive the dirty indicator.
@@ -811,6 +839,7 @@ export function RepositoriesView({
       setOverview,
       setBranches,
       setDiff,
+      setFileVersions,
       setFeedback,
       setBusy,
       setCommitMessage,
@@ -879,6 +908,7 @@ export function RepositoriesView({
     setFileLoading,
     setFileError,
     setDiff,
+    setFileVersions,
     setSaving,
     setSaveError,
     pendingFile,
@@ -1009,7 +1039,7 @@ export function RepositoriesView({
 
         <div className="repos-viewer">
           {viewerMode === "diff" ? (
-            <DiffPane diff={diff} />
+            <DiffPane diff={diff} fileVersions={fileVersions} />
           ) : (
             <FilePane
               file={file}
@@ -1531,8 +1561,14 @@ function FilePane({
   );
 }
 
-/** The diff pane: a changed file's unified diff, coloured line by line. */
-function DiffPane({ diff }: Readonly<{ diff: GitDiff | undefined }>): ReactElement {
+/** The diff pane. A per-file diff renders the two file versions in a side-by-side Monaco
+    `DiffEditor` (the `+/-` stat header still comes from the unified `git_diff`). The repo-level
+    "all changes" case — which has no single pair of versions — falls back to the coloured
+    unified patch. */
+function DiffPane({
+  diff,
+  fileVersions
+}: Readonly<{ diff: GitDiff | undefined; fileVersions: GitFileVersions | undefined }>): ReactElement {
   const stat = useMemo(() => (diff === undefined ? undefined : diffStat(diff.patch)), [diff]);
   const diffLines = useMemo(() => (diff === undefined ? [] : toDiffLines(diff.patch)), [diff]);
   const diffKeys = useMemo(() => {
@@ -1545,20 +1581,33 @@ function DiffPane({ diff }: Readonly<{ diff: GitDiff | undefined }>): ReactEleme
     });
   }, [diffLines]);
 
-  if (diff === undefined) {
+  // Nothing to show yet: neither the stat nor the versions have arrived.
+  if (diff === undefined && fileVersions === undefined) {
     return <div className="file-viewer empty">Loading diff…</div>;
   }
+
+  const path = fileVersions?.path ?? diff?.path ?? "All changes";
   return (
     <div className="git-diff">
       <div className="git-diff-head">
-        <span className="git-diff-path">{diff.path ?? "All changes"}</span>
+        <span className="git-diff-path">{path}</span>
         {stat !== undefined && (
           <span className="git-diff-stat">
             <span className="stat-add">+{stat.added}</span> <span className="stat-del">-{stat.removed}</span>
           </span>
         )}
       </div>
-      {diff.patch.trim().length === 0 ? (
+      {fileVersions !== undefined ? (
+        <div className="repos-editor-host" aria-label="Diff">
+          <Suspense fallback={<div className="file-viewer empty">Loading diff…</div>}>
+            <DiffViewer
+              path={fileVersions.path}
+              original={fileVersions.original}
+              modified={fileVersions.modified}
+            />
+          </Suspense>
+        </div>
+      ) : diff !== undefined && diff.patch.trim().length === 0 ? (
         <p className="repos-hint">No diff (the change may be untracked or staged only).</p>
       ) : (
         <figure className="diff-figure" aria-label="Diff">
@@ -1572,7 +1621,7 @@ function DiffPane({ diff }: Readonly<{ diff: GitDiff | undefined }>): ReactEleme
           </pre>
         </figure>
       )}
-      {diff.truncated && <p className="git-truncated">Diff truncated (very large change).</p>}
+      {diff?.truncated && <p className="git-truncated">Diff truncated (very large change).</p>}
     </div>
   );
 }

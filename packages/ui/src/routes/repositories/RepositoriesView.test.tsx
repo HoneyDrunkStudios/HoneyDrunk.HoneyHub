@@ -24,6 +24,17 @@ vi.mock("./CodeEditor", () => ({
   )
 }));
 
+// The Monaco side-by-side DiffEditor can't render in jsdom either, so stub the lazy DiffViewer
+// with plain <pre>s that surface its original/modified props (and the path) for assertions.
+vi.mock("./DiffViewer", () => ({
+  default: (props: { path: string; original: string; modified: string }) => (
+    <div data-testid="diff-viewer" data-path={props.path}>
+      <pre data-testid="diff-original">{props.original}</pre>
+      <pre data-testid="diff-modified">{props.modified}</pre>
+    </div>
+  )
+}));
+
 /** Records the writes the component makes so tests can assert the bridge calls, and exposes
     an `emitFsChanged` hook + browse/overview counters for the refresh paths. */
 class CapturingClient extends MockWireClient {
@@ -35,8 +46,14 @@ class CapturingClient extends MockWireClient {
   gitPullCalls: string[] = [];
   gitCheckoutCalls: Array<{ root: string; name: string; create?: boolean | undefined }> = [];
   gitDiscardCalls: Array<{ root: string; paths: string[]; untracked?: boolean | undefined }> = [];
+  gitFileVersionsCalls: Array<{ root: string; path: string }> = [];
   browseDirCount = 0;
   gitOverviewCount = 0;
+
+  override gitFileVersions(root: string, path: string): Promise<void> {
+    this.gitFileVersionsCalls.push({ root, path });
+    return super.gitFileVersions(root, path);
+  }
 
   override writeFile(path: string, content: string): Promise<void> {
     this.writeFileCalls.push({ path, content });
@@ -312,14 +329,24 @@ describe("RepositoriesView", () => {
   });
 
   it("opens a changed file's diff in the center pane", async () => {
-    renderRepos();
+    const client = new CapturingClient();
+    renderRepos(client);
     showPanel("Source control");
 
     fireEvent.click(await screen.findByText("packages/ui/src/App.tsx"));
 
-    await waitFor(() => expect(screen.getByLabelText("Diff")).toBeTruthy());
+    // The side-by-side DiffViewer mounts with the file's two versions...
+    const viewer = await screen.findByTestId("diff-viewer");
+    expect(viewer.getAttribute("data-path")).toBe("packages/ui/src/App.tsx");
+    expect(screen.getByTestId("diff-original").textContent).toContain('const view = "run";');
+    expect(screen.getByTestId("diff-modified").textContent).toContain('const view = "chat";');
+    // ...and the unified git_diff still supplies the +/- stat header.
     expect(screen.getByText("+1")).toBeTruthy();
     expect(screen.getByText("-1")).toBeTruthy();
+    // Opening a per-file diff fetches both file versions for the DiffEditor.
+    expect(client.gitFileVersionsCalls).toHaveLength(1);
+    expect(client.gitFileVersionsCalls[0]?.path).toBe("packages/ui/src/App.tsx");
+    expect(client.gitFileVersionsCalls[0]?.root).toMatch(/HoneyHub$/);
   });
 
   it("shows the truncated note for a very large diff", async () => {
@@ -345,13 +372,19 @@ describe("RepositoriesView", () => {
     await waitFor(() => expect(screen.getByText("Diff truncated (very large change).")).toBeTruthy());
   });
 
-  it("shows the empty-diff hint when the patch is blank", async () => {
+  it("shows the empty-diff hint when there are no file versions and the patch is blank", async () => {
+    // The empty-patch hint is the repo-level (unified) fallback, reached only when no file
+    // versions arrive — so this client emits a blank patch and no git_file_versions.
     class EmptyDiffClient extends CapturingClient {
       override gitDiff(root: string, path?: string): Promise<void> {
         this.emitDevice({
           kind: "git_diff",
           diff: { root, ...(path === undefined ? {} : { path }), patch: "   \n", truncated: false }
         });
+        return Promise.resolve();
+      }
+      override gitFileVersions(_root: string, _path: string): Promise<void> {
+        // No versions reply: stay on the unified patch fallback.
         return Promise.resolve();
       }
     }
@@ -372,13 +405,16 @@ describe("RepositoriesView", () => {
       override gitDiff(_root: string, _path?: string): Promise<void> {
         return Promise.reject(new Error("diff boom"));
       }
+      override gitFileVersions(_root: string, _path: string): Promise<void> {
+        return Promise.reject(new Error("versions boom"));
+      }
     }
     renderRepos(new RejectingDiffClient());
     showPanel("Source control");
 
     fireEvent.click(await screen.findByText("packages/ui/src/App.tsx"));
 
-    // The diff pane stays on its loading placeholder; the rejection is swallowed.
+    // The diff pane stays on its loading placeholder; both rejections are swallowed.
     await waitFor(() => expect(screen.getByText("Loading diff…")).toBeTruthy());
   });
 

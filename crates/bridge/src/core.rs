@@ -1331,6 +1331,13 @@ fn validate_stream_payload(
                 "a backend stream must not emit device-wide git diff",
             ));
         }
+        BridgeEventPayload::GitFileVersions { .. } => {
+            // Device-wide, host-synthesized single-file diff versions — never streamed.
+            return Err(BridgeError::new(
+                "event_unexpected_git_file_versions",
+                "a backend stream must not emit device-wide git file versions",
+            ));
+        }
         BridgeEventPayload::GitOverview { .. } => {
             // Device-wide, host-synthesized multi-repo git overview — never streamed.
             return Err(BridgeError::new(
@@ -3062,6 +3069,19 @@ mod tests {
                 },
             }),
             "event_unexpected_git_diff"
+        );
+        assert_eq!(
+            err_code(BridgeEventPayload::GitFileVersions {
+                result: crate::git::GitFileVersions {
+                    root: "/r".to_string(),
+                    path: "a.txt".to_string(),
+                    original: String::new(),
+                    modified: String::new(),
+                    existed_in_head: false,
+                    existed_in_work: true,
+                },
+            }),
+            "event_unexpected_git_file_versions"
         );
         assert_eq!(
             err_code(BridgeEventPayload::SessionList {
