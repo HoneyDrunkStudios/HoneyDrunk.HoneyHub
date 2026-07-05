@@ -935,6 +935,31 @@ export class MockWireClient implements WireClient {
     });
   }
 
+  async lspStart(root: string, languageId: string): Promise<void> {
+    // The offline demo runs no real language server; report honest graceful degradation so
+    // the editor keeps its in-file IntelliSense and shows the quiet "no server" note.
+    this.emitDevice({
+      kind: "lsp_status",
+      status: {
+        root,
+        languageId,
+        serverId: "",
+        installed: false,
+        running: false,
+        reason: "(demo) no language server runs in the offline mock"
+      }
+    });
+  }
+
+  async lspSend(_root: string, _languageId: string, _message: unknown): Promise<void> {
+    // No server in the mock; the client only sends after an installed/running status, so this
+    // is never reached in the demo. A no-op keeps the seam total.
+  }
+
+  async lspStop(_root: string, _languageId: string): Promise<void> {
+    // Nothing to stop in the offline mock.
+  }
+
   async detectEnvironment(): Promise<void> {
     // The real host runs `<cli> --version`; the mock scripts Claude installed with a
     // version and Codex not installed, so the Updates surface is exercisable offline.

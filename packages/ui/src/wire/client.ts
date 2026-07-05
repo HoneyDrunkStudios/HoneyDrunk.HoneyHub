@@ -257,6 +257,16 @@ export interface WireClient {
       event via `subscribe` (correlate by `root`); a refusal, spawn failure, or timeout
       surfaces as `ok: false` with its disposition, not a rejection. */
   runCheck(root: string, checkId: string): Promise<void>;
+  /** **LSP** (ADR-0102): start (or reuse) an allowlisted language server for `languageId`,
+      scoped to the allowlisted `root`. The host answers with an `lsp_status` event via
+      `subscribe` (installed/running flags for graceful degradation); this resolves on the ack. */
+  lspStart(root: string, languageId: string): Promise<void>;
+  /** **LSP**: forward one opaque LSP JSON-RPC `message` to the running server for
+      (`languageId`, `root`). Server replies arrive as `lsp_message` events via `subscribe`;
+      this resolves on the ack. Rejects with `lsp_not_running` if no server is running. */
+  lspSend(root: string, languageId: string, message: unknown): Promise<void>;
+  /** **LSP**: stop the language server for (`languageId`, `root`). Resolves on the ack. */
+  lspStop(root: string, languageId: string): Promise<void>;
   /** Subscribe to bridge events; returns an unsubscribe function. */
   subscribe(handler: WireEventHandler): () => void;
 }

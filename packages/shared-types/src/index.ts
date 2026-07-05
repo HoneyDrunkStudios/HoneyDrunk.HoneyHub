@@ -1095,7 +1095,13 @@ export type ClientCommand =
   | { kind: "roadmap" }
   | { kind: "scaffold_architecture"; name?: string; location?: string }
   | { kind: "pull_architecture" }
-  | { kind: "run_check"; root: string; check: string };
+  | { kind: "run_check"; root: string; check: string }
+  // LSP (ADR-0102): start/reuse an allowlisted server, forward a JSON-RPC message, stop.
+  // The client sends a language id + root (never a command line); `message` is an opaque
+  // LSP JSON-RPC message the bridge frames verbatim to the server's stdin.
+  | { kind: "lsp_start"; root: string; languageId: string }
+  | { kind: "lsp_send"; root: string; languageId: string; message: unknown }
+  | { kind: "lsp_stop"; root: string; languageId: string };
 
 export interface ReconnectRequest {
   sessionId: string;
@@ -1185,7 +1191,31 @@ export type BridgeEventPayload =
     }
   | { kind: "roadmap"; roadmap: RoadmapSnapshot }
   | { kind: "check_result"; result: CheckOutcome }
-  | { kind: "usage_probe"; report: UsageProbeReport };
+  | { kind: "usage_probe"; report: UsageProbeReport }
+  // LSP (ADR-0102): one JSON-RPC message from a running language server, and a lifecycle /
+  // capability signal. Both host-synthesized + device-wide (empty session/run ids). The
+  // cockpit routes `lsp_message` to the matching (languageId, root) client; `lsp_status`
+  // is the honest degradation flag (keep in-file IntelliSense when installed/running false).
+  | { kind: "lsp_message"; root: string; languageId: string; message: unknown }
+  | { kind: "lsp_status"; status: LspStatus };
+
+/** A language-server lifecycle / capability signal (ADR-0102). Mirrors the bridge's serde
+    shape. `installed`/`running` are the graceful-degradation flags: when either is false the
+    cockpit keeps its in-file Monaco IntelliSense and shows a quiet note. */
+export interface LspStatus {
+  /** The workspace root the server is (or would be) scoped to. */
+  root: string;
+  /** The Monaco language id this status is about. */
+  languageId: string;
+  /** The resolved allowlist server id, or empty when no server is allowlisted. */
+  serverId: string;
+  /** True when a server binary was located on PATH (operator-installed). */
+  installed: boolean;
+  /** True when a supervised server process is currently running for this key. */
+  running: boolean;
+  /** A short human-readable reason, for a quiet cockpit note. */
+  reason: string;
+}
 
 /** One meter line scraped from a vendor CLI's usage panel. */
 export interface UsageWindow {

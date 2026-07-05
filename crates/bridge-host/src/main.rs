@@ -27,6 +27,11 @@
 //! - `HONEYHUB_DISPATCH_CHILD_CAP`: max children one session may spawn (default 4).
 //! - `HONEYHUB_DISPATCH_MAX_DEPTH`: max depth of the dispatch tree — a run at this depth may
 //!   not dispatch a deeper child (default 3), bounding recursion beyond the per-session cap.
+//! - `HONEYHUB_LSP_TYPESCRIPT_PROGRAM` / `HONEYHUB_LSP_RUST_PROGRAM` /
+//!   `HONEYHUB_LSP_CSHARP_PROGRAM`: override the located path of an LSP language server
+//!   (ADR-0102). Absent, the bridge locates the operator-installed binary on `PATH`
+//!   (typescript-language-server / rust-analyzer / csharp-ls) and never downloads one; a
+//!   missing server degrades to in-file IntelliSense.
 //!
 //! On start it generates a pairing token, prints the URL (with the token), and —
 //! when serving the PWA — opens it in the default browser.

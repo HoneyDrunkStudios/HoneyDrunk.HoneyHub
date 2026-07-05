@@ -12,6 +12,9 @@
 //! - `HONEYHUB_WORKSPACE_ROOTS`: comma-separated absolute roots to allowlist.
 //! - `HONEYHUB_CLAUDE_PROGRAM` / `HONEYHUB_CLAUDE_MODEL`: the Claude Code CLI.
 //! - `HONEYHUB_GLOBAL_AGENTS`: opt in to user-global agent discovery.
+//! - `HONEYHUB_LSP_TYPESCRIPT_PROGRAM` / `HONEYHUB_LSP_RUST_PROGRAM` /
+//!   `HONEYHUB_LSP_CSHARP_PROGRAM`: override the located path of an LSP language server
+//!   (ADR-0102); absent, the bridge locates the operator-installed binary on `PATH`.
 //! - `HONEYHUB_STATIC_DIR`: override the served PWA directory (defaults to the
 //!   workspace `packages/ui/dist`, resolved relative to this crate for dev).
 

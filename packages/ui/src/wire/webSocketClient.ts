@@ -612,4 +612,16 @@ export class WebSocketWireClient implements WireClient {
   async runCheck(root: string, checkId: string): Promise<void> {
     await this.dispatch({ kind: "run_check", root, check: checkId });
   }
+
+  async lspStart(root: string, languageId: string): Promise<void> {
+    await this.dispatch({ kind: "lsp_start", root, languageId });
+  }
+
+  async lspSend(root: string, languageId: string, message: unknown): Promise<void> {
+    await this.dispatch({ kind: "lsp_send", root, languageId, message });
+  }
+
+  async lspStop(root: string, languageId: string): Promise<void> {
+    await this.dispatch({ kind: "lsp_stop", root, languageId });
+  }
 }
