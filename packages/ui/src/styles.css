@@ -4682,6 +4682,15 @@ h2 {
   justify-content: space-between;
   gap: 10px;
 }
+/* The "Threads" section header: a clear, honey-accented label so the thread list is
+   obviously discoverable in the narrow dock. */
+.recent-chats-title {
+  margin: 0;
+  font-size: 0.82rem;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  color: var(--honey);
+}
 
 .recent-search {
   flex: 0 1 200px;
@@ -4787,6 +4796,40 @@ h2 {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+/* Per-thread status light at the head of a row: "active" pulses in neon while the
+   thread's run is still going; "done" is a steady honey glow once it finished with
+   answers. An empty draft placeholder gets no light at all. */
+.recent-status {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  margin-right: 6px;
+  border-radius: 50%;
+  vertical-align: middle;
+}
+.recent-status--active {
+  background: var(--neon-blue);
+  box-shadow: 0 0 6px var(--neon-blue);
+  animation: recent-status-pulse 1.4s ease-in-out infinite;
+}
+.recent-status--done {
+  background: var(--honey);
+  box-shadow: 0 0 5px var(--honey-line);
+}
+@keyframes recent-status-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .recent-status--active {
+    animation: none;
+  }
 }
 
 .recent-meta {
@@ -7036,6 +7079,50 @@ button:focus-visible,
   border-color: var(--neon-blue-line);
   color: var(--neon-blue);
 }
+/* The dock header's right-side controls: the always-available "New chat" button and
+   the collapse chevron, grouped against the header's space-between. */
+.chat-sidebar-head-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+/* "New chat" in the dock header — a bare "+" so a fresh thread is an obvious one-click
+   away from any chat state (empty, mid-run, or history). Same 28px square as the sessions
+   + collapse icons, kept honey-outlined so the primary action stands out among them. */
+.chat-sidebar-new {
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 1px solid var(--honey-line);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text);
+  cursor: pointer;
+}
+.chat-sidebar-new:hover {
+  background: rgba(255, 191, 0, 0.1);
+  border-color: var(--honey-line);
+}
+/* The header's session-history (clock) button — same slim, icon-only treatment as the
+   collapse chevron, lit neon on hover/open. */
+.chat-sidebar-history {
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+.chat-sidebar-history:hover,
+.chat-sidebar-history[aria-expanded="true"] {
+  border-color: var(--neon-blue-line);
+  color: var(--neon-blue);
+}
 .chat-sidebar-body {
   flex: 1 1 auto;
   min-height: 0;
@@ -7065,11 +7152,17 @@ button:focus-visible,
    shaped like an editor chat panel — history in the middle, the composer pinned to
    the bottom, controls in one tight row. */
 .chat--sidebar {
+  position: relative;
   min-height: 0;
   height: 100%;
   display: flex;
   flex-direction: column;
 }
+/* Empty-state dock layout: the greeting fills the space above the composer and centers
+   itself there (a fresh-chat hero), while the composer stays pinned at the BOTTOM where
+   you type, with the recent-chats / synced history tucked just above it. The greeting's
+   flex-grow is what pushes the composer down; `overflow-y: auto` lets a long history
+   scroll rather than clip. */
 .chat--sidebar .chat-start {
   width: 100%;
   height: 100%;
@@ -7077,16 +7170,35 @@ button:focus-visible,
   justify-content: flex-start;
   gap: 10px;
   padding-top: 10px;
-  overflow: hidden;
+  overflow-y: auto;
 }
-/* Bottom-anchored composer, editor-panel style: the (randomized) heading sits over
-   the history area; the composer + its cost/routing lines dock at the bottom. */
 .chat--sidebar .chat-heading {
   order: 0;
   font-size: 1.05rem;
   text-align: center;
   color: var(--text-muted);
   margin: 6px 0 0;
+}
+/* Ordering + sizing scoped to .chat-start so the active-run composer keeps its own
+   layout: greeting grows + centers (order 0), thread lists next, composer last (bottom). */
+.chat--sidebar .chat-start .chat-heading {
+  flex: 1 1 auto;
+  display: grid;
+  place-items: center;
+  margin: 0;
+  min-height: 72px;
+}
+.chat--sidebar .chat-start .recent-chats {
+  order: 1;
+  flex: 0 1 auto;
+  margin-top: 10px;
+}
+.chat--sidebar .chat-start .synced-history {
+  order: 2;
+}
+.chat--sidebar .chat-start .composer {
+  order: 3;
+  margin-top: 10px;
 }
 .chat--sidebar .recent-chats {
   order: 1;
@@ -7152,6 +7264,170 @@ button:focus-visible,
 }
 .chat--sidebar .chat-new-label {
   display: none;
+}
+
+/* ── Session-history dropdown (Claude Code's session picker, replicated) ─────────────
+   A floating panel anchored near the top of the dock, opened by the header clock. Dock
+   width, dark + rounded, with an internal scroll. The backdrop catches outside clicks. */
+.threads-menu-backdrop {
+  position: absolute;
+  inset: 0;
+  z-index: 60;
+  border: none;
+  padding: 0;
+  background: transparent;
+  cursor: default;
+}
+.threads-menu {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  right: 8px;
+  z-index: 61;
+  display: flex;
+  flex-direction: column;
+  max-height: min(72%, 460px);
+  padding: 8px;
+  border: 1px solid var(--border-strong);
+  border-radius: 14px;
+  background: linear-gradient(180deg, rgba(0, 209, 255, 0.03), rgba(0, 0, 0, 0.14)),
+    var(--panel);
+  box-shadow: var(--shadow-card), 0 0 0 1px rgba(0, 0, 0, 0.2);
+}
+/* Search box with a leading magnifier (the panel's top control — one unified list of
+   sessions sits below it, with no source tabs). */
+.threads-search {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 7px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--panel-2);
+  color: var(--text-dim);
+}
+.threads-search:focus-within {
+  border-color: var(--honey-line);
+}
+.threads-search-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  border: none;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 0.82rem;
+  outline: none;
+}
+.threads-search-input::placeholder {
+  color: var(--text-dim);
+}
+/* Scrollable list of session rows. */
+.threads-list {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+  display: grid;
+  gap: 2px;
+  overflow-y: auto;
+  min-height: 0;
+}
+.threads-empty {
+  padding: 12px 8px;
+  color: var(--text-dim);
+  font-size: 0.82rem;
+  text-align: center;
+}
+.threads-row {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  border-radius: var(--radius-sm);
+}
+.threads-row:hover {
+  background: var(--panel-2);
+}
+/* The active/open row: honey-tinted, actions always visible. */
+.threads-row.is-current {
+  background: var(--honey-glow);
+  box-shadow: inset 0 0 0 1px var(--honey-line);
+}
+.threads-open {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 8px 10px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.threads-title {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.86rem;
+}
+.threads-time {
+  flex: 0 0 auto;
+  color: var(--text-dim);
+  font-size: 0.74rem;
+  font-variant-numeric: tabular-nums;
+}
+/* Rename + delete: hidden until hover, always shown on the current row. */
+.threads-actions {
+  display: flex;
+  align-items: center;
+  gap: 1px;
+  padding-right: 4px;
+  opacity: 0;
+  transition: opacity 120ms ease;
+}
+.threads-row:hover .threads-actions,
+.threads-row:focus-within .threads-actions,
+.threads-row.is-current .threads-actions {
+  opacity: 1;
+}
+.threads-action {
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-dim);
+  cursor: pointer;
+}
+.threads-action:hover {
+  border-color: var(--border);
+  background: var(--panel-3);
+  color: var(--text);
+}
+.threads-action.is-danger {
+  border-color: var(--danger, #e5484d);
+  color: var(--danger, #e5484d);
+}
+.threads-rename {
+  flex: 1 1 auto;
+  min-width: 0;
+  margin: 2px;
+  padding: 7px 10px;
+  border: 1px solid var(--honey-line);
+  border-radius: var(--radius-sm);
+  background: var(--panel-2);
+  color: var(--text);
+  font: inherit;
+  font-size: 0.86rem;
+  outline: none;
 }
 
 /* Attachment chips (shared by the composer + the follow-up box). */

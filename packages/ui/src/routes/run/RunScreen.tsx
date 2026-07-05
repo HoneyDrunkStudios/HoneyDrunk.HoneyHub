@@ -32,6 +32,7 @@ import { loadRoutingSnapshot } from "../routing/routingSnapshot";
 import { SessionDiagnostics } from "./SessionDiagnostics";
 import { WorkspacePicker } from "./WorkspacePicker";
 import { ModelMenu, type ModelOption } from "./ModelMenu";
+import { ThreadsMenu, mergeThreadRows, type ThreadRow } from "../chat/ThreadsMenu";
 import {
   getChat,
   chatTitle,
@@ -93,6 +94,17 @@ export interface RunScreenProps {
   /** The session id this surface runs under. Defaults to the original single-session id.
       The sidebar passes its own so its runs do not collide with the full Chat page's. */
   sessionId?: string;
+  /** A monotonically increasing signal: whenever it changes (after mount), the screen
+      starts a fresh chat (`startNewChat`). The chat dock's header "New chat" button
+      drives it, so a new thread is one click away even from an active run or history,
+      without lifting the screen's per-run state up to the dock. */
+  newChatSignal?: number;
+  /** Whether the dock's session-history dropdown is open. The dock header's sessions
+      button owns + toggles it (ChatSidebar); this screen renders the ThreadsMenu overlay
+      when true, since it holds the thread data + open/rename/delete handlers. */
+  threadsMenuOpen?: boolean;
+  /** Dismiss the session-history dropdown (row selection, outside-click, or Escape). */
+  onCloseThreadsMenu?: () => void;
   /** The user's default workspace, pre-selected in the composer's workspace picker.
       Falls back to the first root when unset or no longer configured. */
   defaultWorkspaceRoot?: string;
@@ -149,6 +161,17 @@ function isTerminal(state: DispatchRunState | undefined): boolean {
   return state !== undefined && TERMINAL.has(state);
 }
 
+/** The status light for a thread row, from its last run's state + whether it has any
+    transcript: "active" while a run is still going, "done" once that run finished with
+    answers, or undefined for an empty draft placeholder (no light). `state` is a plain
+    string on the saved record, so terminal membership is tested directly. */
+function threadStatus(state: string, messageCount: number): "active" | "done" | undefined {
+  if (messageCount <= 0) {
+    return undefined;
+  }
+  return TERMINAL.has(state as DispatchRunState) ? "done" : "active";
+}
+
 /** Append a short note naming the attached files to the displayed user turn, so the
     transcript honestly reflects what was sent (the bridge injects the real paths). */
 function withAttachmentNote(text: string, attachments: PendingAttachment[]): string {
@@ -168,6 +191,9 @@ export function RunScreen({
   plans = {},
   variant = "full",
   sessionId = "session-1",
+  newChatSignal,
+  threadsMenuOpen,
+  onCloseThreadsMenu,
   defaultWorkspaceRoot,
   onSetDefaultWorkspaceRoot,
   onAddWorkspaceRoots,
@@ -217,6 +243,12 @@ export function RunScreen({
   const [runStartedAt, setRunStartedAt] = useState("");
   // A past chat opened read-only from history (null while composing/running).
   const [openedChat, setOpenedChat] = useState<ChatRecord | undefined>(undefined);
+  // The id of a fresh thread minted the moment "New chat" is pressed and persisted as an
+  // empty placeholder, so it appears in the thread list and can be renamed BEFORE any
+  // typing. The next run adopts this id (as `requestedRunId`) so the live-run save effect
+  // updates the SAME record — no duplicate thread, and a pre-typing rename survives.
+  // Cleared once a run adopts it (or dropped if the user starts yet another new chat).
+  const [draftChatId, setDraftChatId] = useState<string | undefined>(undefined);
   // The discovered agent catalog (for the composer's agent picker) and the user's
   // selected agent name. Claude runs under `--agent <name>`; Codex has no agent flag.
   const [agentCatalog, setAgentCatalog] = useState<AgentDefinition[]>([]);
@@ -300,6 +332,12 @@ export function RunScreen({
     : undefined;
   const model: string | undefined = costMode === "manual" ? manualModel : autoModel;
 
+  // A raw model id ("opus", or the served "claude-opus-4-8") resolved to its full catalog
+  // display label ("Claude Opus 4.8") for the composer chip + launching line. Falls back to
+  // the raw id when the catalog has no match (e.g. a custom free-text model).
+  const modelDisplayLabel = (id: string | undefined): string | undefined =>
+    id === undefined ? undefined : (resolveCatalogModel(allModelsForProvider, id)?.label ?? id);
+
   // Saved chat summaries, shared by the pre-send estimator and RecentChats. Keyed on
   // the run lifecycle so a chat saved this session (saveChat on run end) refreshes
   // both surfaces without re-parsing the whole store on every keystroke.
@@ -330,6 +368,46 @@ export function RunScreen({
     () => filterSyncedSessions(syncedSessions, threadQuery),
     [syncedSessions, threadQuery]
   );
+  // The two histories mapped into the dropdown's row shape, then merged into ONE list:
+  // local (this-device) rows carry a status light (from the summary's last-run state +
+  // transcript length) and are tagged `source: "local"`; synced rows carry no light and
+  // are tagged `source: "web"`. Each row keeps its source so open/rename/delete route to
+  // the right store — but the source is internal only and never shown to the operator.
+  const localMenuThreads = useMemo<ThreadRow[]>(
+    () =>
+      localThreads.map((chat) => {
+        const status = threadStatus(chat.state, chat.messageCount);
+        return {
+          id: chat.id,
+          source: "local" as const,
+          title: chatTitle(chat),
+          timestamp: chat.updatedAt,
+          ...(chat.pinned === true ? { pinned: true } : {}),
+          ...(status === undefined ? {} : { status })
+        };
+      }),
+    [localThreads]
+  );
+  const webMenuThreads = useMemo<ThreadRow[]>(
+    () =>
+      syncedThreads.map((session) => ({
+        id: session.id,
+        source: "web" as const,
+        title: session.title,
+        timestamp: session.updatedAt,
+        ...(session.pinned === true ? { pinned: true } : {})
+      })),
+    [syncedThreads]
+  );
+  // The single unified list the dropdown renders: local + synced merged, deduped by id
+  // (local wins its richer status), pinned first, then most-recent first.
+  const menuThreads = useMemo(
+    () => mergeThreadRows(localMenuThreads, webMenuThreads),
+    [localMenuThreads, webMenuThreads]
+  );
+  // The currently-open/active thread the dropdown highlights: a reopened history chat
+  // wins, else the live run, else a just-minted draft placeholder.
+  const currentThreadId = openedChat?.id ?? runId ?? draftChatId;
   // Pre-send cost signal for the composer: "included in your plan" on a flat sub
   // (only for a resolved, non-metered model — usage-credit models bill regardless),
   // else an input floor from the catalog's rates plus a median/p90 projection from
@@ -645,9 +723,17 @@ export function RunScreen({
       attachments?: PendingAttachment[];
     }
   ): Promise<string> => {
-    const newRunId = crypto.randomUUID();
+    // A fresh thread started via "New chat" pre-persisted an empty placeholder under
+    // `draftChatId`; the FIRST run adopts that id (as `requestedRunId` below) so the save
+    // effect updates the SAME record — no duplicate thread, and the pre-typing rename
+    // survives. Follow-ups (which carry a `followUpToRunId`) always mint a fresh id.
+    const adoptDraftId = options?.followUpToRunId === undefined ? draftChatId : undefined;
+    const newRunId = adoptDraftId ?? crypto.randomUUID();
     runIdRef.current = newRunId;
     setRunId(newRunId);
+    if (adoptDraftId !== undefined) {
+      setDraftChatId(undefined);
+    }
     setRunState(undefined);
     setStreaming("");
     // Freeze the backend + model for this run so the request and the active-run
@@ -818,7 +904,48 @@ export function RunScreen({
     // deterministically (guaranteed different, and no Math.random the Sonar PRNG rule
     // would flag).
     setPromptIndex((index) => (index + 1) % COMPOSER_PROMPTS.length);
+
+    // Drop the previous draft if it was never dispatched (its id was never adopted by a
+    // run, so it is still just an empty "New chat" placeholder) — repeated New-chat clicks
+    // then never pile up empty threads.
+    if (draftChatId !== undefined) {
+      deleteChat(draftChatId);
+    }
+    // Persist a fresh placeholder thread immediately so it shows in Threads and can be
+    // renamed before the first message. `state: "created"` is a real non-terminal run
+    // state, so the status light treats it as neither active nor done (empty transcript).
+    const nextDraftId = crypto.randomUUID();
+    const now = new Date().toISOString();
+    saveChat({
+      id: nextDraftId,
+      task: "New chat",
+      state: "created",
+      messages: [],
+      totalUsd: 0,
+      totalTokens: 0,
+      createdAt: now,
+      updatedAt: now
+    });
+    setDraftChatId(nextDraftId);
+    // `runId` may be unchanged (already undefined on the empty composer), so nudge the
+    // history list to re-read and surface the new placeholder.
+    setHistoryVersion((version) => version + 1);
   };
+
+  // The chat dock's header "New chat" button bumps `newChatSignal`; mirror that into a
+  // fresh chat here. A ref tracks the last-seen value so the initial mount (and any
+  // unrelated re-render) never wipes an in-progress run — only an actual increment does.
+  const lastNewChatSignal = useRef(newChatSignal);
+  useEffect(() => {
+    if (newChatSignal === undefined || newChatSignal === lastNewChatSignal.current) {
+      return;
+    }
+    lastNewChatSignal.current = newChatSignal;
+    startNewChat();
+    // startNewChat only calls stable state setters, so it is safe to omit from deps;
+    // we intentionally fire on the signal alone.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [newChatSignal]);
 
   // Request a synced session's detail; the subscription reopens it read-only when it
   // arrives. Bound to `client` here so the SyncedHistory list stays a flat presentational
@@ -891,8 +1018,10 @@ export function RunScreen({
   // pinned model in manual mode.
   const configLabel =
     costMode === "optimize"
-      ? `Optimize · ${backendLabel(recommendation.backend)}`
-      : `${backendLabel(provider)} · ${model ?? "custom"}`;
+      ? `Optimize · ${backendLabel(recommendation.backend)}${
+          model === undefined ? "" : ` · ${modelDisplayLabel(model)}`
+        }`
+      : `${backendLabel(provider)} · ${modelDisplayLabel(model) ?? "custom"}`;
 
   const modelControls = (
     <>
@@ -1197,7 +1326,7 @@ export function RunScreen({
                         ) : (
                           <>
                             Launching {backendLabel(provider)}
-                            {model === undefined ? "" : ` · ${model}`}.
+                            {model === undefined ? "" : ` · ${modelDisplayLabel(model)}`}.
                           </>
                         )}
                         {costHint !== undefined && (
@@ -1312,32 +1441,47 @@ export function RunScreen({
           {/* No status note under the composer: the rationale + cost hint live in the
               config drop-up, where you look when you care. */}
 
-          {(chatSummaries.length > 0 || syncedSessions.length > 0) && (
-            <div className="recent-chats-head">
-              <p className="eyebrow">Chats</p>
-              <input
-                className="recent-search"
-                type="search"
-                aria-label="Search chats"
-                placeholder="Search chats…"
-                value={threadQuery}
-                onChange={(event) => setThreadQuery(event.target.value)}
+          {/* The inline thread list lives ONLY on the full Chat page (the small-screen
+              surface, which has no dock header). In the dock the threads moved into the
+              header sessions button's dropdown (ThreadsMenu), so the empty dock is just
+              the centered greeting + the bottom composer. */}
+          {variant === "full" && (
+            <>
+              {/* A clear, always-present "Threads" section header so the thread list is
+                  obviously discoverable. The search box shows once there is something to
+                  search; otherwise a plain "No threads yet" hint marks where threads go. */}
+              <div className="recent-chats-head">
+                <p className="recent-chats-title">Threads</p>
+                {chatSummaries.length > 0 || syncedSessions.length > 0 ? (
+                  <input
+                    className="recent-search"
+                    type="search"
+                    aria-label="Search chats"
+                    placeholder="Search chats…"
+                    value={threadQuery}
+                    onChange={(event) => setThreadQuery(event.target.value)}
+                  />
+                ) : (
+                  <span className="recent-empty">No threads yet</span>
+                )}
+              </div>
+              <RecentChats
+                threads={localThreads}
+                onOpen={setOpenedChat}
+                onMutated={() => setHistoryVersion((version) => version + 1)}
               />
-            </div>
-          )}
-          <RecentChats
-            threads={localThreads}
-            onOpen={setOpenedChat}
-            onMutated={() => setHistoryVersion((version) => version + 1)}
-          />
 
-          <SyncedHistory
-            sessions={syncedThreads}
-            onOpen={openSyncedSession}
-            onRename={(id, title) => void client.renameSession(id, title).catch(() => undefined)}
-            onDelete={(id) => void client.deleteSession(id).catch(() => undefined)}
-            onPin={(id, pinned) => void client.pinSession(id, pinned).catch(() => undefined)}
-          />
+              <SyncedHistory
+                sessions={syncedThreads}
+                onOpen={openSyncedSession}
+                onRename={(id, title) =>
+                  void client.renameSession(id, title).catch(() => undefined)
+                }
+                onDelete={(id) => void client.deleteSession(id).catch(() => undefined)}
+                onPin={(id, pinned) => void client.pinSession(id, pinned).catch(() => undefined)}
+              />
+            </>
+          )}
     </div>
   );
 
@@ -1480,6 +1624,42 @@ export function RunScreen({
           {error}
         </p>
       )}
+      {/* The dock's session-history dropdown (Claude Code's session picker): an overlay
+          anchored near the top of the dock, opened by the header sessions button. It shows
+          ONE merged list of local + synced sessions; RunScreen owns the thread data +
+          open/rename/delete (routed by each row's source), so it renders it here. */}
+      {threadsMenuOpen === true && onCloseThreadsMenu !== undefined && (
+        <ThreadsMenu
+          threads={menuThreads}
+          query={threadQuery}
+          onQuery={setThreadQuery}
+          {...(currentThreadId === undefined ? {} : { currentId: currentThreadId })}
+          onOpen={(id, source) => {
+            if (source === "local") {
+              setOpenedChat(getChat(id));
+            } else {
+              openSyncedSession(id);
+            }
+          }}
+          onRename={(id, title, source) => {
+            if (source === "local") {
+              renameChat(id, title);
+              setHistoryVersion((version) => version + 1);
+            } else {
+              void client.renameSession(id, title).catch(() => undefined);
+            }
+          }}
+          onDelete={(id, source) => {
+            if (source === "local") {
+              deleteChat(id);
+              setHistoryVersion((version) => version + 1);
+            } else {
+              void client.deleteSession(id).catch(() => undefined);
+            }
+          }}
+          onClose={onCloseThreadsMenu}
+        />
+      )}
       {body}
     </section>
   );
@@ -1585,7 +1765,9 @@ function RecentChats({ threads, onOpen, onMutated }: Readonly<RecentChatsProps>)
     <div className="recent-chats">
       <p className="eyebrow">This device</p>
       <ul aria-label="Chats">
-        {threads.map((chat) => (
+        {threads.map((chat) => {
+          const status = threadStatus(chat.state, chat.messageCount);
+          return (
             <li key={chat.id} className="recent-row">
               {renaming?.id === chat.id ? (
                 <input
@@ -1612,6 +1794,12 @@ function RecentChats({ threads, onOpen, onMutated }: Readonly<RecentChatsProps>)
                     onClick={() => onOpen(getChat(chat.id))}
                   >
                     <span className="recent-task">
+                      {status !== undefined && (
+                        <span
+                          className={`recent-status recent-status--${status}`}
+                          aria-label={status === "active" ? "Run active" : "Chat done with answers"}
+                        />
+                      )}
                       {chat.pinned === true && (
                         <span className="recent-pin-mark" aria-label="Pinned">
                           ★{" "}
@@ -1669,7 +1857,8 @@ function RecentChats({ threads, onOpen, onMutated }: Readonly<RecentChatsProps>)
                 </>
               )}
             </li>
-          ))}
+          );
+        })}
       </ul>
     </div>
   );

@@ -84,8 +84,10 @@ describe("chatHistory", () => {
     saveChat(record("mid", "2026-06-14T02:00:00Z"));
     const summaries = loadChatSummaries();
     expect(summaries.map((s) => s.id)).toEqual(["new", "mid", "old"]);
-    // Summaries omit the (potentially large) transcript.
+    // Summaries omit the (potentially large) transcript...
     expect("messages" in summaries[0]!).toBe(false);
+    // ...but keep its length for the thread-row status light.
+    expect(summaries[0]!.messageCount).toBe(1);
   });
 
   it("caps stored chats to the most recent 100", () => {

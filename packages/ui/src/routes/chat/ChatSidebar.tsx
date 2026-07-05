@@ -1,5 +1,6 @@
 import {
   useRef,
+  useState,
   type KeyboardEvent as ReactKeyboardEvent,
   type PointerEvent as ReactPointerEvent,
   type ReactElement
@@ -65,6 +66,13 @@ export function ChatSidebar({
 }: Readonly<ChatSidebarProps>): ReactElement {
   const dragging = useRef(false);
   const draggedWidth = useRef<number | undefined>(undefined);
+  // Bumped by the header "New chat" button; RunScreen watches it and resets to a fresh
+  // thread. Kept here (not in App) so the dock owns its own new-chat control.
+  const [newChatSignal, setNewChatSignal] = useState(0);
+  // Whether the header's session-history dropdown is open. Owned here (the button lives
+  // in the dock header) and passed down so RunScreen — which holds the thread data and
+  // open/rename/delete handlers — renders the ThreadsMenu overlay.
+  const [threadsMenuOpen, setThreadsMenuOpen] = useState(false);
 
   // Drag-to-resize: the dock is anchored to the right edge, so its width is the
   // distance from the pointer to the window's right side. Pointer capture keeps the
@@ -132,18 +140,53 @@ export function ChatSidebar({
         />
         <div className="chat-sidebar-head">
           <span className="chat-sidebar-title">Chat</span>
-          <button
-            type="button"
-            className="chat-sidebar-collapse"
-            onClick={onToggle}
-            aria-label="Collapse chat"
-            title="Collapse chat"
-          >
-            <IconCollapse />
-          </button>
+          <div className="chat-sidebar-head-actions">
+            {/* Always-available "New chat": start a fresh thread from any state (empty,
+                mid-run, or history). The current chat is persisted, so it stays in the
+                Chats list below to reopen. */}
+            <button
+              type="button"
+              className="chat-sidebar-new"
+              onClick={() => setNewChatSignal((signal) => signal + 1)}
+              aria-label="New chat"
+              title="New chat"
+            >
+              <IconPlus />
+            </button>
+            {/* Session history: this button toggles a dropdown of past sessions (one
+                merged list of this-device + synced), replicating Claude Code's session
+                picker. RunScreen renders the actual panel from the passed-down open state. */}
+            <button
+              type="button"
+              className="chat-sidebar-history"
+              onClick={() => setThreadsMenuOpen((open) => !open)}
+              aria-label="Session history"
+              aria-haspopup="dialog"
+              aria-expanded={threadsMenuOpen}
+              title="Session history"
+            >
+              <IconSessions />
+            </button>
+            <button
+              type="button"
+              className="chat-sidebar-collapse"
+              onClick={onToggle}
+              aria-label="Collapse chat"
+              title="Collapse chat"
+            >
+              <IconCollapse />
+            </button>
+          </div>
         </div>
         <div className="chat-sidebar-body">
-          <RunScreen {...run} variant="sidebar" sessionId={SIDEBAR_SESSION_ID} />
+          <RunScreen
+            {...run}
+            variant="sidebar"
+            sessionId={SIDEBAR_SESSION_ID}
+            newChatSignal={newChatSignal}
+            threadsMenuOpen={threadsMenuOpen}
+            onCloseThreadsMenu={() => setThreadsMenuOpen(false)}
+          />
         </div>
       </div>
       {!open && (
@@ -173,10 +216,50 @@ function IconChatBubble(): ReactElement {
   );
 }
 
+function IconPlus(): ReactElement {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      width="16"
+      height="16"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2.4"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <path d="M12 5v14M5 12h14" />
+    </svg>
+  );
+}
+
 function IconCollapse(): ReactElement {
   return (
     <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2">
       <path d="M9 6l6 6-6 6" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+// A stacked-list glyph (bulleted rows) that reads as "your sessions" — deliberately not a
+// clock. Filled bullet dots on the left mark it as a list of things rather than a plain
+// hamburger menu; stroke matches the other header icons.
+function IconSessions(): ReactElement {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      width="17"
+      height="17"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <path d="M9 6h11M9 12h11M9 18h11" />
+      <circle cx="4" cy="6" r="1.1" fill="currentColor" stroke="none" />
+      <circle cx="4" cy="12" r="1.1" fill="currentColor" stroke="none" />
+      <circle cx="4" cy="18" r="1.1" fill="currentColor" stroke="none" />
     </svg>
   );
 }

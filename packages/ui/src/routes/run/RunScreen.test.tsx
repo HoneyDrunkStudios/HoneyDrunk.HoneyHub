@@ -11,6 +11,7 @@ import {
 } from "@honeydrunk/honeyhub-types";
 import { RunScreen } from "./RunScreen";
 import { MockWireClient } from "../../wire/mockClient";
+import { getChat, loadChats, renameChat, saveChat, type ChatRecord } from "../../chatHistory";
 
 // The surfaced backends configured — the realistic state in which routing chooses
 // among options (an unconfigured cockpit offers only the proven-initial backend).
@@ -520,5 +521,212 @@ describe("RunScreen", () => {
     );
     // Stop control is gone once the run is terminal.
     expect(screen.queryByRole("button", { name: "Stop" })).toBeNull();
+  });
+
+  it("resolves the raw model id to its full catalog label on the chip and launching line", () => {
+    render(
+      <RunScreen client={new MockWireClient()} availableBackends={ALL_BACKENDS} catalog={CATALOG} />
+    );
+    pickModelMode();
+    pickModelOption(/Claude Opus 4\.8/);
+
+    // The chip shows the full label, not the raw "opus" id.
+    const chip = screen.getByRole("button", { name: "Configure run" });
+    expect(chip.textContent).toContain("Claude Code · Claude Opus 4.8");
+    expect(chip.textContent).not.toContain("· opus");
+
+    // The drop-up's launching line resolves it too.
+    expect(document.querySelector(".panel-rationale")?.textContent).toContain(
+      "Launching Claude Code · Claude Opus 4.8"
+    );
+  });
+
+  it("persists a renameable draft thread on New chat and the first run reuses its id", async () => {
+    vi.stubGlobal("localStorage", new MemoryStorage());
+    try {
+      const { client, started } = recordingClient();
+      render(<RunScreen client={client} availableBackends={ALL_BACKENDS} catalog={CATALOG} />);
+
+      // Reach the live view, then start a fresh thread from its header. That mints and
+      // persists an empty "New chat" placeholder immediately — before any typing.
+      fireEvent.change(screen.getByLabelText("Task"), { target: { value: "First thread" } });
+      fireEvent.click(screen.getByRole("button", { name: "Start session" }));
+      await waitFor(() =>
+        expect(screen.getByLabelText("Run state").textContent).toBe("needs_input")
+      );
+      fireEvent.click(screen.getByRole("button", { name: "New chat" }));
+
+      // The placeholder is persisted and listed before anything is typed.
+      const drafts = loadChats().filter((chat) => chat.task === "New chat");
+      expect(drafts).toHaveLength(1);
+      const draftId = drafts[0]!.id;
+      expect(within(screen.getByRole("list", { name: "Chats" })).getByText("New chat")).toBeTruthy();
+
+      // The operator renames the fresh thread up front (before the first message).
+      renameChat(draftId, "Planning session");
+      expect(getChat(draftId)?.title).toBe("Planning session");
+
+      // Dispatching a run ADOPTS the draft id (requestedRunId), so the same record updates
+      // in place: no duplicate thread, and the pre-typing rename survives.
+      fireEvent.change(screen.getByLabelText("Task"), { target: { value: "Do the planning" } });
+      fireEvent.click(screen.getByRole("button", { name: "Start session" }));
+      await waitFor(() => expect(started).toHaveLength(2));
+      expect(started[1]?.requestedRunId).toBe(draftId);
+
+      await waitFor(() => expect(getChat(draftId)?.task).toBe("Do the planning"));
+      expect(getChat(draftId)?.title).toBe("Planning session");
+      // Two threads total (first run + adopted draft) — no orphaned "New chat" row.
+      expect(loadChats()).toHaveLength(2);
+      expect(loadChats().filter((chat) => chat.task === "New chat")).toHaveLength(0);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("lights active threads and done-with-answers threads distinctly", () => {
+    vi.stubGlobal("localStorage", new MemoryStorage());
+    try {
+      const message = (id: string): ChatRecord["messages"][number] => ({
+        id: `m-${id}`,
+        sessionId: "s",
+        runId: id,
+        role: "agent",
+        body: "here you go",
+        createdAt: "2026-07-05T00:00:00Z"
+      });
+      const base = {
+        totalUsd: 0,
+        totalTokens: 0,
+        createdAt: "2026-07-05T00:00:00Z"
+      };
+      // A finished thread with answers, an in-flight thread, and an empty draft.
+      saveChat({
+        ...base,
+        id: "done1",
+        task: "Finished",
+        state: "completed",
+        messages: [message("done1")],
+        updatedAt: "2026-07-05T03:00:00Z"
+      });
+      saveChat({
+        ...base,
+        id: "live1",
+        task: "Running",
+        state: "running",
+        messages: [message("live1")],
+        updatedAt: "2026-07-05T02:00:00Z"
+      });
+      saveChat({
+        ...base,
+        id: "draft1",
+        task: "New chat",
+        state: "created",
+        messages: [],
+        updatedAt: "2026-07-05T01:00:00Z"
+      });
+
+      render(
+        <RunScreen client={new MockWireClient()} availableBackends={ALL_BACKENDS} catalog={CATALOG} />
+      );
+      const chats = screen.getByRole("list", { name: "Chats" });
+
+      expect(within(chats).getByLabelText("Chat done with answers")).toBeTruthy();
+      expect(within(chats).getByLabelText("Run active")).toBeTruthy();
+      // The empty draft has neither: only the two lights above exist.
+      expect(
+        within(chats).getAllByLabelText(/Run active|Chat done with answers/)
+      ).toHaveLength(2);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("renders the session-history dropdown (sidebar) with status lights, no inline list", () => {
+    vi.stubGlobal("localStorage", new MemoryStorage());
+    try {
+      const message = (id: string): ChatRecord["messages"][number] => ({
+        id: `m-${id}`,
+        sessionId: "s",
+        runId: id,
+        role: "agent",
+        body: "here you go",
+        createdAt: "2026-07-05T00:00:00Z"
+      });
+      const base = { totalUsd: 0, totalTokens: 0, createdAt: "2026-07-05T00:00:00Z" };
+      saveChat({
+        ...base,
+        id: "done1",
+        task: "Finished",
+        state: "completed",
+        messages: [message("done1")],
+        updatedAt: "2026-07-05T03:00:00Z"
+      });
+      saveChat({
+        ...base,
+        id: "live1",
+        task: "Running",
+        state: "running",
+        messages: [message("live1")],
+        updatedAt: "2026-07-05T02:00:00Z"
+      });
+
+      const onClose = vi.fn();
+      render(
+        <RunScreen
+          client={new MockWireClient()}
+          variant="sidebar"
+          threadsMenuOpen
+          onCloseThreadsMenu={onClose}
+          availableBackends={ALL_BACKENDS}
+          catalog={CATALOG}
+        />
+      );
+
+      // The dock drops the inline "Threads" section — history lives in the dropdown now.
+      expect(screen.queryByText("Threads")).toBeNull();
+      const dialog = screen.getByRole("dialog", { name: "Sessions" });
+
+      // The Wave-1 status lights ride onto the Local rows.
+      expect(within(dialog).getByLabelText("Chat done with answers")).toBeTruthy();
+      expect(within(dialog).getByLabelText("Run active")).toBeTruthy();
+
+      // Opening a row asks the dock to dismiss the panel.
+      fireEvent.click(within(dialog).getByText("Finished"));
+      expect(onClose).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("keeps the selected model and backend across a new chat", async () => {
+    vi.stubGlobal("localStorage", new MemoryStorage());
+    try {
+      const { client, started } = recordingClient();
+      render(<RunScreen client={client} availableBackends={ALL_BACKENDS} catalog={CATALOG} />);
+
+      // Pin a distinct backend + model (Codex GPT-5.5).
+      pickModelMode();
+      pickModelOption(/GPT-5\.5/);
+      expect(modelButtonText()).toContain("GPT-5.5");
+
+      // Run, then start a fresh chat from the live view.
+      fireEvent.change(screen.getByLabelText("Task"), { target: { value: "First" } });
+      fireEvent.click(screen.getByRole("button", { name: "Start session" }));
+      await waitFor(() => expect(started).toHaveLength(1));
+      fireEvent.click(screen.getByRole("button", { name: "New chat" }));
+
+      // The pinned model/backend survive the new chat: still manual, still GPT-5.5.
+      openConfigPanel();
+      expect(modelButtonText()).toContain("GPT-5.5");
+
+      // And the next run still launches on that pinned backend + model.
+      fireEvent.change(screen.getByLabelText("Task"), { target: { value: "Second" } });
+      fireEvent.click(screen.getByRole("button", { name: "Start session" }));
+      await waitFor(() => expect(started).toHaveLength(2));
+      expect(started[1]?.session.backend).toBe("codex.local");
+      expect(started[1]?.model).toBe("gpt-5.5");
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 });
