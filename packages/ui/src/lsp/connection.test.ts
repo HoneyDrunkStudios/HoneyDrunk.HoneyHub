@@ -110,4 +110,33 @@ describe("createBridgeLspConnection", () => {
     // Notifications stay fire-and-forget: a refused send must not throw or reject.
     expect(() => connection.sendNotification("textDocument/didChange", {})).not.toThrow();
   });
+
+  it("times out a request that never gets a response", async () => {
+    vi.useFakeTimers();
+    try {
+      const { transport } = fakeTransport();
+      const connection = createBridgeLspConnection(transport, 5000);
+      const pending = connection.sendRequest("textDocument/hover");
+      const assertion = expect(pending).rejects.toThrow("timed out");
+      await vi.advanceTimersByTimeAsync(5000);
+      await assertion;
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("clears the timeout when a response arrives in time", async () => {
+    vi.useFakeTimers();
+    try {
+      const { transport, sent, deliver } = fakeTransport();
+      const connection = createBridgeLspConnection(transport, 5000);
+      const pending = connection.sendRequest<{ ok: boolean }>("textDocument/hover");
+      deliver({ jsonrpc: "2.0", id: sent[0]?.id, result: { ok: true } });
+      await expect(pending).resolves.toEqual({ ok: true });
+      // Advancing past the timeout must not throw an unhandled rejection.
+      await vi.advanceTimersByTimeAsync(6000);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });

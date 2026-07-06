@@ -1134,15 +1134,15 @@ async fn handle_lsp_command(
             message,
         } => {
             let mut message = message;
+            let key = LspKey::new(&root, &language_id);
             // ADR-0102 D-G: the proxy is a URI-validating gateway, not a dumb pipe.
             // Command- and configuration-bearing methods are denied, client
             // initializationOptions are stripped (configuration is host-owned), and every
-            // file URI in the frame must resolve inside an allowlisted root, or the frame
-            // is refused, not forwarded.
-            let allowlist = {
-                let runtime = host.runtime.lock().await;
-                honeyhub_bridge::WorkspaceAllowlist::new(runtime.workspace_roots())
-            };
+            // file URI in the frame must resolve inside THIS server's own canonical root
+            // (one server / one root), or the frame is refused. Scoping to the server's
+            // own root, not the union of all roots, means a server for root A can never
+            // name a file in an unrelated allowlisted root B.
+            let allowlist = lsp_scope_allowlist(host, &key.root).await;
             if let Err(error) =
                 honeyhub_bridge::lsp::sanitize_client_message(&mut message, &allowlist)
             {
@@ -1153,7 +1153,6 @@ async fn handle_lsp_command(
                 );
                 return Err(error);
             }
-            let key = LspKey::new(&root, &language_id);
             let mut servers = host.active_lsp.lock().await;
             match servers.get_mut(&key) {
                 Some(server) => server.write_message(&message).map(|()| None),
@@ -1176,6 +1175,22 @@ async fn handle_lsp_command(
             "unsupported_command",
             "not an lsp command",
         )),
+    }
+}
+
+/// The allowlist a running server's frames are validated against (ADR-0102 D-G): exactly
+/// its own canonical root, and only while that root is still allowlisted (one server / one
+/// root). An empty allowlist (root removed) denies every URI until the orphan sweep tears
+/// the server down.
+async fn lsp_scope_allowlist(
+    host: &Arc<Host>,
+    server_root: &str,
+) -> honeyhub_bridge::WorkspaceAllowlist {
+    let runtime = host.runtime.lock().await;
+    if runtime.workspace_allows(server_root) {
+        honeyhub_bridge::WorkspaceAllowlist::new(vec![server_root.to_string()])
+    } else {
+        honeyhub_bridge::WorkspaceAllowlist::new(Vec::new())
     }
 }
 
@@ -1266,7 +1281,7 @@ fn spawn_lsp(host: &Arc<Host>, root: String, language_id: String) {
         // serializes registration with the SetWorkspaceRoots orphan sweep (same lock
         // order: runtime, then active_lsp), so a server can never be registered for a
         // deauthorized root and then missed by the sweep.
-        {
+        let server_process_id = {
             let runtime = host.runtime.lock().await;
             let mut servers = host.active_lsp.lock().await;
             if !runtime.workspace_allows(&root) {
@@ -1313,9 +1328,18 @@ fn spawn_lsp(host: &Arc<Host>, root: String, language_id: String) {
                 ));
                 return;
             }
+            let process_id = server.process_id();
             servers.insert(key.clone(), server);
-        }
-        pump_lsp(&host, key, root.clone(), language_id.clone(), inbound);
+            process_id
+        };
+        pump_lsp(
+            &host,
+            key,
+            server_process_id,
+            root.clone(),
+            language_id.clone(),
+            inbound,
+        );
         let _ = host.events.send(status(
             true,
             true,
@@ -1332,6 +1356,7 @@ fn spawn_lsp(host: &Arc<Host>, root: String, language_id: String) {
 fn pump_lsp(
     host: &Arc<Host>,
     key: LspKey,
+    process_id: u32,
     root: String,
     language_id: String,
     inbound: std::sync::mpsc::Receiver<serde_json::Value>,
@@ -1340,14 +1365,20 @@ fn pump_lsp(
     tokio::task::spawn_blocking(move || {
         while let Ok(message) = inbound.recv() {
             // ADR-0102 D-G, server-to-client direction: locations / watch registrations
-            // are filtered to allowlisted roots, command payloads are stripped, an
+            // are filtered to THIS server's own root, command payloads are stripped, an
             // out-of-root notification is dropped, and a denied server request (an
             // out-of-root applyEdit or showDocument) is answered back to the server
-            // (applied/success: false) rather than forwarded or left hanging. The
-            // allowlist is re-read per frame so a root removal takes effect immediately.
-            let allowlist = honeyhub_bridge::WorkspaceAllowlist::new(
-                host.runtime.blocking_lock().workspace_roots(),
-            );
+            // (applied/success: false) rather than forwarded or left hanging. Scoped to
+            // the server's own canonical root and re-read per frame, so a root removal
+            // takes effect immediately (an empty allowlist denies everything).
+            let allowlist = {
+                let runtime = host.runtime.blocking_lock();
+                if runtime.workspace_allows(&key.root) {
+                    honeyhub_bridge::WorkspaceAllowlist::new(vec![key.root.clone()])
+                } else {
+                    honeyhub_bridge::WorkspaceAllowlist::new(Vec::new())
+                }
+            };
             match honeyhub_bridge::lsp::filter_server_message(message, &allowlist) {
                 honeyhub_bridge::lsp::ServerFrameAction::Forward(message) => {
                     let _ = host.events.send(BridgeEvent::lsp_message(
@@ -1365,28 +1396,47 @@ fn pump_lsp(
                     eprintln!(
                         "[lsp] denied server request, replying refusal ({language_id} in {root})"
                     );
+                    // Identity-check: only write to the server THIS pump owns, never a
+                    // respawn that took the key after ours exited.
                     if let Some(server) = host.active_lsp.blocking_lock().get_mut(&key) {
-                        let _ = server.write_message(&reply);
+                        if server.process_id() == process_id {
+                            let _ = server.write_message(&reply);
+                        }
                     }
                 }
             }
         }
-        // The channel disconnected => the server's stdout hit EOF => it exited. Retire it (a
-        // no-op if `LspStop`/root-removal already removed it) and signal the fallback.
-        let removed = host.active_lsp.blocking_lock().remove(&key);
-        drop(removed);
-        let _ = host.events.send(BridgeEvent::lsp_status(
-            new_id(),
-            now_rfc3339(),
-            honeyhub_bridge::LspStatus {
-                root,
-                language_id,
-                server_id: String::new(),
-                installed: true,
-                running: false,
-                reason: "language server exited".to_string(),
-            },
-        ));
+        // The channel disconnected => the server's stdout hit EOF => it exited. Retire it,
+        // but ONLY if the entry under our key is still OUR process: a concurrent respawn
+        // (LspStart after our server exited) may already hold the key, and evicting it
+        // would cause flapping restarts. Identity-checked by the pid captured at spawn.
+        let retired = {
+            let mut servers = host.active_lsp.blocking_lock();
+            if servers.get(&key).map(|s| s.process_id()) == Some(process_id) {
+                let removed = servers.remove(&key);
+                drop(servers);
+                drop(removed);
+                true
+            } else {
+                false
+            }
+        };
+        // Only signal the fallback when WE actually retired our own server. If a respawn
+        // holds the key, it is running and owns the status.
+        if retired {
+            let _ = host.events.send(BridgeEvent::lsp_status(
+                new_id(),
+                now_rfc3339(),
+                honeyhub_bridge::LspStatus {
+                    root,
+                    language_id,
+                    server_id: String::new(),
+                    installed: true,
+                    running: false,
+                    reason: "language server exited".to_string(),
+                },
+            ));
+        }
     });
 }
 

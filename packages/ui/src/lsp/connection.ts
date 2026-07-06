@@ -56,15 +56,43 @@ export interface BridgeLspConnection {
 const METHOD_NOT_FOUND = -32601;
 const INTERNAL_ERROR = -32603;
 
+/** How long a request waits for its response before it is failed. A server can start but
+    never answer `initialize`/`completion`/`hover`/`rename`; without a bound the request
+    would hang forever and the editor feature would spin. */
+const DEFAULT_REQUEST_TIMEOUT_MS = 20_000;
+
+interface PendingRequest {
+  resolve: (value: unknown) => void;
+  reject: (error: Error) => void;
+  timer?: ReturnType<typeof setTimeout>;
+}
+
 let nextRequestId = 1;
 
 /** Build a JSON-RPC connection over `transport`. Pure: no Monaco, no bridge, no globals
-    beyond a shared request-id counter (ids only need per-connection uniqueness). */
-export function createBridgeLspConnection(transport: LspTransport): BridgeLspConnection {
-  const pending = new Map<JsonRpcId, { resolve: (value: unknown) => void; reject: (error: Error) => void }>();
+    beyond a shared request-id counter (ids only need per-connection uniqueness).
+    `requestTimeoutMs` bounds how long a request waits for its response. */
+export function createBridgeLspConnection(
+  transport: LspTransport,
+  requestTimeoutMs: number = DEFAULT_REQUEST_TIMEOUT_MS
+): BridgeLspConnection {
+  const pending = new Map<JsonRpcId, PendingRequest>();
   const notificationHandlers = new Map<string, (params: unknown) => void>();
   const requestHandlers = new Map<string, (params: unknown) => unknown>();
   let disposed = false;
+
+  /** Remove a pending request and clear its timeout, returning it so the caller settles it. */
+  const take = (id: JsonRpcId): PendingRequest | undefined => {
+    const entry = pending.get(id);
+    if (entry === undefined) {
+      return undefined;
+    }
+    if (entry.timer !== undefined) {
+      clearTimeout(entry.timer);
+    }
+    pending.delete(id);
+    return entry;
+  };
 
   const unsubscribe = transport.onMessage((raw) => {
     if (raw === null || typeof raw !== "object") {
@@ -76,11 +104,10 @@ export function createBridgeLspConnection(transport: LspTransport): BridgeLspCon
 
     // Response to one of our requests (id, no method).
     if (hasId && !hasMethod) {
-      const entry = pending.get(message.id as JsonRpcId);
+      const entry = take(message.id as JsonRpcId);
       if (entry === undefined) {
         return;
       }
-      pending.delete(message.id as JsonRpcId);
       if (message.error !== undefined) {
         entry.reject(new Error(message.error.message));
       } else {
@@ -133,9 +160,15 @@ export function createBridgeLspConnection(transport: LspTransport): BridgeLspCon
       const id = nextRequestId;
       nextRequestId += 1;
       return new Promise<R>((resolve, reject) => {
-        pending.set(id, { resolve: resolve as (value: unknown) => void, reject });
+        const entry: PendingRequest = { resolve: resolve as (value: unknown) => void, reject };
+        // Bound the wait: a server that starts but never answers must not hang the request.
+        entry.timer = setTimeout(() => {
+          const timedOut = take(id);
+          timedOut?.reject(new Error(`lsp request '${method}' timed out`));
+        }, requestTimeoutMs);
+        pending.set(id, entry);
         // A refused send (bridge denial, backpressure, dead socket) means no response
-        // will ever arrive: fail the request now instead of leaving it pending forever.
+        // will ever arrive: fail the request now instead of leaving it pending.
         void Promise.resolve(
           transport.send(
             params === undefined
@@ -143,9 +176,8 @@ export function createBridgeLspConnection(transport: LspTransport): BridgeLspCon
               : { jsonrpc: "2.0", id, method, params }
           )
         ).catch((cause: unknown) => {
-          if (pending.delete(id)) {
-            reject(cause instanceof Error ? cause : new Error(String(cause)));
-          }
+          const failed = take(id);
+          failed?.reject(cause instanceof Error ? cause : new Error(String(cause)));
         });
       });
     },
@@ -175,6 +207,9 @@ export function createBridgeLspConnection(transport: LspTransport): BridgeLspCon
       disposed = true;
       unsubscribe();
       for (const entry of pending.values()) {
+        if (entry.timer !== undefined) {
+          clearTimeout(entry.timer);
+        }
         entry.reject(new Error("lsp connection disposed"));
       }
       pending.clear();

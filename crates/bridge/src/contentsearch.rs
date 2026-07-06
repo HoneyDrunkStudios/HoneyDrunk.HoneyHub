@@ -12,8 +12,9 @@
 //!
 //! Results are **capped** ([`MAX_CONTENT_MATCHES`] matches / [`MAX_CONTENT_FILES`] files) and the
 //! response flags [`ContentSearchResults::truncated`] when a cap was hit — matches are never
-//! silently dropped without saying so. Spawning `rg` is a one-shot, non-interactive read; it adds
-//! no exec exception and does not touch the ADR-0096/0103 check/exec boundary.
+//! silently dropped without saying so. Spawning `rg` is a one-shot, non-interactive read of the
+//! same allowlisted roots `read_file` already exposes; it adds no exec exception and stays within
+//! the ADR-0090 read posture (it is not one of the ADR-0096 named-action exec surfaces).
 
 use crate::adapter::BridgeError;
 use crate::backend_catalog::resolve_program;

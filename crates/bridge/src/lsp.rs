@@ -686,7 +686,10 @@ fn path_allowed(path: &Path, allowlist: &WorkspaceAllowlist) -> bool {
 /// Convert a `file:` URI to a filesystem path (percent-decoded, Windows-drive and UNC
 /// aware). `None` = not a `file:` URI.
 fn file_uri_to_path(uri: &str) -> Option<PathBuf> {
-    if uri.len() < 7 || !uri[..7].eq_ignore_ascii_case("file://") {
+    // Byte-prefix check: a multibyte first char must never panic a str slice. "file://"
+    // is 7 ASCII bytes, so index 7 is a guaranteed char boundary once the prefix matches.
+    let bytes = uri.as_bytes();
+    if bytes.len() < 7 || !bytes[..7].eq_ignore_ascii_case(b"file://") {
         return None;
     }
     let rest = &uri[7..];
@@ -713,15 +716,19 @@ fn file_uri_to_path(uri: &str) -> Option<PathBuf> {
     }
 }
 
-/// Percent-decode a URI path component (bytes, then lossy UTF-8).
+/// Percent-decode a URI path component (bytes, then lossy UTF-8). Operates entirely on
+/// bytes so a malformed or non-ASCII `%` sequence (e.g. `%` before a multibyte char) can
+/// never panic a str slice at a non-char-boundary; an invalid escape is passed through
+/// literally.
 fn percent_decode(input: &str) -> String {
     let bytes = input.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
     let mut index = 0;
     while index < bytes.len() {
         if bytes[index] == b'%' && index + 2 < bytes.len() {
-            if let Ok(byte) = u8::from_str_radix(&input[index + 1..index + 3], 16) {
-                out.push(byte);
+            if let (Some(hi), Some(lo)) = (hex_digit(bytes[index + 1]), hex_digit(bytes[index + 2]))
+            {
+                out.push(hi * 16 + lo);
                 index += 3;
                 continue;
             }
@@ -730,6 +737,16 @@ fn percent_decode(input: &str) -> String {
         index += 1;
     }
     String::from_utf8_lossy(&out).into_owned()
+}
+
+/// Value of one ASCII hex digit byte (0-9, a-f, A-F), or `None` for any other byte.
+fn hex_digit(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
 }
 
 /// Prefix `message` with an LSP `Content-Length` header framing its UTF-8 JSON body.
@@ -953,6 +970,29 @@ mod tests {
         // Non-file schemes carry no filesystem authority.
         assert_eq!(file_uri_to_path("untitled:Untitled-1"), None);
         assert_eq!(file_uri_to_path("https://example.com/x"), None);
+    }
+
+    #[test]
+    fn malformed_and_non_ascii_uris_never_panic() {
+        // Regression: the prefix check and percent decoder must operate on bytes so a
+        // multibyte char or a truncated/invalid % escape can never slice a &str at a
+        // non-char-boundary (which would panic the LSP task and wedge the channel).
+        //
+        // A multibyte char inside the first 7 bytes (would have panicked `uri[..7]`).
+        assert_eq!(file_uri_to_path("fil\u{00e9}://x"), None);
+        assert_eq!(file_uri_to_path("\u{1f600}\u{1f600}"), None);
+        // A `%` immediately before a multibyte char (would have panicked the str slice).
+        assert_eq!(
+            file_uri_to_path("file:///home/%\u{00e9}oleg/lib.rs"),
+            Some(PathBuf::from("/home/%\u{00e9}oleg/lib.rs"))
+        );
+        // A truncated escape at end of input, and a non-hex escape, pass through literally.
+        assert_eq!(percent_decode("abc%"), "abc%".to_string());
+        assert_eq!(percent_decode("abc%2"), "abc%2".to_string());
+        assert_eq!(percent_decode("a%ZZb"), "a%ZZb".to_string());
+        assert_eq!(percent_decode("%41%42"), "AB".to_string());
+        // A percent escape decoding to bytes that form a multibyte char round-trips.
+        assert_eq!(percent_decode("%C3%A9"), "\u{00e9}".to_string());
     }
 
     #[test]
