@@ -460,7 +460,7 @@ async fn handle_command(
     // behind a backend run (or the 80ms poll loop) holding that lock, and a stdin write must
     // not wedge it (ADR-0102). Start still goes through the main match: it gates the root.
     if matches!(
-        command,
+        &command,
         ClientCommand::LspSend { .. } | ClientCommand::LspStop { .. }
     ) {
         let result = handle_lsp_command(host, command).await;

@@ -446,18 +446,16 @@ pub enum ServerFrameAction {
 
 /// Filter a server-to-client LSP frame to the workspace allowlist (ADR-0102 D-G):
 ///
-/// - out-of-root array entries (locations, watch registrations, code actions whose edit
-///   names an out-of-root file) are removed and command payloads stripped;
-/// - server-initiated `workspace/applyEdit` is **denied by default**: every such request
-///   gets a synthesized `applied: false` reply (mutation carries operator intent only via
-///   the write_file save path; operator-initiated WorkspaceEdit RESPONSES still flow, as
-///   buffer-edit proposals);
-/// - a denied `window/showDocument` gets a `success: false` reply (non-file and
-///   out-of-root targets are never auto-opened);
+/// - a server-initiated **request** (id + method) is answered CENTRALLY by the host and
+///   never forwarded, so a device-wide broadcast cannot make multiple cockpits answer one
+///   request with duplicate ids: configuration gets host-owned null items, `applyEdit` is
+///   denied (`applied: false`), `showDocument` is declined (`success: false`, not
+///   auto-opened in v1), and every other request gets a generic accept (null);
+/// - in a forwarded **response** or **notification**, out-of-root array entries (locations,
+///   document links, code actions whose edit names an out-of-root file) are removed and
+///   command-only code actions / code lenses are dropped whole;
 /// - a response left naming an out-of-root target gets a null `result` (dropping a
-///   response outright would hang the client's request);
-/// - any other denied request is answered with a JSON-RPC error; a denied notification
-///   is dropped.
+///   response outright would hang the client's request); a dirty notification is dropped.
 pub fn filter_server_message(
     mut message: Value,
     allowlist: &WorkspaceAllowlist,
@@ -468,77 +466,51 @@ pub fn filter_server_message(
         .map(str::to_string);
     let id = message.get("id").cloned();
 
-    // window/showDocument can steer the editor (or a browser) anywhere; only an in-root
-    // file target may pass. External (http/https) targets are never auto-opened.
-    if method.as_deref() == Some("window/showDocument") {
-        let target = message
-            .get("params")
-            .and_then(|params| params.get("uri"))
-            .and_then(Value::as_str);
-        let allowed = target.is_some_and(|uri| {
-            file_uri_to_path(uri).is_some_and(|path| path_allowed(&path, allowlist))
-        });
-        if !allowed {
-            return match id {
-                Some(id) => ServerFrameAction::Reply(serde_json::json!({
-                    "jsonrpc": "2.0", "id": id, "result": { "success": false }
-                })),
-                None => ServerFrameAction::Drop,
-            };
-        }
-    }
-
-    // workspace/configuration is the server asking the CLIENT for settings; configuration
-    // is host-owned (ADR-0102 D-G), so the host answers from its own per-server table
-    // (empty at v1: one null per requested item, the protocol's "no setting" value) and
-    // the request never reaches an opaque client payload.
-    if method.as_deref() == Some("workspace/configuration") {
-        return match id {
-            Some(id) => {
+    // A server-initiated REQUEST (both id and method present) is answered CENTRALLY by the
+    // host and never forwarded. `lsp_message` is broadcast device-wide, so forwarding a
+    // request would make every connected cockpit answer it with the same JSON-RPC id,
+    // sending duplicate/conflicting responses to one server. The host answers exactly once.
+    if let (Some(id), Some(method)) = (&id, method.as_deref()) {
+        let result = match method {
+            // Configuration is host-owned (ADR-0102 D-G): one null per requested item (the
+            // protocol's "no setting" value), never an opaque client payload.
+            "workspace/configuration" => {
                 let count = message
                     .pointer("/params/items")
                     .and_then(Value::as_array)
                     .map_or(0, Vec::len);
-                ServerFrameAction::Reply(serde_json::json!({
-                    "jsonrpc": "2.0", "id": id,
-                    "result": vec![Value::Null; count]
-                }))
+                Value::Array(vec![Value::Null; count])
             }
-            None => ServerFrameAction::Drop,
+            // Server-initiated edits are denied (ADR-0102 D-G): mutation is operator-intent
+            // only, via the ADR-0097 write_file save path. Operator-initiated WorkspaceEdit
+            // RESPONSES (rename / code action) still flow as buffer proposals (below).
+            "workspace/applyEdit" => serde_json::json!({
+                "applied": false,
+                "failureReason": "HoneyHub denies server-initiated edits (ADR-0102 D-G): \
+                                  edits flow as responses to operator-initiated requests \
+                                  and persist only through write_file"
+            }),
+            // HoneyHub does not auto-open server-requested documents in v1 (a
+            // multi-cockpit "which editor opens it" question), so the request is honestly
+            // declined rather than steering an out-of-root or ambiguous target.
+            "window/showDocument" => serde_json::json!({ "success": false }),
+            // Every other server request (registerCapability, unregisterCapability,
+            // workDoneProgress/create, showMessageRequest, ...) gets a generic accept:
+            // dynamic registrations and server prompts are not honored per-client, keeping
+            // the host the single authority for server-request answers.
+            _ => Value::Null,
         };
+        return ServerFrameAction::Reply(serde_json::json!({
+            "jsonrpc": "2.0", "id": id, "result": result
+        }));
     }
 
-    // client/registerCapability can register `workspace/didChangeWatchedFiles` watchers
-    // whose glob patterns name paths to watch. A glob outside the allowlisted root would
-    // ask the editor to watch files the bridge never exposed (ADR-0102 D-G), so prune any
-    // out-of-root watcher before the registration is forwarded. The remaining URI-keyed
-    // fields still go through `scrub` below.
-    if method.as_deref() == Some("client/registerCapability") {
-        prune_watched_file_registrations(&mut message, allowlist);
-    }
-
-    // Server-initiated workspace/applyEdit is denied by default (ADR-0102 D-G): a
-    // subprocess-initiated file-mutation trigger carries no operator intent, and mutation
-    // is ADR-0097's domain. Operator-initiated WorkspaceEdits (rename / code-action
-    // RESPONSES) still reach the editor as buffer-edit proposals and persist only through
-    // the write_file save path.
-    if method.as_deref() == Some("workspace/applyEdit") {
-        return match id {
-            Some(id) => ServerFrameAction::Reply(serde_json::json!({
-                "jsonrpc": "2.0", "id": id, "result": {
-                    "applied": false,
-                    "failureReason": "HoneyHub denies server-initiated edits (ADR-0102 \
-                                      D-G): edits flow as responses to operator-initiated \
-                                      requests and persist only through write_file"
-                }
-            })),
-            None => ServerFrameAction::Drop,
-        };
-    }
-
+    // From here the frame is a NOTIFICATION (method, no id) or a RESPONSE (id, no method).
     if scrub(&mut message, allowlist) {
         return ServerFrameAction::Forward(message);
     }
+    // A response left naming an out-of-root target nulls its result (dropping it would hang
+    // the client's request); a dirty notification is dropped.
     let is_response = id.is_some() && method.is_none();
     if is_response {
         if let Value::Object(map) = &mut message {
@@ -546,17 +518,7 @@ pub fn filter_server_message(
         }
         return ServerFrameAction::Forward(message);
     }
-    match id {
-        // A denied server request other than the shapes above still gets an answer so the
-        // server never hangs on it.
-        Some(id) => ServerFrameAction::Reply(serde_json::json!({
-            "jsonrpc": "2.0", "id": id, "error": {
-                "code": -32600,
-                "message": "denied by the HoneyHub LSP URI boundary (ADR-0102 D-G)"
-            }
-        })),
-        None => ServerFrameAction::Drop,
-    }
+    ServerFrameAction::Drop
 }
 
 /// Depth-first search for the first URI that resolves outside every allowlisted root. Only
@@ -603,9 +565,11 @@ fn first_denied_uri<'a>(value: &'a Value, allowlist: &WorkspaceAllowlist) -> Opt
 fn scrub(value: &mut Value, allowlist: &WorkspaceAllowlist) -> bool {
     match value {
         Value::Array(items) => {
-            // A bare `Command` element (legacy code-action shape) is meaningless once its
-            // execution path is refused — drop it with the out-of-root entries.
-            items.retain_mut(|item| !is_bare_command(item) && scrub(item, allowlist));
+            // A command-only code action / code lens is meaningless once its command is
+            // refused, so it is dropped WHOLE (not stripped to an inert `{ title: ... }`
+            // husk) along with any out-of-root entries. A completion item that also carries
+            // a command survives with the command stripped (it still inserts text).
+            items.retain_mut(|item| !is_command_only_actionable(item) && scrub(item, allowlist));
             true
         }
         Value::Object(map) => {
@@ -659,86 +623,27 @@ fn scrub(value: &mut Value, allowlist: &WorkspaceAllowlist) -> bool {
     }
 }
 
-/// Prune out-of-root watchers from a `client/registerCapability` frame's
-/// `workspace/didChangeWatchedFiles` registrations (ADR-0102 D-G): a watcher whose glob
-/// names paths outside every allowlisted root is removed, so the server can never ask the
-/// editor to watch files the bridge did not expose. In-root and workspace-relative
-/// watchers are kept.
-fn prune_watched_file_registrations(message: &mut Value, allowlist: &WorkspaceAllowlist) {
-    let Some(registrations) = message
-        .pointer_mut("/params/registrations")
-        .and_then(Value::as_array_mut)
-    else {
-        return;
-    };
-    for registration in registrations.iter_mut() {
-        if registration.get("method").and_then(Value::as_str)
-            != Some("workspace/didChangeWatchedFiles")
-        {
-            continue;
-        }
-        if let Some(watchers) = registration
-            .pointer_mut("/registerOptions/watchers")
-            .and_then(Value::as_array_mut)
-        {
-            watchers.retain(|watcher| watcher_in_root(watcher, allowlist));
-        }
-    }
-}
-
-/// Whether a `FileSystemWatcher`'s glob stays inside an allowlisted root. A relative string
-/// glob (`**/*.rs`) is workspace-relative and kept; an absolute string glob is judged by
-/// its non-glob path prefix; a `RelativePattern` object is judged by its `baseUri`.
-fn watcher_in_root(watcher: &Value, allowlist: &WorkspaceAllowlist) -> bool {
-    let Some(glob) = watcher.get("globPattern") else {
-        return true; // no glob to bound; nothing to watch out-of-root
-    };
-    match glob {
-        // RelativePattern { baseUri, pattern }: the base is what anchors it to the fs.
-        Value::Object(pattern) => match pattern.get("baseUri").and_then(Value::as_str) {
-            Some(base) => uri_allowed(base, allowlist),
-            None => true,
-        },
-        Value::String(pattern) => {
-            // A relative glob is anchored to the (already in-root) workspace and is kept.
-            // Only a glob anchored at a filesystem root can escape, so detect that
-            // cross-platform (a leading `/` or `\\`, or a Windows `X:` drive prefix) rather
-            // than via `Path::is_absolute`, which is false for a Unix-rooted glob on Windows
-            // and vice-versa. An anchored glob is judged by its literal non-glob path prefix.
-            if !is_fs_anchored(pattern) {
-                return true;
-            }
-            let prefix: PathBuf = Path::new(pattern)
-                .components()
-                .take_while(|component| {
-                    let text = component.as_os_str().to_string_lossy();
-                    !text.contains(['*', '?', '{', '['])
-                })
-                .collect();
-            path_allowed(&prefix, allowlist)
-        }
-        _ => true,
-    }
-}
-
-/// Whether a glob string is anchored at a filesystem root (so it can escape the workspace),
-/// judged cross-platform: a leading `/` or `\`, or a `X:` Windows drive prefix.
-fn is_fs_anchored(pattern: &str) -> bool {
-    let bytes = pattern.as_bytes();
-    matches!(bytes.first(), Some(b'/' | b'\\'))
-        || (bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':')
-}
-
-/// A bare `Command` literal (`{"title": ..., "command": "server.cmd"}`) surfaced as an
-/// array element — the legacy code-action shape.
-fn is_bare_command(value: &Value) -> bool {
-    value.get("title").is_some() && value.get("command").is_some_and(Value::is_string)
-}
-
 /// A command payload under a `command` key: either a `Command` object or a plain
 /// command-identifier string.
 fn is_command_payload(value: &Value) -> bool {
     value.is_string() || (value.is_object() && value.get("command").is_some_and(Value::is_string))
+}
+
+/// Whether an array entry is an **inert command-only actionable** (a code action or code
+/// lens whose only effect was a command) that must be dropped WHOLE once commands are
+/// denied (ADR-0102 D-G), rather than stripped down to a dead `{ title: ... }` husk. It has
+/// a command payload, no `edit` and no `data` left to do work, and is an action/lens (has a
+/// `title` or a `range`), not a completion item (which carries a `label` and keeps working
+/// with its command stripped).
+fn is_command_only_actionable(value: &Value) -> bool {
+    let Value::Object(map) = value else {
+        return false;
+    };
+    map.get("command").is_some_and(is_command_payload)
+        && !map.contains_key("edit")
+        && !map.contains_key("data")
+        && map.get("label").is_none()
+        && (map.contains_key("title") || map.contains_key("range"))
 }
 
 /// Whether a URI may cross the wire, SERVER to client: a `file:` URI must resolve inside an
@@ -1269,8 +1174,9 @@ mod tests {
             ServerFrameAction::Drop
         );
 
-        // showDocument: out-of-root and non-file (external) targets never auto-open; the
-        // server request is answered success: false rather than left hanging.
+        // showDocument is answered CENTRALLY (host, once) and never forwarded; v1 does not
+        // auto-open server-requested documents, so both external and in-root targets get
+        // success: false rather than a broadcast that multiple cockpits would each answer.
         let external = serde_json::json!({
             "jsonrpc": "2.0", "id": 9, "method": "window/showDocument",
             "params": { "uri": "https://example.com/docs" }
@@ -1286,7 +1192,7 @@ mod tests {
         });
         assert!(matches!(
             filter_server_message(in_root, &allowlist),
-            ServerFrameAction::Forward(_)
+            ServerFrameAction::Reply(_)
         ));
     }
 
@@ -1318,34 +1224,75 @@ mod tests {
     }
 
     #[test]
-    fn watched_file_registrations_are_pruned_to_allowlisted_roots() {
-        let (allowlist, inside_uri, outside_uri) = boundary_fixture();
-        // client/registerCapability registering didChangeWatchedFiles: watchers whose glob
-        // reaches out-of-root (an absolute string glob, or a RelativePattern baseUri) are
-        // pruned; relative and in-root watchers survive.
+    fn server_requests_are_answered_centrally_never_forwarded() {
+        let (allowlist, _, _) = boundary_fixture();
+        // A device-wide broadcast would make every cockpit answer one server request with
+        // the same id (duplicate/conflicting responses). The host answers each request
+        // ONCE and never forwards it. registerCapability + an arbitrary server request get
+        // a generic accept (null); configuration gets host-owned null items.
         let register = serde_json::json!({
             "jsonrpc": "2.0", "id": 21, "method": "client/registerCapability",
             "params": { "registrations": [ {
                 "id": "r1", "method": "workspace/didChangeWatchedFiles",
-                "registerOptions": { "watchers": [
-                    { "globPattern": "**/*.rs" },
-                    { "globPattern": "/etc/**/*.conf" },
-                    { "globPattern": { "baseUri": inside_uri, "pattern": "**/*.toml" } },
-                    { "globPattern": { "baseUri": outside_uri, "pattern": "**/*.toml" } }
-                ] }
+                "registerOptions": { "watchers": [ { "globPattern": "/etc/**/*.conf" } ] }
             } ] }
         });
-        let ServerFrameAction::Forward(filtered) = filter_server_message(register, &allowlist)
+        let ServerFrameAction::Reply(reply) = filter_server_message(register, &allowlist) else {
+            panic!("expected Reply (answered centrally), never Forward");
+        };
+        assert_eq!(reply.get("id"), Some(&serde_json::json!(21)));
+        assert_eq!(reply.get("result"), Some(&Value::Null));
+
+        let config = serde_json::json!({
+            "jsonrpc": "2.0", "id": 22, "method": "workspace/configuration",
+            "params": { "items": [ { "section": "rust-analyzer" }, { "section": "files" } ] }
+        });
+        let ServerFrameAction::Reply(reply) = filter_server_message(config, &allowlist) else {
+            panic!("expected Reply");
+        };
+        assert_eq!(reply.get("result"), Some(&serde_json::json!([null, null])));
+
+        // A generic server request (workDoneProgress/create) also gets a null accept.
+        let progress = serde_json::json!({
+            "jsonrpc": "2.0", "id": 23, "method": "window/workDoneProgress/create",
+            "params": { "token": "t1" }
+        });
+        assert!(matches!(
+            filter_server_message(progress, &allowlist),
+            ServerFrameAction::Reply(_)
+        ));
+    }
+
+    #[test]
+    fn command_only_code_actions_are_dropped_whole_completions_survive() {
+        let (allowlist, inside, _) = boundary_fixture();
+        // A codeAction RESPONSE array: a command-only action (title + command, no edit) is
+        // dropped whole (not left as an inert { title }); an edit-bearing action keeps its
+        // edit and loses its command; a completion-shaped item (has `label`) keeps working.
+        let response = serde_json::json!({
+            "jsonrpc": "2.0", "id": 30,
+            "result": [
+                { "title": "Run", "command": { "title": "Run", "command": "server.run" } },
+                { "title": "Fix", "edit": { "changes": { (inside.clone()): [] } },
+                  "command": "server.fix" },
+                { "label": "foo", "command": { "command": "server.after" } }
+            ]
+        });
+        let ServerFrameAction::Forward(filtered) = filter_server_message(response, &allowlist)
         else {
             panic!("expected Forward");
         };
-        let watchers = filtered
-            .pointer("/params/registrations/0/registerOptions/watchers")
+        let result = filtered
+            .get("result")
             .and_then(Value::as_array)
-            .expect("watchers");
-        // Kept: the relative glob and the in-root baseUri. Dropped: the absolute /etc glob
-        // and the out-of-root baseUri.
-        assert_eq!(watchers.len(), 2);
+            .expect("array");
+        assert_eq!(result.len(), 2); // the command-only action is gone
+        assert_eq!(result[0].get("title").and_then(Value::as_str), Some("Fix"));
+        assert!(result[0].get("edit").is_some());
+        assert!(result[0].get("command").is_none());
+        // The completion item survives (kept by its label), command stripped.
+        assert_eq!(result[1].get("label").and_then(Value::as_str), Some("foo"));
+        assert!(result[1].get("command").is_none());
     }
 
     #[test]
