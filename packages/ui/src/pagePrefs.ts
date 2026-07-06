@@ -18,6 +18,7 @@ export const TOGGLEABLE_PAGES: { view: string; label: string }[] = [
   { view: "jobs", label: "Jobs" },
   { view: "observe", label: "Observe" },
   { view: "repositories", label: "Repositories" },
+  { view: "terminal", label: "Terminal" },
   { view: "spend", label: "Spend" },
   { view: "coaching", label: "Coaching" },
   { view: "agents", label: "Agents" }

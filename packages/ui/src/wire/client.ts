@@ -267,6 +267,20 @@ export interface WireClient {
   lspSend(root: string, languageId: string, message: unknown): Promise<void>;
   /** **LSP**: stop the language server for (`languageId`, `root`). Resolves on the ack. */
   lspStop(root: string, languageId: string): Promise<void>;
+  /** **Terminal** (ADR-0103): open a PTY-backed interactive shell in the allowlisted `root`,
+      sized `cols` x `rows`. Desktop-local-only: a relay connection is refused with a
+      `terminal_denied` error. `openId` is a correlation nonce echoed on the broadcast
+      `terminal_opened` event so the caller adopts the session that answers ITS request; shell
+      output then streams as `terminal_output` events via `subscribe`. */
+  openTerminal(root: string, cols: number, rows: number, openId: string): Promise<void>;
+  /** **Terminal**: feed keystrokes (`data`, base64 of the raw bytes) to an open session's
+      stdin. Resolves on the ack; an unknown session rejects with `terminal_not_open`. */
+  sendTerminalInput(sessionId: string, data: string): Promise<void>;
+  /** **Terminal**: resize an open session's PTY so the shell and any TUI reflow. */
+  resizeTerminal(sessionId: string, cols: number, rows: number): Promise<void>;
+  /** **Terminal**: close an open session, tree-killing the shell. The host answers with a
+      final `terminal_closed` event via `subscribe`. Idempotent. */
+  closeTerminal(sessionId: string): Promise<void>;
   /** Subscribe to bridge events; returns an unsubscribe function. */
   subscribe(handler: WireEventHandler): () => void;
 }

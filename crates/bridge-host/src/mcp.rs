@@ -271,7 +271,7 @@ mod tests {
         StartRunRequest, WorkspaceAllowlist,
     };
     use rmcp::model::CallToolResult;
-    use std::collections::HashSet;
+    use std::collections::{HashMap, HashSet};
     use std::sync::{Arc, Mutex as StdMutex};
     use tokio::sync::{broadcast, Mutex};
 
@@ -361,6 +361,7 @@ mod tests {
             BackendAllowlist::new(vec![AgentBackend::ClaudeLocal, AgentBackend::CodexLocal]),
         );
         let (events_tx, _rx) = broadcast::channel(16);
+        let (terminal_reaper, _reaped) = tokio::sync::mpsc::unbounded_channel();
         let host = Arc::new(Host {
             runtime: Mutex::new(runtime),
             active_runs: Mutex::new(HashSet::new()),
@@ -371,6 +372,9 @@ mod tests {
             events: events_tx,
             watcher: Mutex::new(None),
             dispatch: Some(governor.clone()),
+            active_terminals: Mutex::new(HashMap::new()),
+            terminal_reaper,
+            next_conn_id: std::sync::atomic::AtomicU64::new(0),
         });
         let server = DispatchAgentServer::new(host.clone(), governor);
         (server, started, host)
