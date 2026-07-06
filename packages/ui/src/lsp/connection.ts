@@ -71,15 +71,30 @@ interface PendingRequest {
   timer?: ReturnType<typeof setTimeout>;
 }
 
+/** A process-local counter for the no-Web-Crypto fallback prefix. These ids need only be
+    DISTINCT across connections, never unpredictable, so a monotonic counter is sufficient
+    (and avoids `Math.random`, which is not a suitable source and is flagged as such). */
+let connectionSeq = 0;
+
 /** A per-connection-unique id prefix. Language servers can be SHARED across cockpit
     clients (device-wide `lsp_message` broadcast), and each client allocates request ids
     independently: without a unique prefix, client A's response to request `5` would
     resolve client B's own pending `5`, cross-wiring hovers/completions/rename edits. A
     per-connection prefix means a foreign response's id is never in this connection's
-    pending map, so it is ignored. */
+    pending map, so it is ignored. Uses Web Crypto where available; the fallback is a
+    monotonic per-load counter (uniqueness, not unpredictability, is what matters). */
 function connectionIdPrefix(): string {
-  const uuid = globalThis.crypto?.randomUUID?.();
-  return uuid ?? `c${Math.random().toString(36).slice(2)}${Date.now().toString(36)}`;
+  const webCrypto = globalThis.crypto;
+  if (webCrypto?.randomUUID) {
+    return webCrypto.randomUUID();
+  }
+  if (webCrypto?.getRandomValues) {
+    const bytes = new Uint8Array(16);
+    webCrypto.getRandomValues(bytes);
+    return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+  }
+  connectionSeq += 1;
+  return `c${connectionSeq}-${Date.now().toString(36)}`;
 }
 
 /** Build a JSON-RPC connection over `transport`. Pure: no Monaco, no bridge, no globals.

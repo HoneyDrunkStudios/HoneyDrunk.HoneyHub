@@ -72,6 +72,68 @@ describe("toMonacoCompletionList", () => {
   it("returns an empty list for a null result", () => {
     expect(toMonacoCompletionList(fakeMonaco(), null, new FakeRange(1, 1, 1, 1) as never).suggestions).toEqual([]);
   });
+
+  it("carries detail/sortText/filterText, string and MarkupContent documentation, insert-shaped edits, and isIncomplete", () => {
+    const monaco = fakeMonaco();
+    const defaultRange = new FakeRange(1, 1, 1, 1) as unknown as import("monaco-editor").IRange;
+    const list = toMonacoCompletionList(
+      monaco,
+      {
+        isIncomplete: true,
+        items: [
+          {
+            label: "withDocs",
+            kind: 7, // LSP Class
+            detail: "a class",
+            sortText: "0001",
+            filterText: "withDocs",
+            documentation: { kind: "markdown", value: "**md doc**" }
+          },
+          {
+            label: "stringDoc",
+            documentation: "plain doc",
+            insertText: "stringDoc()"
+          },
+          {
+            label: "insertEdit",
+            textEdit: {
+              newText: "inserted",
+              insert: { start: { line: 0, character: 1 }, end: { line: 0, character: 3 } },
+              replace: { start: { line: 0, character: 1 }, end: { line: 0, character: 6 } }
+            }
+          }
+        ]
+      },
+      defaultRange
+    );
+    expect(list.incomplete).toBe(true);
+    const [docs, str, ins] = list.suggestions;
+    expect(docs?.detail).toBe("a class");
+    expect(docs?.sortText).toBe("0001");
+    expect(docs?.filterText).toBe("withDocs");
+    expect((docs?.documentation as { value: string }).value).toBe("**md doc**");
+    expect(docs?.kind).toBe(monaco.languages.CompletionItemKind.Class);
+    // A string documentation passes through as a string; insertText falls back to itself.
+    expect(str?.documentation).toBe("plain doc");
+    expect(str?.insertText).toBe("stringDoc()");
+    // An `insert`-shaped edit uses the insert range.
+    expect(ins?.insertText).toBe("inserted");
+    expect((ins?.range as FakeRange).startColumn).toBe(2);
+  });
+
+  it("falls back to the default completion kind for an absent or unmapped kind", () => {
+    const monaco = fakeMonaco();
+    const list = toMonacoCompletionList(
+      monaco,
+      // no kind; LSP Variable (6, in the fake); LSP Constructor (4, absent from the fake).
+      [{ label: "x" }, { label: "y", kind: 6 }, { label: "z", kind: 4 }],
+      new FakeRange(1, 1, 1, 1) as never
+    );
+    // No kind -> the default (Text); a mapped kind resolves; an unmapped kind -> Text.
+    expect(list.suggestions[0]?.kind).toBe(monaco.languages.CompletionItemKind.Text);
+    expect(list.suggestions[1]?.kind).toBe(monaco.languages.CompletionItemKind.Variable);
+    expect(list.suggestions[2]?.kind).toBe(monaco.languages.CompletionItemKind.Text);
+  });
 });
 
 describe("toMonacoHover", () => {

@@ -880,8 +880,16 @@ function matchLength(
   if (!regex) {
     return [...trimmed].length;
   }
+  // Regex highlighting only: the operator explicitly enabled regex-search mode, so the
+  // pattern is their own, matched against a single already-capped line (<= the bridge's
+  // MAX_LINE_TEXT_CHARS) in their own browser; an overlong pattern is skipped as a cheap
+  // catastrophic-backtracking guard, and a bad pattern is caught below.
+  if (trimmed.length > MAX_HIGHLIGHT_PATTERN_LEN) {
+    return 0;
+  }
   try {
-    const sticky = new RegExp(trimmed, `${caseSensitive ? "" : "i"}y`);
+    // eslint-disable-next-line security/detect-non-literal-regexp -- operator's own regex, capped line, self-scoped (see above)
+    const sticky = new RegExp(trimmed, `${caseSensitive ? "" : "i"}y`); // NOSONAR: user-intended regex-search feature on own local files
     const sub = [...text].slice(start).join("");
     sticky.lastIndex = 0;
     const found = sticky.exec(sub);
@@ -890,6 +898,10 @@ function matchLength(
     return 0;
   }
 }
+
+/** Longest regex-search pattern honored for highlighting; a longer one is skipped as a
+    cheap guard against a pathological backtracking pattern. */
+const MAX_HIGHLIGHT_PATTERN_LEN = 200;
 
 /** Split a matched line into the text before the hit, the hit itself, and the text after — so the
     hit can be wrapped in a `<mark>`. Works in code points so multi-byte characters stay intact. */
