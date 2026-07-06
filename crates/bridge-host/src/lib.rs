@@ -59,8 +59,13 @@ struct Host {
     /// vendor TUI, so repeated clicks or multiple cockpits must not stack them).
     active_probes: Mutex<std::collections::HashSet<String>>,
     /// Live language servers, one per (canonical root, language) — long-lived supervised
-    /// subprocesses reused across files, killed on stop / root-removal / shutdown (ADR-0102).
+    /// subprocesses reused across files, killed on stop / root-removal / last-client
+    /// disconnect / shutdown (ADR-0102 D-C).
     active_lsp: Mutex<HashMap<LspKey, honeyhub_bridge::LspServer>>,
+    /// Connected WebSocket clients. When the LAST one disconnects, every running language
+    /// server is retired (ADR-0102 D-C: a server never outlives the cockpit it serves);
+    /// a second paired device keeps them alive.
+    connected_clients: std::sync::atomic::AtomicUsize,
     events: broadcast::Sender<BridgeEvent>,
     /// The live filesystem watcher (the recommended OS-native backend) plus the roots it is
     /// currently watching. Re-pointed whenever the workspace allowlist changes. `None` until
@@ -135,6 +140,7 @@ pub async fn serve(
         active_checks: Mutex::new(std::collections::HashSet::new()),
         active_probes: Mutex::new(std::collections::HashSet::new()),
         active_lsp: Mutex::new(HashMap::new()),
+        connected_clients: std::sync::atomic::AtomicUsize::new(0),
         events: events_tx,
         watcher: Mutex::new(None),
         dispatch: dispatch.clone(),
@@ -345,6 +351,8 @@ async fn poll_active_runs(host: &Arc<Host>) {
 }
 
 async fn handle_socket(socket: WebSocket, host: Arc<Host>) {
+    host.connected_clients
+        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     let (mut sink, mut stream) = socket.split();
     let mut events_rx = host.events.subscribe();
     let (outbound_tx, mut outbound_rx) = mpsc::channel::<WireFrame>(256);
@@ -417,6 +425,28 @@ async fn handle_socket(socket: WebSocket, host: Arc<Host>) {
     }
 
     writer.abort();
+
+    // ADR-0102 D-C: a language server never outlives the cockpit it serves. When the LAST
+    // client disconnects, retire every running server (a second connected device keeps them
+    // alive; a reconnecting cockpit restarts servers on demand). Drop happens off the async
+    // worker: it kills the process tree and joins the pump threads.
+    if host
+        .connected_clients
+        .fetch_sub(1, std::sync::atomic::Ordering::SeqCst)
+        == 1
+    {
+        let orphans: Vec<honeyhub_bridge::LspServer> = {
+            let mut servers = host.active_lsp.lock().await;
+            servers.drain().map(|(_, server)| server).collect()
+        };
+        if !orphans.is_empty() {
+            eprintln!(
+                "[lsp] last cockpit disconnected; retiring {} language server(s)",
+                orphans.len()
+            );
+            tokio::task::spawn_blocking(move || drop(orphans));
+        }
+    }
 }
 
 async fn handle_command(
