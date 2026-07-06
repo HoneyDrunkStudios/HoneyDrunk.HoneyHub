@@ -1133,14 +1133,18 @@ async fn handle_lsp_command(
             language_id,
             message,
         } => {
+            let mut message = message;
             // ADR-0102 D-G: the proxy is a URI-validating gateway, not a dumb pipe.
-            // Command-bearing methods are denied and every file URI in the frame must
-            // resolve inside an allowlisted root, or the frame is refused, not forwarded.
+            // Command- and configuration-bearing methods are denied, client
+            // initializationOptions are stripped (configuration is host-owned), and every
+            // file URI in the frame must resolve inside an allowlisted root, or the frame
+            // is refused, not forwarded.
             let allowlist = {
                 let runtime = host.runtime.lock().await;
                 honeyhub_bridge::WorkspaceAllowlist::new(runtime.workspace_roots())
             };
-            if let Err(error) = honeyhub_bridge::lsp::validate_client_message(&message, &allowlist)
+            if let Err(error) =
+                honeyhub_bridge::lsp::sanitize_client_message(&mut message, &allowlist)
             {
                 // Denial audit line, so a refused frame is diagnosable from the console.
                 eprintln!(

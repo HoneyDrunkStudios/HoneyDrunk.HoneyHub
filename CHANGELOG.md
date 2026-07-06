@@ -24,7 +24,12 @@ user-centered Jobs page.
   partially applied; an out-of-root or non-file showDocument is refused), and
   command-bearing LSP methods are denied by default
   (`workspace/executeCommand` refused, command payloads stripped from code actions and
-  code lenses). Every server spawn and denial is audit-logged on the host console.
+  code lenses). LSP configuration is host-owned too: client `initializationOptions` are
+  stripped, `workspace/didChangeConfiguration` is refused, and the host itself answers a
+  server's `workspace/configuration` request (settings can carry tool paths and override
+  commands, so an opaque passthrough would be an execution surface). Every server spawn
+  and denial is audit-logged on the host console, and all servers are retired when the
+  last cockpit disconnects.
 
 - **Cost before and after**: the run screen now shows a cost hint before you send (flat-plan
   models show "included"; metered/API models show a floor estimate plus your recent typical/high

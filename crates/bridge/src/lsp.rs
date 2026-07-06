@@ -19,14 +19,19 @@
 //! carry file URIs in both directions that can name paths beyond the spawn root, so the
 //! host enforces the same allowlist boundary on the frames it proxies:
 //!
-//! - **Client to server** ([`validate_client_message`]): command-bearing methods
-//!   (`workspace/executeCommand`) are denied by default, and every file URI in the frame
+//! - **Client to server** ([`sanitize_client_message`]): command-bearing and
+//!   configuration-bearing methods (`workspace/executeCommand`,
+//!   `workspace/didChangeConfiguration`) are denied by default, client
+//!   `initializationOptions` are stripped (configuration is host-owned: settings can
+//!   carry tool paths and override commands), and every file URI in the frame
 //!   (`rootUri`, `workspaceFolders`, `textDocument.uri`, ...) must resolve inside an
 //!   allowlisted workspace root or the frame is refused, not forwarded.
-//! - **Server to client** ([`filter_server_message`]): location results, `applyEdit`
-//!   targets, and file-watch registrations are filtered to allowlisted roots; out-of-root
-//!   or non-file `window/showDocument` requests are dropped; server-defined command
-//!   payloads on code actions / code lenses are stripped (their execution path,
+//! - **Server to client** ([`filter_server_message`]): location results and file-watch
+//!   registrations are filtered to allowlisted roots; an `applyEdit` naming any
+//!   out-of-root target is rejected whole (`applied: false`); out-of-root or non-file
+//!   `window/showDocument` requests are refused; `workspace/configuration` requests are
+//!   answered by the host itself (never an opaque client payload); server-defined
+//!   command payloads on code actions / code lenses are stripped (their execution path,
 //!   `workspace/executeCommand`, is refused anyway).
 //!
 //! Beyond that boundary the payload is not interpreted: the framing layer stays
@@ -350,11 +355,16 @@ impl LspServer {
     }
 }
 
-/// Client-to-server LSP methods denied by default (ADR-0102 D-G): command identifiers and
-/// arguments are server-defined and opaque, so they cannot be URI-validated into safety.
-/// Enabling a specific command is a host-owned allowlisted action, recorded by an ADR
-/// amendment — never a pass-through.
-const DENIED_CLIENT_METHODS: &[&str] = &["workspace/executeCommand"];
+/// Client-to-server LSP methods denied by default (ADR-0102 D-G): command identifiers /
+/// arguments and configuration payloads are server-defined and opaque, and configuration
+/// is behavior-DEFINING for many servers (tool paths, override commands, plugins), so
+/// neither can be validated into safety. Enabling a command or a client-tunable setting
+/// is a host-owned, named, validated surface recorded by an ADR amendment — never a
+/// pass-through.
+const DENIED_CLIENT_METHODS: &[&str] = &[
+    "workspace/executeCommand",
+    "workspace/didChangeConfiguration",
+];
 
 /// JSON keys whose string values name documents or locations in LSP frames. Keyed matching
 /// (rather than scanning every string) keeps document *content* — which may legitimately
@@ -369,23 +379,38 @@ const URI_KEYS: &[&str] = &[
     "oldUri",
 ];
 
-/// Validate a client-to-server LSP frame against the workspace allowlist (ADR-0102 D-G).
-/// A denied method or an out-of-root file URI refuses the whole frame — it is rejected,
-/// not forwarded, and the caller surfaces the denial to the client.
-pub fn validate_client_message(
-    message: &Value,
+/// Validate and sanitize a client-to-server LSP frame against the workspace allowlist
+/// (ADR-0102 D-G). A denied method or an out-of-root file URI refuses the whole frame —
+/// it is rejected, not forwarded, and the caller surfaces the denial to the client.
+/// Configuration is host-owned: client-supplied `initialize.initializationOptions` are
+/// stripped in place (the host's per-server configuration is the only source; none is
+/// defined at v1), because settings can carry tool paths, override commands, and plugins
+/// — an execution surface no URI check can bound.
+pub fn sanitize_client_message(
+    message: &mut Value,
     allowlist: &WorkspaceAllowlist,
 ) -> Result<(), BridgeError> {
-    if let Some(method) = message.get("method").and_then(Value::as_str) {
+    let method = message
+        .get("method")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    if let Some(method) = method.as_deref() {
         if DENIED_CLIENT_METHODS.contains(&method) {
             return Err(BridgeError::new(
                 "lsp_method_denied",
                 format!(
                     "LSP method '{method}' is denied by default (ADR-0102 D-G): commands \
-                     are opaque server-defined actions; enabling one requires a host-owned \
-                     named action"
+                     and configuration are opaque server-defined behavior; enabling one \
+                     requires a host-owned named surface"
                 ),
             ));
+        }
+        if method == "initialize" {
+            if let Some(Value::Object(params)) = message.get_mut("params") {
+                // Host-owned configuration (ADR-0102 D-G): never forward an opaque
+                // client payload that can redefine what the server executes.
+                params.remove("initializationOptions");
+            }
         }
     }
     match first_denied_uri(message, allowlist) {
@@ -450,6 +475,26 @@ pub fn filter_server_message(
                 None => ServerFrameAction::Drop,
             };
         }
+    }
+
+    // workspace/configuration is the server asking the CLIENT for settings; configuration
+    // is host-owned (ADR-0102 D-G), so the host answers from its own per-server table
+    // (empty at v1: one null per requested item, the protocol's "no setting" value) and
+    // the request never reaches an opaque client payload.
+    if method.as_deref() == Some("workspace/configuration") {
+        return match id {
+            Some(id) => {
+                let count = message
+                    .pointer("/params/items")
+                    .and_then(Value::as_array)
+                    .map_or(0, Vec::len);
+                ServerFrameAction::Reply(serde_json::json!({
+                    "jsonrpc": "2.0", "id": id,
+                    "result": vec![Value::Null; count]
+                }))
+            }
+            None => ServerFrameAction::Drop,
+        };
     }
 
     // workspace/applyEdit is an all-or-nothing protocol contract: reject the whole
@@ -908,25 +953,25 @@ mod tests {
     #[test]
     fn client_frames_with_out_of_root_uris_are_refused() {
         let (allowlist, inside, outside) = boundary_fixture();
-        let ok = serde_json::json!({
+        let mut ok = serde_json::json!({
             "jsonrpc": "2.0", "method": "textDocument/hover",
             "params": { "textDocument": { "uri": inside } }
         });
-        assert!(validate_client_message(&ok, &allowlist).is_ok());
+        assert!(sanitize_client_message(&mut ok, &allowlist).is_ok());
 
-        let bad = serde_json::json!({
+        let mut bad = serde_json::json!({
             "jsonrpc": "2.0", "method": "textDocument/didOpen",
             "params": { "textDocument": { "uri": outside, "text": "x" } }
         });
-        let error = validate_client_message(&bad, &allowlist).expect_err("must refuse");
+        let error = sanitize_client_message(&mut bad, &allowlist).expect_err("must refuse");
         assert_eq!(error.code, "lsp_uri_denied");
 
         // Runtime workspace-folder additions are gated the same way (nested arrays).
-        let folders = serde_json::json!({
+        let mut folders = serde_json::json!({
             "jsonrpc": "2.0", "method": "workspace/didChangeWorkspaceFolders",
             "params": { "event": { "added": [ { "uri": outside, "name": "x" } ], "removed": [] } }
         });
-        assert!(validate_client_message(&folders, &allowlist).is_err());
+        assert!(sanitize_client_message(&mut folders, &allowlist).is_err());
     }
 
     #[test]
@@ -934,25 +979,63 @@ mod tests {
         let (allowlist, inside, _) = boundary_fixture();
         // The *content* of a didChange legitimately can contain the text "file:///etc/..." —
         // only URI-keyed fields are judged.
-        let message = serde_json::json!({
+        let mut message = serde_json::json!({
             "jsonrpc": "2.0", "method": "textDocument/didChange",
             "params": {
                 "textDocument": { "uri": inside, "version": 2 },
                 "contentChanges": [ { "text": "let s = \"file:///etc/passwd\";" } ]
             }
         });
-        assert!(validate_client_message(&message, &allowlist).is_ok());
+        assert!(sanitize_client_message(&mut message, &allowlist).is_ok());
     }
 
     #[test]
     fn execute_command_is_denied_by_default() {
         let (allowlist, _, _) = boundary_fixture();
-        let message = serde_json::json!({
+        let mut message = serde_json::json!({
             "jsonrpc": "2.0", "id": 7, "method": "workspace/executeCommand",
             "params": { "command": "rust-analyzer.runSingle", "arguments": [] }
         });
-        let error = validate_client_message(&message, &allowlist).expect_err("must deny");
+        let error = sanitize_client_message(&mut message, &allowlist).expect_err("must deny");
         assert_eq!(error.code, "lsp_method_denied");
+    }
+
+    #[test]
+    fn configuration_surfaces_are_host_owned() {
+        let (allowlist, inside, _) = boundary_fixture();
+        // Client initializationOptions are stripped: configuration is host-owned, and an
+        // opaque payload could redefine what the server executes (tool paths, plugins).
+        let mut init = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "initialize",
+            "params": {
+                "rootUri": inside,
+                "initializationOptions": { "checkOnSave": { "overrideCommand": ["curl", "evil"] } },
+                "capabilities": {}
+            }
+        });
+        assert!(sanitize_client_message(&mut init, &allowlist).is_ok());
+        assert!(init.pointer("/params/initializationOptions").is_none());
+        assert!(init.pointer("/params/capabilities").is_some());
+
+        // didChangeConfiguration is denied outright.
+        let mut change = serde_json::json!({
+            "jsonrpc": "2.0", "method": "workspace/didChangeConfiguration",
+            "params": { "settings": { "anything": true } }
+        });
+        let error = sanitize_client_message(&mut change, &allowlist).expect_err("must deny");
+        assert_eq!(error.code, "lsp_method_denied");
+
+        // A server workspace/configuration request is answered by the HOST (null per
+        // requested item), never forwarded to an opaque client payload.
+        let request = serde_json::json!({
+            "jsonrpc": "2.0", "id": 12, "method": "workspace/configuration",
+            "params": { "items": [ { "section": "rust-analyzer" }, { "section": "files" } ] }
+        });
+        let ServerFrameAction::Reply(reply) = filter_server_message(request, &allowlist) else {
+            panic!("expected Reply");
+        };
+        assert_eq!(reply.get("id"), Some(&serde_json::json!(12)));
+        assert_eq!(reply.get("result"), Some(&serde_json::json!([null, null])));
     }
 
     #[test]
