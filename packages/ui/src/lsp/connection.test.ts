@@ -138,6 +138,26 @@ describe("createBridgeLspConnection", () => {
     expect(() => connection.sendNotification("textDocument/didChange", {})).not.toThrow();
   });
 
+  it("cleans up a request whose transport throws SYNCHRONOUSLY", async () => {
+    // transport.send can throw synchronously (before returning a promise). The request
+    // must still reject and clean up its pending state/timer, and a notification must not
+    // let the synchronous throw escape.
+    const throwing: LspTransport = {
+      send: () => {
+        throw new Error("socket closed");
+      },
+      onMessage: () => () => undefined
+    };
+    const connection = createBridgeLspConnection(throwing);
+    await expect(connection.sendRequest("textDocument/hover")).rejects.toThrow("socket closed");
+    expect(() => connection.sendNotification("textDocument/didChange", {})).not.toThrow();
+    await expect(connection.sendNotificationTracked("textDocument/didChange", {})).rejects.toThrow(
+      "socket closed"
+    );
+    // Disposing after a sync-throw request left nothing pending must be clean.
+    expect(() => connection.dispose()).not.toThrow();
+  });
+
   it("times out a request that never gets a response", async () => {
     vi.useFakeTimers();
     try {

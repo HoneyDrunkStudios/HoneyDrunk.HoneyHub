@@ -110,6 +110,17 @@ export function createBridgeLspConnection(
     return entry;
   };
 
+  /** Send one frame, normalizing a SYNCHRONOUS throw from `transport.send` (which happens
+      before any promise is created) into a rejected promise, so every caller can clean up
+      pending state and timers through one `.catch` path. */
+  const safeSend = (frame: unknown): Promise<void> => {
+    try {
+      return Promise.resolve(transport.send(frame));
+    } catch (cause) {
+      return Promise.reject(cause instanceof Error ? cause : new Error(String(cause)));
+    }
+  };
+
   const unsubscribe = transport.onMessage((raw) => {
     if (raw === null || typeof raw !== "object") {
       return;
@@ -138,12 +149,10 @@ export function createBridgeLspConnection(
       const method = message.method as string;
       const respond = (result: unknown, error?: JsonRpcError): void => {
         // A refused response is unrecoverable from here; the bridge audit-logs it.
-        void Promise.resolve(
-          transport.send(
-            error === undefined
-              ? { jsonrpc: "2.0", id, result: result ?? null }
-              : { jsonrpc: "2.0", id, error }
-          )
+        void safeSend(
+          error === undefined
+            ? { jsonrpc: "2.0", id, result: result ?? null }
+            : { jsonrpc: "2.0", id, error }
         ).catch(() => undefined);
       };
       const handler = requestHandlers.get(method);
@@ -183,14 +192,13 @@ export function createBridgeLspConnection(
           timedOut?.reject(new Error(`lsp request '${method}' timed out`));
         }, requestTimeoutMs);
         pending.set(id, entry);
-        // A refused send (bridge denial, backpressure, dead socket) means no response
-        // will ever arrive: fail the request now instead of leaving it pending.
-        void Promise.resolve(
-          transport.send(
-            params === undefined
-              ? { jsonrpc: "2.0", id, method }
-              : { jsonrpc: "2.0", id, method, params }
-          )
+        // A refused send (bridge denial, backpressure, dead socket, or a SYNCHRONOUS throw
+        // from transport.send) means no response will ever arrive: clean up the pending
+        // entry and its timer and fail the request now instead of leaking it.
+        void safeSend(
+          params === undefined
+            ? { jsonrpc: "2.0", id, method }
+            : { jsonrpc: "2.0", id, method, params }
         ).catch((cause: unknown) => {
           const failed = take(id);
           failed?.reject(cause instanceof Error ? cause : new Error(String(cause)));
@@ -201,25 +209,24 @@ export function createBridgeLspConnection(
       if (disposed) {
         return;
       }
-      // Notifications are fire-and-forget by protocol; a refusal is logged bridge-side.
-      void Promise.resolve(
-        transport.send(
-          params === undefined
-            ? { jsonrpc: "2.0", method }
-            : { jsonrpc: "2.0", method, params }
-        )
+      // Notifications are fire-and-forget by protocol; a refusal (async or a sync throw)
+      // is swallowed here and logged bridge-side, never surfaced as an exception.
+      void safeSend(
+        params === undefined
+          ? { jsonrpc: "2.0", method }
+          : { jsonrpc: "2.0", method, params }
       ).catch(() => undefined);
     },
     sendNotificationTracked(method: string, params?: unknown): Promise<void> {
       if (disposed) {
         return Promise.reject(new Error("lsp connection disposed"));
       }
-      return Promise.resolve(
-        transport.send(
-          params === undefined
-            ? { jsonrpc: "2.0", method }
-            : { jsonrpc: "2.0", method, params }
-        )
+      // safeSend normalizes a synchronous throw into a rejection so the caller's resync
+      // path fires on any refusal.
+      return safeSend(
+        params === undefined
+          ? { jsonrpc: "2.0", method }
+          : { jsonrpc: "2.0", method, params }
       );
     },
     onNotification(method: string, handler: (params: unknown) => void): void {

@@ -572,14 +572,14 @@ fn first_denied_uri<'a>(value: &'a Value, allowlist: &WorkspaceAllowlist) -> Opt
                 if key == "changes" {
                     if let Value::Object(changes) = child {
                         for uri in changes.keys() {
-                            if !uri_allowed(uri, allowlist) {
+                            if !client_uri_allowed(uri, allowlist) {
                                 return Some(uri);
                             }
                         }
                     }
                 }
                 if let Some(text) = child.as_str() {
-                    if URI_KEYS.contains(&key.as_str()) && !uri_allowed(text, allowlist) {
+                    if URI_KEYS.contains(&key.as_str()) && !client_uri_allowed(text, allowlist) {
                         return Some(text);
                     }
                 }
@@ -741,12 +741,26 @@ fn is_command_payload(value: &Value) -> bool {
     value.is_string() || (value.is_object() && value.get("command").is_some_and(Value::is_string))
 }
 
-/// Whether a URI may cross the wire: non-`file:` schemes carry no filesystem authority and
-/// pass; a `file:` URI must resolve inside an allowlisted root.
+/// Whether a URI may cross the wire, SERVER to client: a `file:` URI must resolve inside an
+/// allowlisted root; a non-`file:` URI (e.g. an `https:` DocumentLink target the operator
+/// may click, or a `vscode-*:` internal scheme) carries no filesystem authority and passes.
 fn uri_allowed(uri: &str, allowlist: &WorkspaceAllowlist) -> bool {
     match file_uri_to_path(uri) {
         None => true,
         Some(path) => path_allowed(&path, allowlist),
+    }
+}
+
+/// Whether a URI may cross the wire, CLIENT to server, in a workspace/document field
+/// (`rootUri`, `workspaceFolders`, `textDocument.uri`, edit targets). Stricter than
+/// [`uri_allowed`]: a `file:` URI must be in-root, an `untitled:` unsaved-buffer URI is
+/// permitted (a legitimate editor shape with no filesystem authority), and every other
+/// scheme (`http:` / `https:` / ...) is refused, since a workspace or document field has no
+/// business naming a remote resource for the server to reach.
+fn client_uri_allowed(uri: &str, allowlist: &WorkspaceAllowlist) -> bool {
+    match file_uri_to_path(uri) {
+        Some(path) => path_allowed(&path, allowlist),
+        None => uri.starts_with("untitled:"),
     }
 }
 
@@ -1100,6 +1114,32 @@ mod tests {
             "params": { "event": { "added": [ { "uri": outside, "name": "x" } ], "removed": [] } }
         });
         assert!(sanitize_client_message(&mut folders, &allowlist).is_err());
+    }
+
+    #[test]
+    fn client_uri_fields_permit_only_in_root_file_and_untitled_schemes() {
+        let (allowlist, _, _) = boundary_fixture();
+        // An `untitled:` unsaved-buffer document is a legitimate editor shape and passes.
+        let mut untitled = serde_json::json!({
+            "jsonrpc": "2.0", "method": "textDocument/didOpen",
+            "params": { "textDocument": { "uri": "untitled:Untitled-1", "text": "x" } }
+        });
+        assert!(sanitize_client_message(&mut untitled, &allowlist).is_ok());
+
+        // An `https:` (or any non-file, non-untitled) URI in a document field is refused:
+        // a workspace/document field has no business naming a remote resource.
+        let mut remote = serde_json::json!({
+            "jsonrpc": "2.0", "method": "textDocument/didOpen",
+            "params": { "textDocument": { "uri": "https://evil.example/x", "text": "x" } }
+        });
+        let error = sanitize_client_message(&mut remote, &allowlist).expect_err("must refuse");
+        assert_eq!(error.code, "lsp_uri_denied");
+        // Same for a non-file rootUri at initialize.
+        let mut init = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "initialize",
+            "params": { "rootUri": "https://evil.example", "capabilities": {} }
+        });
+        assert!(sanitize_client_message(&mut init, &allowlist).is_err());
     }
 
     #[test]

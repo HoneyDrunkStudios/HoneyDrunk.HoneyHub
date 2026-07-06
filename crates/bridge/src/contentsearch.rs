@@ -13,10 +13,14 @@
 //! Results are **capped** ([`MAX_CONTENT_MATCHES`] matches / [`MAX_CONTENT_FILES`] files) and the
 //! response flags [`ContentSearchResults::truncated`] when a cap was hit — matches are never
 //! silently dropped without saying so. Spawning `rg` is a one-shot, non-interactive read of the
-//! same allowlisted roots `read_file` already exposes; it adds no exec exception and stays within
-//! the ADR-0090 read posture (it is not one of the ADR-0096 named-action exec surfaces).
+//! same allowlisted roots `read_file` already exposes: it is a **host-owned read action**, not an
+//! exec surface (the client sends a query, never a command; the host runs the fixed `rg` program
+//! with a built argv). It stays within the ADR-0090 read posture, and carries the same supervision
+//! the ADR-0096 check runner does: own process group, wall-clock timeout with a process-tree kill,
+//! and a per-spawn audit line.
 
 use crate::adapter::BridgeError;
+use crate::adapters::child_run::{kill_process_tree, put_in_own_process_group};
 use crate::backend_catalog::resolve_program;
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
@@ -215,11 +219,26 @@ fn search_with_ripgrep(
     args.push(query.to_string());
     args.push(root.to_string());
 
-    let mut child = Command::new(program)
+    // Host-owned read action (ADR-0090 read posture, ADR-0096-style supervision): the
+    // client sends a query, never a command; the host runs the FIXED `rg` program with a
+    // built argv, in its own process group so a timeout tree-kills any descendants, and
+    // logs a per-spawn audit line. It is a read (grep of already-readable roots), so it
+    // needs no new exec ADR, but it carries the same supervision the check runner does.
+    eprintln!(
+        "[search] rg in {root} (query {} chars, regex={}, case={}, word={})",
+        query.chars().count(),
+        options.is_regex,
+        options.case_sensitive,
+        options.whole_word
+    );
+    let mut command = Command::new(program);
+    command
         .args(&args)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .stdin(Stdio::null())
+        .stdin(Stdio::null());
+    put_in_own_process_group(&mut command);
+    let mut child = command
         .spawn()
         .map_err(|error| BridgeError::new("search_spawn_failed", error.to_string()))?;
 
@@ -263,7 +282,7 @@ fn search_with_ripgrep(
         match rx.recv_timeout(Duration::from_millis(50)) {
             Ok(result) => break result,
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) if Instant::now() >= deadline => {
-                let _ = child.kill(); // EOF the reader so it hands back what it has
+                kill_process_tree(&mut child); // EOF the reader so it hands back what it has
                 timed_out = true;
                 break rx
                     .recv()
@@ -282,7 +301,7 @@ fn search_with_ripgrep(
         // make sure the child is not left running and return what was accumulated, flagged
         // truncated so the UI can say the results are partial.
         acc.truncated = true;
-        let _ = child.kill();
+        kill_process_tree(&mut child);
         let _ = child.wait();
         if let Some(reader) = stderr_reader {
             let _ = reader.join();
