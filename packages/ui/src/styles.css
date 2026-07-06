@@ -8164,6 +8164,175 @@ button:focus-visible,
   color: var(--text-muted);
 }
 
+/* Repo-wide search panel (Find in Files). */
+.repos-search {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-height: 0;
+}
+
+.repos-search-controls {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 0 4px;
+}
+
+.repos-search-input {
+  width: 100%;
+  min-width: 0;
+}
+
+.repos-search-toggles {
+  display: flex;
+  gap: 4px;
+}
+
+.repos-search-toggle {
+  min-width: 26px;
+  padding: 2px 6px;
+  font-size: 0.74rem;
+  font-weight: 600;
+  color: var(--text-muted);
+  background: none;
+  border: 1px solid var(--border-hair);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+
+.repos-search-toggle:hover {
+  background: var(--hover);
+  color: var(--text);
+}
+
+.repos-search-toggle.is-active {
+  background: var(--honey-soft);
+  border-color: var(--honey-bright);
+  color: var(--honey-bright);
+}
+
+.repos-search-toggle:focus-visible {
+  outline: 2px solid var(--honey-bright);
+  outline-offset: 1px;
+}
+
+.repos-search-results {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-height: 0;
+  overflow: auto;
+}
+
+.repos-search-summary {
+  font-size: 0.76rem;
+  color: var(--text-muted);
+  padding: 0 8px;
+  margin: 0;
+}
+
+.repos-search-truncated {
+  color: var(--honey-bright);
+}
+
+/* Filename hits for the current query (files whose name matches), listed above the
+   content matches with a dim scope-relative folder after the name. */
+.repos-search-filehits {
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 6px;
+  margin-bottom: 6px;
+}
+
+.repos-search-filedir {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-muted);
+  font-size: 0.72rem;
+  margin-left: auto;
+}
+
+.repos-search-groups,
+.repos-search-matches {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.repos-search-file-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 4px 8px;
+  background: none;
+  border: none;
+  color: var(--text);
+  text-align: left;
+  font-size: 0.82rem;
+  cursor: pointer;
+  border-radius: var(--radius-sm);
+}
+
+.repos-search-file-head:hover {
+  background: var(--hover);
+}
+
+.repos-search-caret {
+  flex: none;
+  width: 12px;
+  color: var(--text-muted);
+}
+
+.repos-search-filename {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 600;
+}
+
+.repos-search-match {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  width: 100%;
+  padding: 3px 8px 3px 26px;
+  background: none;
+  border: none;
+  color: var(--text-dim);
+  text-align: left;
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  cursor: pointer;
+  border-radius: var(--radius-sm);
+}
+
+.repos-search-match:hover {
+  background: var(--hover);
+  color: var(--text);
+}
+
+.repos-search-lineno {
+  flex: none;
+  min-width: 2.2em;
+  text-align: right;
+  color: var(--text-muted);
+}
+
+.repos-search-linetext {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.repos-search-hit {
+  background: var(--honey-soft);
+  color: var(--honey-bright);
+  border-radius: 2px;
+  padding: 0 1px;
+}
+
 .repos-file-row {
   display: flex;
   align-items: center;

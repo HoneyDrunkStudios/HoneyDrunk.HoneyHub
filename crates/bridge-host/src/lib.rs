@@ -58,6 +58,14 @@ struct Host {
     /// Backends with a usage probe in flight (single-flight: each probe boots a full
     /// vendor TUI, so repeated clicks or multiple cockpits must not stack them).
     active_probes: Mutex<std::collections::HashSet<String>>,
+    /// Live language servers, one per (canonical root, language) — long-lived supervised
+    /// subprocesses reused across files, killed on stop / root-removal / last-client
+    /// disconnect / shutdown (ADR-0102 D-C).
+    active_lsp: Mutex<LspState>,
+    /// Connected WebSocket clients. When the LAST one disconnects, every running language
+    /// server is retired (ADR-0102 D-C: a server never outlives the cockpit it serves);
+    /// a second paired device keeps them alive.
+    connected_clients: std::sync::atomic::AtomicUsize,
     events: broadcast::Sender<BridgeEvent>,
     /// The live filesystem watcher (the recommended OS-native backend) plus the roots it is
     /// currently watching. Re-pointed whenever the workspace allowlist changes. `None` until
@@ -67,6 +75,103 @@ struct Host {
     /// poll loop can **revoke** a run's per-run capability token the moment the run reaches a
     /// terminal state, so a token cannot outlive the parent run it was minted for.
     dispatch: Option<Arc<DispatchGovernor>>,
+}
+
+/// The running language servers plus the allowlisted-roots snapshot they are validated
+/// against, behind ONE mutex so a frame's root-authorization check and the server
+/// write/broadcast are atomic with respect to root removal (ADR-0102 firm workspace-root
+/// removal). `SetWorkspaceRoots` updates `roots` and sweeps orphaned `servers` under this
+/// same lock, so no LSP path can observe "new roots but a still-registered server for a
+/// now-removed root" and slip a frame through. Kept OFF the runtime lock so a per-keystroke
+/// completion never queues behind a backend run.
+#[derive(Default)]
+struct LspState {
+    servers: HashMap<LspKey, honeyhub_bridge::LspServer>,
+    roots: honeyhub_bridge::WorkspaceAllowlist,
+    /// The in-flight `initialize` request id for a (root, language), set when the FIRST
+    /// cockpit's initialize is forwarded and cleared when its result returns. LSP allows
+    /// exactly one `initialize` per server, so a shared server must be initialized once.
+    pending_init: HashMap<LspKey, serde_json::Value>,
+    /// Request ids of later cockpits whose `initialize` arrived while the first was still
+    /// in flight (not yet cached). They are NOT forwarded (that would double-initialize the
+    /// shared server); instead they are coalesced here and answered the moment the first
+    /// initialize result caches.
+    init_waiters: HashMap<LspKey, Vec<serde_json::Value>>,
+    /// The cached `InitializeResult` for a running server. A later cockpit's `initialize`
+    /// is answered from this (host-owned initialization) rather than forwarded, so the
+    /// shared server never sees a duplicate initialize and the later cockpit still gets
+    /// the real capabilities.
+    init_results: HashMap<LspKey, serde_json::Value>,
+}
+
+/// What the host does with a client `initialize` (host-owned initialization: exactly one
+/// initialize reaches a shared server).
+#[derive(Debug, PartialEq, Eq)]
+enum InitDecision {
+    /// The first initialize: forward it to the server (its id is now recorded as pending).
+    Forward,
+    /// Answer this caller from the cached `InitializeResult` (carried), do not forward.
+    ReplyCached(serde_json::Value),
+    /// A first initialize is still in flight: this caller is coalesced (queued if it had an
+    /// id) and will be answered when the result caches; do not forward.
+    Coalesced,
+}
+
+impl LspState {
+    /// Remove a server and its initialize tracking for `key` (used by every retire path so
+    /// a later restart re-initializes cleanly).
+    fn take_server(&mut self, key: &LspKey) -> Option<honeyhub_bridge::LspServer> {
+        self.pending_init.remove(key);
+        self.init_waiters.remove(key);
+        self.init_results.remove(key);
+        self.servers.remove(key)
+    }
+
+    /// Decide what to do with a client `initialize` for `key`, recording pending/waiter
+    /// state as a side effect. Guarantees exactly one initialize is forwarded to a shared
+    /// server: the first forwards; one arriving while that is in flight is coalesced; one
+    /// arriving after the result caches is answered from the cache.
+    fn on_initialize(
+        &mut self,
+        key: &LspKey,
+        request_id: Option<serde_json::Value>,
+    ) -> InitDecision {
+        if let Some(cached) = self.init_results.get(key) {
+            return InitDecision::ReplyCached(cached.clone());
+        }
+        if self.pending_init.contains_key(key) {
+            if let Some(id) = request_id {
+                self.init_waiters.entry(key.clone()).or_default().push(id);
+            }
+            return InitDecision::Coalesced;
+        }
+        if let Some(id) = request_id {
+            self.pending_init.insert(key.clone(), id);
+        }
+        InitDecision::Forward
+    }
+}
+
+/// Identity of a language server: its workspace root (canonicalized so two spellings of
+/// the same tree share one server) and the language it serves.
+#[derive(Clone, PartialEq, Eq, Hash)]
+struct LspKey {
+    root: String,
+    language_id: String,
+}
+
+impl LspKey {
+    fn new(root: &str, language_id: &str) -> Self {
+        // Canonicalize the root so "C:/work" and "C:\work\." key the same server; fall back
+        // to the raw string when the path can't be canonicalized (matches `spawn_check`).
+        let root = std::fs::canonicalize(root)
+            .map(|path| path.to_string_lossy().into_owned())
+            .unwrap_or_else(|_| root.to_string());
+        Self {
+            root,
+            language_id: language_id.to_string(),
+        }
+    }
 }
 
 struct AppState {
@@ -104,11 +209,20 @@ pub async fn serve(
     // endpoint may be served at all (ADR-0098 B — localhost only).
     let bound = listener.local_addr()?;
     let (events_tx, _events_rx) = broadcast::channel::<BridgeEvent>(1024);
+    // Seed the LSP roots snapshot from the runtime's initial allowlist, so LSP forwarding
+    // is authorized against the real roots before the first SetWorkspaceRoots (which then
+    // keeps the snapshot in sync under the active_lsp lock).
+    let initial_lsp = LspState {
+        roots: honeyhub_bridge::WorkspaceAllowlist::new(runtime.workspace_roots()),
+        ..LspState::default()
+    };
     let host = Arc::new(Host {
         runtime: Mutex::new(runtime),
         active_runs: Mutex::new(std::collections::HashSet::new()),
         active_checks: Mutex::new(std::collections::HashSet::new()),
         active_probes: Mutex::new(std::collections::HashSet::new()),
+        active_lsp: Mutex::new(initial_lsp),
+        connected_clients: std::sync::atomic::AtomicUsize::new(0),
         events: events_tx,
         watcher: Mutex::new(None),
         dispatch: dispatch.clone(),
@@ -319,6 +433,8 @@ async fn poll_active_runs(host: &Arc<Host>) {
 }
 
 async fn handle_socket(socket: WebSocket, host: Arc<Host>) {
+    host.connected_clients
+        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     let (mut sink, mut stream) = socket.split();
     let mut events_rx = host.events.subscribe();
     let (outbound_tx, mut outbound_rx) = mpsc::channel::<WireFrame>(256);
@@ -391,6 +507,31 @@ async fn handle_socket(socket: WebSocket, host: Arc<Host>) {
     }
 
     writer.abort();
+
+    // ADR-0102 D-C: a language server never outlives the cockpit it serves. When the LAST
+    // client disconnects, retire every running server (a second connected device keeps them
+    // alive; a reconnecting cockpit restarts servers on demand). Drop happens off the async
+    // worker: it kills the process tree and joins the pump threads.
+    if host
+        .connected_clients
+        .fetch_sub(1, std::sync::atomic::Ordering::SeqCst)
+        == 1
+    {
+        let orphans: Vec<honeyhub_bridge::LspServer> = {
+            let mut state = host.active_lsp.lock().await;
+            state.pending_init.clear();
+            state.init_waiters.clear();
+            state.init_results.clear();
+            state.servers.drain().map(|(_, server)| server).collect()
+        };
+        if !orphans.is_empty() {
+            eprintln!(
+                "[lsp] last cockpit disconnected; retiring {} language server(s)",
+                orphans.len()
+            );
+            tokio::task::spawn_blocking(move || drop(orphans));
+        }
+    }
 }
 
 async fn handle_command(
@@ -399,10 +540,31 @@ async fn handle_command(
     frame_id: &str,
     outbound_tx: &mpsc::Sender<WireFrame>,
 ) {
+    // LSP send/stop touch only the language-server map — never the runtime — so handle them
+    // WITHOUT taking the runtime lock. A completion request on every keystroke must not queue
+    // behind a backend run (or the 80ms poll loop) holding that lock, and a stdin write must
+    // not wedge it (ADR-0102). Start still goes through the main match: it gates the root.
+    if matches!(
+        &command,
+        ClientCommand::LspSend { .. } | ClientCommand::LspStop { .. }
+    ) {
+        let result = handle_lsp_command(host, command).await;
+        respond(outbound_tx, frame_id, result).await;
+        return;
+    }
+
     let mut to_register: Option<String> = None;
     // Set when the workspace allowlist changes, so the watcher is re-pointed after the
     // runtime lock is released.
     let mut rewatch: Option<Vec<String>> = None;
+    // Language servers whose root fell out of the allowlist on a `SetWorkspaceRoots`, moved
+    // out under the lock and dropped off-lock below (a supervised server must never outlive
+    // its authorization; the reader-thread join is kept off the async worker).
+    let mut lsp_orphans: Vec<honeyhub_bridge::LspServer> = Vec::new();
+    // A content search validated under the runtime lock but executed after it is released
+    // (grepping a big tree is slow filesystem work; holding the runtime lock through it
+    // would stall every other client command).
+    let mut search_job: Option<(String, String, honeyhub_bridge::ContentSearchOptions)> = None;
     let result: Result<Option<Vec<BridgeEvent>>, BridgeError> = {
         let mut runtime = host.runtime.lock().await;
         match command {
@@ -445,6 +607,25 @@ async fn handle_command(
             ClientCommand::SetWorkspaceRoots { roots } => {
                 rewatch = Some(roots.clone());
                 runtime.set_workspace_roots(roots);
+                // Update the LSP roots snapshot AND sweep orphaned servers under the ONE
+                // active_lsp lock, so the two changes are atomic: no LSP send/pump can
+                // observe the new roots while a server for a now-removed root is still
+                // registered (ADR-0102 firm root removal + every-frame boundary). Orphans
+                // are dropped off-lock below.
+                let new_roots = runtime.workspace_roots();
+                let mut state = host.active_lsp.lock().await;
+                state.roots = honeyhub_bridge::WorkspaceAllowlist::new(new_roots);
+                let orphan_keys: Vec<LspKey> = state
+                    .servers
+                    .keys()
+                    .filter(|key| !state.roots.allows(&key.root))
+                    .cloned()
+                    .collect();
+                for key in orphan_keys {
+                    if let Some(server) = state.take_server(&key) {
+                        lsp_orphans.push(server);
+                    }
+                }
                 Ok(None)
             }
             ClientCommand::BrowseDir { path } => honeyhub_bridge::browse_dir(path.as_deref())
@@ -482,6 +663,31 @@ async fn handle_command(
                             results,
                         ))
                     })
+            }
+            ClientCommand::SearchContent {
+                root,
+                query,
+                case_sensitive,
+                whole_word,
+                is_regex,
+            } => {
+                // Content search (Find in Files) is gated to an allowlisted root exactly like the
+                // filename search — it greps the files under that scope. `workspace_allows`
+                // canonicalizes, so a `..`/symlink escape resolves out of the root and is denied.
+                // Only the *gate* runs under the runtime lock; the grep itself is deferred to
+                // blocking work after the lock is released (see `search_job` below).
+                require(runtime.workspace_allows(&root), "search root").map(|()| {
+                    search_job = Some((
+                        root,
+                        query,
+                        honeyhub_bridge::ContentSearchOptions {
+                            case_sensitive,
+                            whole_word,
+                            is_regex,
+                        },
+                    ));
+                    None
+                })
             }
             ClientCommand::WriteAgent {
                 name,
@@ -911,6 +1117,21 @@ async fn handle_command(
                 spawn_usage_probe(host, backend, cwd);
                 Ok(None)
             }
+            ClientCommand::LspStart { root, language_id } => {
+                // Starting a language server crosses into running an operator-installed binary,
+                // so gate the root against the allowlist first (the same posture as a check).
+                // Resolve/locate/spawn happen OFF the runtime lock in `spawn_lsp`, which
+                // broadcasts an honest `lsp_status` (running / installed / degraded).
+                require(runtime.workspace_allows(&root), "lsp root").map(|()| {
+                    spawn_lsp(host, root, language_id);
+                    None
+                })
+            }
+            ClientCommand::LspSend { .. } | ClientCommand::LspStop { .. } => {
+                // Handled before the runtime lock (see the early return in `handle_command`);
+                // this arm exists only for match exhaustiveness and is never reached.
+                Ok(None)
+            }
             ClientCommand::Resume { .. } => Err(BridgeError::new(
                 "unsupported_command",
                 "resume is not driven by the host runtime yet",
@@ -925,7 +1146,59 @@ async fn handle_command(
     if let Some(roots) = rewatch {
         apply_watch(host, roots).await;
     }
+    // Tear down any de-authorized language servers off-lock (Drop kills the tree + joins the
+    // reader thread, which we keep off the async worker).
+    for server in lsp_orphans {
+        tokio::task::spawn_blocking(move || drop(server));
+    }
+    // Run a gated content search off the runtime lock, on blocking work: only this client's
+    // task waits for it, never every other command.
+    let result = match search_job {
+        Some((root, query, options)) if result.is_ok() => {
+            let search = tokio::task::spawn_blocking({
+                let root = root.clone();
+                move || honeyhub_bridge::search_content(&root, &query, options)
+            })
+            .await
+            .unwrap_or_else(|_| {
+                Err(BridgeError::new(
+                    "search_failed",
+                    "content search task failed unexpectedly",
+                ))
+            });
+            // Freshness re-check: the root was authorized before the search ran off-lock, so
+            // a concurrent SetWorkspaceRoots could have removed it while the walk read its
+            // files. If the root is no longer allowlisted, discard the results rather than
+            // return content from a now-deauthorized tree.
+            if !host.runtime.lock().await.workspace_allows(&root) {
+                Err(BridgeError::new(
+                    "search_root_revoked",
+                    "the search root was removed from the workspace allowlist during the search",
+                ))
+            } else {
+                search.map(|results| {
+                    one(BridgeEvent::content_search_results(
+                        new_id(),
+                        now_rfc3339(),
+                        results,
+                    ))
+                })
+            }
+        }
+        _ => result,
+    };
 
+    respond(outbound_tx, frame_id, result).await;
+}
+
+/// Emit a command's result over the wire: any success events followed by an ack, a bare ack
+/// for a no-event success, or a frame-id-tagged error frame so the client can correlate the
+/// failure. Shared by the runtime path and the off-lock LSP path.
+async fn respond(
+    outbound_tx: &mpsc::Sender<WireFrame>,
+    frame_id: &str,
+    result: Result<Option<Vec<BridgeEvent>>, BridgeError>,
+) {
     match result {
         Ok(Some(events)) => {
             for event in events {
@@ -949,6 +1222,389 @@ async fn handle_command(
             let _ = outbound_tx.send(error_frame).await;
         }
     }
+}
+
+/// Handle an LSP send/stop without the runtime lock. Send frames the message to the running
+/// server for (root, language); stop retires + kills it. Both key off the canonical root.
+async fn handle_lsp_command(
+    host: &Arc<Host>,
+    command: ClientCommand,
+) -> Result<Option<Vec<BridgeEvent>>, BridgeError> {
+    match command {
+        ClientCommand::LspSend {
+            root,
+            language_id,
+            message,
+        } => {
+            let mut message = message;
+            let key = LspKey::new(&root, &language_id);
+            // A shared server serves multiple cockpits; one cockpit's `shutdown` / `exit`
+            // must not terminate the server out from under the others. Server lifecycle is
+            // host-owned (LspStop / disconnect teardown / root removal), so these are not
+            // forwarded. A request-shaped `shutdown` (it carries an id) still needs a
+            // JSON-RPC response or the client's `sendRequest("shutdown")` waits for its
+            // timeout, so the host synthesizes the `null` result; `exit` is a notification
+            // (no id) and is simply dropped.
+            if matches!(
+                message.get("method").and_then(|m| m.as_str()),
+                Some("shutdown" | "exit")
+            ) {
+                if let Some(id) = message.get("id").filter(|id| !id.is_null()).cloned() {
+                    let response =
+                        serde_json::json!({ "jsonrpc": "2.0", "id": id, "result": null });
+                    return Ok(Some(vec![BridgeEvent::lsp_message(
+                        new_id(),
+                        now_rfc3339(),
+                        root.clone(),
+                        language_id.clone(),
+                        response,
+                    )]));
+                }
+                return Ok(None);
+            }
+            // The proxy is a URI-validating gateway, not a dumb pipe (ADR-0102 D-G):
+            // command/config methods are denied, initializationOptions stripped, and every
+            // file URI must resolve inside THIS server's own canonical root (one server /
+            // one root). Validation runs against the roots snapshot HELD in active_lsp, and
+            // the root re-check + the server write happen under that SAME lock, so a
+            // concurrent SetWorkspaceRoots (which updates the snapshot and sweeps servers
+            // under the same lock) can never slip a frame to a server whose root it is
+            // removing (ADR-0102 firm root removal).
+            let mut state = host.active_lsp.lock().await;
+            if !state.roots.allows(&key.root) {
+                eprintln!("[lsp] refused frame for a deauthorized root ({language_id} in {root})");
+                return Err(BridgeError::new(
+                    "lsp_root_not_allowed",
+                    "the language server's workspace root is no longer allowlisted",
+                ));
+            }
+            let allowlist = honeyhub_bridge::WorkspaceAllowlist::new(vec![key.root.clone()]);
+            if let Err(error) =
+                honeyhub_bridge::lsp::sanitize_client_message(&mut message, &allowlist)
+            {
+                eprintln!(
+                    "[lsp] denied client frame ({language_id} in {root}): {}",
+                    error.message
+                );
+                return Err(error);
+            }
+            // Host-owned initialization (LSP allows exactly one initialize per server): the
+            // first forwards, one arriving while it is in flight is coalesced, one after the
+            // result caches is answered from the cache. Never a duplicate to the server.
+            if message.get("method").and_then(|m| m.as_str()) == Some("initialize") {
+                let request_id = message.get("id").filter(|id| !id.is_null()).cloned();
+                match state.on_initialize(&key, request_id.clone()) {
+                    InitDecision::Forward => {} // fall through to write it to the server
+                    InitDecision::Coalesced => return Ok(None),
+                    InitDecision::ReplyCached(cached) => {
+                        return Ok(request_id.map(|id| {
+                            vec![BridgeEvent::lsp_message(
+                                new_id(),
+                                now_rfc3339(),
+                                root.clone(),
+                                language_id.clone(),
+                                serde_json::json!({ "jsonrpc": "2.0", "id": id, "result": cached }),
+                            )]
+                        }));
+                    }
+                }
+            }
+            match state.servers.get_mut(&key) {
+                Some(server) => server.write_message(&message).map(|()| None),
+                None => Err(BridgeError::new(
+                    "lsp_not_running",
+                    "no language server is running for this file's language",
+                )),
+            }
+        }
+        ClientCommand::LspStop { root, language_id } => {
+            let key = LspKey::new(&root, &language_id);
+            let removed = host.active_lsp.lock().await.take_server(&key);
+            if let Some(server) = removed {
+                // Drop off the async worker — Drop kills the tree and joins the reader thread.
+                tokio::task::spawn_blocking(move || drop(server));
+            }
+            Ok(None)
+        }
+        _ => Err(BridgeError::new(
+            "unsupported_command",
+            "not an lsp command",
+        )),
+    }
+}
+
+/// Resolve + locate + spawn (or reuse) a language server for `language_id` in `root`,
+/// without the runtime lock, then pump its inbound LSP messages to every cockpit. Every exit
+/// path broadcasts a single honest `lsp_status`, so the client always knows whether to light
+/// up LSP features or keep its in-file IntelliSense (ADR-0102 / ADR-0090 D4).
+fn spawn_lsp(host: &Arc<Host>, root: String, language_id: String) {
+    let host = Arc::clone(host);
+    tokio::spawn(async move {
+        let status = |installed: bool, running: bool, server_id: &str, reason: &str| {
+            BridgeEvent::lsp_status(
+                new_id(),
+                now_rfc3339(),
+                honeyhub_bridge::LspStatus {
+                    root: root.clone(),
+                    language_id: language_id.clone(),
+                    server_id: server_id.to_string(),
+                    installed,
+                    running,
+                    reason: reason.to_string(),
+                },
+            )
+        };
+
+        // 1. Resolve the language id against the host's own allowlist (never a command line).
+        let Some(spec) = honeyhub_bridge::lsp::resolve_server(&language_id) else {
+            let _ = host.events.send(status(
+                false,
+                false,
+                "",
+                "no language server is allowlisted for this language",
+            ));
+            return;
+        };
+        let key = LspKey::new(&root, &language_id);
+
+        // 2. Reuse a running server for this (language, root) across files.
+        {
+            let mut state = host.active_lsp.lock().await;
+            if let Some(server) = state.servers.get_mut(&key) {
+                if server.poll_exit().is_none() {
+                    let server_id = server.server_id().to_string();
+                    let _ = host.events.send(status(
+                        true,
+                        true,
+                        &server_id,
+                        "language server already running",
+                    ));
+                    return;
+                }
+                // A dead husk lingered — drop it (and its stale init tracking) and re-spawn.
+                let dead = state.take_server(&key);
+                drop(dead);
+            }
+        }
+
+        // 3. Locate the operator-installed binary (honest "not installed" when absent).
+        let Some(program) = honeyhub_bridge::lsp::locate(&spec) else {
+            let _ = host.events.send(status(
+                false,
+                false,
+                spec.server_id,
+                "language server not installed (the bridge locates, never downloads) — in-file IntelliSense stays on",
+            ));
+            return;
+        };
+
+        // 3b. Re-check authorization immediately before spawn: the LspStart gate ran before
+        // the async resolve/locate work, so a concurrent SetWorkspaceRoots may have removed
+        // the root since. (The post-spawn registration re-checks again under the active_lsp
+        // lock to close the register-side race; this check avoids even spawning a process
+        // for a root that was just deauthorized.)
+        if !host.runtime.lock().await.workspace_allows(&root) {
+            let _ = host.events.send(status(
+                true,
+                false,
+                spec.server_id,
+                "workspace root was removed before the language server could start",
+            ));
+            return;
+        }
+
+        // 4. Spawn shell-free, in its own process group, scoped to the allowlisted root.
+        let (server, inbound) =
+            match honeyhub_bridge::LspServer::spawn(program, spec.args, &root, spec.server_id) {
+                Ok(pair) => pair,
+                Err(error) => {
+                    let _ = host.events.send(status(
+                        true,
+                        false,
+                        spec.server_id,
+                        &format!("could not start language server: {}", error.message),
+                    ));
+                    return;
+                }
+            };
+
+        // 5. Register (reconciling a start race: if a concurrent start won, drop ours).
+        // Authorization is RE-CHECKED here against the roots snapshot HELD in active_lsp,
+        // because the LspStart gate ran before the async locate/spawn work and a concurrent
+        // SetWorkspaceRoots may have removed the root since. Since SetWorkspaceRoots updates
+        // that snapshot and sweeps orphans under this same lock, a server can never be
+        // registered for a deauthorized root and then missed by the sweep.
+        let server_process_id = {
+            let mut state = host.active_lsp.lock().await;
+            if !state.roots.allows(&key.root) {
+                drop(state);
+                tokio::task::spawn_blocking(move || drop(server));
+                let _ = host.events.send(status(
+                    true,
+                    false,
+                    spec.server_id,
+                    "workspace root was removed before the language server registered",
+                ));
+                return;
+            }
+            // Re-check the client count under the SAME active_lsp lock the disconnect
+            // teardown drains under: if the last cockpit vanished during the async
+            // locate/spawn, registering now would let the server outlive every client
+            // (the teardown that already ran would never see it).
+            if host
+                .connected_clients
+                .load(std::sync::atomic::Ordering::SeqCst)
+                == 0
+            {
+                drop(state);
+                tokio::task::spawn_blocking(move || drop(server));
+                let _ = host.events.send(status(
+                    true,
+                    false,
+                    spec.server_id,
+                    "cockpit disconnected before the language server registered",
+                ));
+                return;
+            }
+            if state.servers.contains_key(&key) {
+                drop(state);
+                tokio::task::spawn_blocking(move || drop(server));
+                let _ = host.events.send(status(
+                    true,
+                    true,
+                    spec.server_id,
+                    "language server already running",
+                ));
+                return;
+            }
+            let process_id = server.process_id();
+            state.servers.insert(key.clone(), server);
+            process_id
+        };
+        pump_lsp(
+            &host,
+            key,
+            server_process_id,
+            root.clone(),
+            language_id.clone(),
+            inbound,
+        );
+        let _ = host.events.send(status(
+            true,
+            true,
+            spec.server_id,
+            "language server running",
+        ));
+    });
+}
+
+/// Pump one server's inbound LSP messages to every cockpit until it exits, then retire it and
+/// broadcast an `lsp_status` so the client falls back to in-file IntelliSense. Runs on a
+/// blocking thread (the reader channel is synchronous); `blocking_lock` is the sanctioned way
+/// to touch the async map from there.
+fn pump_lsp(
+    host: &Arc<Host>,
+    key: LspKey,
+    process_id: u32,
+    root: String,
+    language_id: String,
+    inbound: std::sync::mpsc::Receiver<serde_json::Value>,
+) {
+    let host = Arc::clone(host);
+    tokio::task::spawn_blocking(move || {
+        while let Ok(message) = inbound.recv() {
+            // ADR-0102 D-G, server-to-client direction: the root check, the URI/command
+            // filtering, and the broadcast/reply all happen under the ONE active_lsp lock,
+            // so a concurrent SetWorkspaceRoots (which updates the roots snapshot + sweeps
+            // servers under the same lock) can never let a frame from a now-removed root
+            // reach a cockpit. If our server is no longer the one under our key (stopped /
+            // swept / a respawn owns it) or its root is deauthorized, the frame is dropped.
+            let mut state = host.active_lsp.blocking_lock();
+            let ours = state.servers.get(&key).map(|s| s.process_id()) == Some(process_id);
+            if !ours || !state.roots.allows(&key.root) {
+                eprintln!(
+                    "[lsp] dropped server frame for a retired/deauthorized server ({language_id} in {root})"
+                );
+                continue;
+            }
+            // Cache the InitializeResult when the FIRST cockpit's initialize response
+            // returns (host-owned initialization), then answer every cockpit coalesced
+            // while it was in flight, so none forwarded a duplicate and all get the real
+            // capabilities.
+            let is_response = message.get("id").is_some() && message.get("method").is_none();
+            if is_response && state.pending_init.get(&key) == message.get("id") {
+                if let Some(result) = message.get("result").cloned() {
+                    state.init_results.insert(key.clone(), result.clone());
+                    for waiter_id in state.init_waiters.remove(&key).unwrap_or_default() {
+                        let response = serde_json::json!({
+                            "jsonrpc": "2.0", "id": waiter_id, "result": result
+                        });
+                        let _ = host.events.send(BridgeEvent::lsp_message(
+                            new_id(),
+                            now_rfc3339(),
+                            root.clone(),
+                            language_id.clone(),
+                            response,
+                        ));
+                    }
+                }
+                state.pending_init.remove(&key);
+            }
+            let allowlist = honeyhub_bridge::WorkspaceAllowlist::new(vec![key.root.clone()]);
+            match honeyhub_bridge::lsp::filter_server_message(message, &allowlist) {
+                honeyhub_bridge::lsp::ServerFrameAction::Forward(message) => {
+                    let _ = host.events.send(BridgeEvent::lsp_message(
+                        new_id(),
+                        now_rfc3339(),
+                        root.clone(),
+                        language_id.clone(),
+                        message,
+                    ));
+                }
+                honeyhub_bridge::lsp::ServerFrameAction::Drop => {
+                    eprintln!("[lsp] dropped out-of-root server frame ({language_id} in {root})");
+                }
+                honeyhub_bridge::lsp::ServerFrameAction::Reply(reply) => {
+                    eprintln!("[lsp] answered server request centrally ({language_id} in {root})");
+                    // `ours` above already confirmed this is the server THIS pump owns.
+                    if let Some(server) = state.servers.get_mut(&key) {
+                        let _ = server.write_message(&reply);
+                    }
+                }
+            }
+        }
+        // The channel disconnected => the server's stdout hit EOF => it exited. Retire it,
+        // but ONLY if the entry under our key is still OUR process: a concurrent respawn
+        // (LspStart after our server exited) may already hold the key, and evicting it
+        // would cause flapping restarts. Identity-checked by the pid captured at spawn.
+        let retired = {
+            let mut state = host.active_lsp.blocking_lock();
+            if state.servers.get(&key).map(|s| s.process_id()) == Some(process_id) {
+                let removed = state.take_server(&key);
+                drop(state);
+                drop(removed);
+                true
+            } else {
+                false
+            }
+        };
+        // Only signal the fallback when WE actually retired our own server. If a respawn
+        // holds the key, it is running and owns the status.
+        if retired {
+            let _ = host.events.send(BridgeEvent::lsp_status(
+                new_id(),
+                now_rfc3339(),
+                honeyhub_bridge::LspStatus {
+                    root,
+                    language_id,
+                    server_id: String::new(),
+                    installed: true,
+                    running: false,
+                    reason: "language server exited".to_string(),
+                },
+            ));
+        }
+    });
 }
 
 async fn send_frame(
@@ -1211,6 +1867,55 @@ fn git_write_events(root: &str, op: &str, result: Result<String, BridgeError>) -
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn initialize_coalescing_forwards_once_and_answers_the_rest() {
+        // LSP allows exactly one initialize per server. With a server shared across
+        // cockpits: the first initialize forwards; a second arriving WHILE the first is
+        // in flight is coalesced (queued, not forwarded); once the result caches, a later
+        // initialize is answered from the cache.
+        let mut state = LspState::default();
+        let key = LspKey::new(&std::env::temp_dir().to_string_lossy(), "typescript");
+        let id_a = serde_json::json!("a-0");
+        let id_b = serde_json::json!("b-0");
+        let id_c = serde_json::json!("c-0");
+
+        // First cockpit: forwarded, its id recorded as the pending initialize.
+        assert_eq!(
+            state.on_initialize(&key, Some(id_a.clone())),
+            InitDecision::Forward
+        );
+        assert_eq!(state.pending_init.get(&key), Some(&id_a));
+
+        // Second cockpit while the first is still in flight: coalesced, queued as a waiter,
+        // NOT forwarded.
+        assert_eq!(
+            state.on_initialize(&key, Some(id_b.clone())),
+            InitDecision::Coalesced
+        );
+        assert_eq!(
+            state.init_waiters.get(&key).map(Vec::as_slice),
+            Some(&[id_b][..])
+        );
+
+        // The first result caches (as the pump does on the initialize response).
+        let result = serde_json::json!({ "capabilities": { "hoverProvider": true } });
+        state.init_results.insert(key.clone(), result.clone());
+
+        // A later cockpit is now answered from the cache, not forwarded.
+        assert_eq!(
+            state.on_initialize(&key, Some(id_c)),
+            InitDecision::ReplyCached(result)
+        );
+
+        // Retiring the server clears all initialize tracking, so a restart re-initializes.
+        state.servers.clear();
+        state.take_server(&key);
+        assert!(state.pending_init.is_empty());
+        assert!(state.init_waiters.is_empty());
+        assert!(state.init_results.is_empty());
+        assert_eq!(state.on_initialize(&key, Some(id_a)), InitDecision::Forward);
+    }
 
     /// Best-effort symlink creation. On Windows, creating a symlink needs a privilege (or
     /// Developer Mode); when that is unavailable this returns `false` so the caller can skip the

@@ -299,6 +299,55 @@ test("coaching_hints is a fieldless query and a hint-bearing event", () => {
   assert.equal(event.event?.payload.kind, "coaching_hints");
 });
 
+test("lsp commands carry a language id + opaque message; status flags degradation", () => {
+  const send: WireFrame = {
+    protocol: wireProtocolVersion,
+    frameId: "frame-lsp-send",
+    kind: "client_command",
+    createdAt: "2026-06-07T12:00:00Z",
+    command: {
+      kind: "lsp_send",
+      root: "C:/work",
+      languageId: "typescript",
+      message: { jsonrpc: "2.0", id: 1, method: "initialize" }
+    }
+  };
+  assert.equal(send.command?.kind, "lsp_send");
+  if (send.command?.kind === "lsp_send") {
+    assert.equal(send.command.languageId, "typescript");
+  }
+
+  const status: WireFrame = {
+    protocol: wireProtocolVersion,
+    frameId: "frame-lsp-status",
+    kind: "server_event",
+    createdAt: "2026-06-07T12:00:00Z",
+    event: {
+      id: "e1",
+      sessionId: "",
+      runId: "",
+      sequence: 0,
+      createdAt: "2026-06-07T12:00:00Z",
+      payload: {
+        kind: "lsp_status",
+        status: {
+          root: "C:/work",
+          languageId: "python",
+          serverId: "",
+          installed: false,
+          running: false,
+          reason: "no language server is allowlisted for this language"
+        }
+      }
+    }
+  };
+  assert.equal(status.event?.payload.kind, "lsp_status");
+  if (status.event?.payload.kind === "lsp_status") {
+    assert.equal(status.event.payload.status.installed, false);
+    assert.equal(status.event.payload.status.languageId, "python");
+  }
+});
+
 test("usage_summary is a fieldless client command and a payload-bearing event", () => {
   const query: WireFrame = {
     protocol: wireProtocolVersion,

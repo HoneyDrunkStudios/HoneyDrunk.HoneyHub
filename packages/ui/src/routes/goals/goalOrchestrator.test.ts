@@ -37,6 +37,7 @@ class FakeClient implements WireClient {
   async readFile(): Promise<void> {}
   async writeFile(): Promise<void> {}
   async searchFiles(): Promise<void> {}
+  async searchContent(): Promise<void> {}
   async resolveWorkspaceFile(): Promise<void> {}
   async writeAgent(): Promise<void> {}
   async listJobs(): Promise<void> {}
@@ -82,6 +83,9 @@ class FakeClient implements WireClient {
   async scaffoldArchitecture(): Promise<void> {}
   async pullArchitecture(): Promise<void> {}
   async runCheck(): Promise<void> {}
+  async lspStart(): Promise<void> {}
+  async lspSend(): Promise<void> {}
+  async lspStop(): Promise<void> {}
 
   private emit(runId: string, payload: BridgeEventPayload): void {
     const event: BridgeEvent = {

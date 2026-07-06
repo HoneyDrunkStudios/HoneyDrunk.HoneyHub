@@ -5,6 +5,34 @@
 Dogfooding round: smarter cost signals, hardened group checks, a resizable chat dock, and a
 user-centered Jobs page.
 
+- **Repo-wide search**: a Search panel on the activity rail greps every allowlisted workspace
+  root from the bridge (read-posture, ADR-0090 D8), with per-file grouping and click-to-open.
+  The same query also matches **file names**: files whose name contains the query (search for a
+  ticket or refinement number and jump straight to its file) are listed above the content
+  matches, click-to-open. A ripgrep failure (for example an invalid regex) now surfaces as an
+  explicit error instead of silently-empty results, and a stale result for a superseded query,
+  scope, or flag combination can no longer overwrite the current panel.
+- **LSP code intelligence** (ADR-0102): the bridge runs allowlisted, operator-installed
+  language servers (rust-analyzer, typescript-language-server, csharp-ls) as supervised
+  long-lived subprocesses and proxies their LSP JSON-RPC to the editor for project-aware
+  completions, hover, go-to-definition, references, and diagnostics. An absent server
+  degrades silently to the built-in in-file IntelliSense. The proxy is a URI-validating
+  gateway, never a dumb pipe (ADR-0102 D-G): every file URI in every frame, both directions,
+  must resolve inside an allowlisted workspace root (out-of-root client frames are refused;
+  out-of-root locations and watch registrations from the server are filtered out;
+  server-initiated `applyEdit` is denied outright with `applied: false` (edits reach the
+  editor only as responses to operator-initiated requests, land in buffers, and persist
+  only through the `write_file` save path); an out-of-root or non-file showDocument is
+  refused), and
+  command-bearing LSP methods are denied by default
+  (`workspace/executeCommand` refused, command payloads stripped from code actions and
+  code lenses). LSP configuration is host-owned too: client `initializationOptions` are
+  stripped, `workspace/didChangeConfiguration` is refused, and the host itself answers a
+  server's `workspace/configuration` request (settings can carry tool paths and override
+  commands, so an opaque passthrough would be an execution surface). Every server spawn
+  and denial is audit-logged on the host console, and all servers are retired when the
+  last cockpit disconnects.
+
 - **Cost before and after**: the run screen now shows a cost hint before you send (flat-plan
   models show "included"; metered/API models show a floor estimate plus your recent typical/high
   spend for that model), and every reply keeps reporting what it actually cost with the existing

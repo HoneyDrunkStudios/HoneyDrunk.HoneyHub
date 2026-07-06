@@ -458,6 +458,58 @@ export class MockWireClient implements WireClient {
     });
   }
 
+  async searchContent(
+    root: string,
+    query: string,
+    options?: { caseSensitive?: boolean; wholeWord?: boolean; isRegex?: boolean }
+  ): Promise<void> {
+    const caseSensitive = options?.caseSensitive ?? false;
+    const wholeWord = options?.wholeWord ?? false;
+    const isRegex = options?.isRegex ?? false;
+    // The scripted demo corpus (a couple of files) so the offline cockpit can show grouped
+    // content-search results without a bridge.
+    const corpus: Record<string, string> = {
+      "/demo/HoneyHub/README.md": "# HoneyHub\n\nA scripted demo readme.\nThe hub greeting lives here.\n",
+      "/demo/HoneyHub/src/main.ts": "export const greeting = \"hello\";\nexport const other = greeting;\n"
+    };
+    const needle = query.trim();
+    const matches =
+      needle.length === 0
+        ? []
+        : Object.entries(corpus).flatMap(([path, content]) =>
+            content
+              .split("\n")
+              .map((lineText, index) => ({ lineText, line: index + 1 }))
+              .filter(({ lineText }) => {
+                const hay = caseSensitive ? lineText : lineText.toLowerCase();
+                return hay.includes(caseSensitive ? needle : needle.toLowerCase());
+              })
+              .map(({ lineText, line }) => ({
+                path,
+                line,
+                column: (caseSensitive ? lineText : lineText.toLowerCase()).indexOf(
+                  caseSensitive ? needle : needle.toLowerCase()
+                ) + 1,
+                lineText
+              }))
+          );
+    const fileCount = new Set(matches.map((m) => m.path)).size;
+    this.emitDevice({
+      kind: "content_search_results",
+      results: {
+        root,
+        query,
+        caseSensitive,
+        wholeWord,
+        isRegex,
+        matches,
+        fileCount,
+        truncated: false,
+        engine: "fallback"
+      }
+    });
+  }
+
   async resolveWorkspaceFile(path: string): Promise<void> {
     // The scripted demo workspace points at the one demo repo.
     this.emitDevice({
@@ -881,6 +933,31 @@ export class MockWireClient implements WireClient {
         truncated: false
       }
     });
+  }
+
+  async lspStart(root: string, languageId: string): Promise<void> {
+    // The offline demo runs no real language server; report honest graceful degradation so
+    // the editor keeps its in-file IntelliSense and shows the quiet "no server" note.
+    this.emitDevice({
+      kind: "lsp_status",
+      status: {
+        root,
+        languageId,
+        serverId: "",
+        installed: false,
+        running: false,
+        reason: "(demo) no language server runs in the offline mock"
+      }
+    });
+  }
+
+  async lspSend(_root: string, _languageId: string, _message: unknown): Promise<void> {
+    // No server in the mock; the client only sends after an installed/running status, so this
+    // is never reached in the demo. A no-op keeps the seam total.
+  }
+
+  async lspStop(_root: string, _languageId: string): Promise<void> {
+    // Nothing to stop in the offline mock.
   }
 
   async detectEnvironment(): Promise<void> {

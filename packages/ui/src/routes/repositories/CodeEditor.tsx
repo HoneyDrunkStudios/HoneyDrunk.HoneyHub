@@ -1,8 +1,10 @@
-import { useCallback, useRef } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { ReactElement } from "react";
 import Editor, { loader } from "@monaco-editor/react";
 import type { BeforeMount, Monaco, OnChange, OnMount } from "@monaco-editor/react";
 import * as monaco from "monaco-editor";
+import type { WireClient } from "../../wire/client";
+import { attachLanguageClient, isLspLanguage } from "../../lsp/languageClient";
 import editorWorker from "monaco-editor/esm/vs/editor/editor.worker?worker";
 import jsonWorker from "monaco-editor/esm/vs/language/json/json.worker?worker";
 import cssWorker from "monaco-editor/esm/vs/language/css/css.worker?worker";
@@ -107,6 +109,15 @@ const EXTENSION_LANGUAGE: Record<string, string> = {
   cmd: "bat",
   dockerfile: "dockerfile"
 };
+
+/** Scroll a 1-based line into the centre, place the cursor at its start, and focus the editor —
+    the "jump to a search match" gesture. Clamped to line 1 so a stale/0 line never throws. */
+function revealEditorLine(editor: monaco.editor.IStandaloneCodeEditor, line: number): void {
+  const target = Math.max(1, Math.floor(line));
+  editor.revealLineInCenter(target);
+  editor.setPosition({ lineNumber: target, column: 1 });
+  editor.focus();
+}
 
 /** The file extension (lowercased, no dot), or the full name for extension-less files. */
 function extensionOf(path: string): string {
@@ -335,6 +346,21 @@ export interface CodeEditorProps {
   onSave: () => void;
   /** When true, the editor is view-only (e.g. a truncated file). */
   readOnly?: boolean;
+  /** A 1-based line to reveal + place the cursor on (e.g. a search match the user clicked).
+      Re-revealed whenever {@link revealNonce} changes, so clicking the same line again re-scrolls. */
+  revealLine?: number | undefined;
+  /** Bumps to force a re-reveal of {@link revealLine} even when the line number is unchanged. */
+  revealNonce?: number | undefined;
+  /** The bridge wire client, for LSP code intelligence (ADR-0102). When present alongside
+      {@link repoRoot} and the file's language has a server, the editor lights up
+      completion/hover/definition/references/rename/diagnostics; otherwise it does nothing extra
+      and keeps in-file IntelliSense. Absent (tests, mobile) means no LSP at all. */
+  lspClient?: WireClient | undefined;
+  /** The allowlisted repo root the LSP server is scoped to (the file's owning repo). */
+  repoRoot?: string | undefined;
+  /** Receives a quiet, honest note when a language server is not running/installed (undefined
+      when a server is running or no LSP applies), so the parent can surface it unobtrusively. */
+  onLspStatus?: ((note: string | undefined) => void) | undefined;
 }
 
 // The app's monospace stack, spelled out (not `var(--font-mono)`) so Monaco's canvas-based glyph
@@ -353,19 +379,103 @@ export default function CodeEditor({
   value,
   onChange,
   onSave,
-  readOnly = false
+  readOnly = false,
+  revealLine,
+  revealNonce,
+  lspClient,
+  repoRoot,
+  onLspStatus
 }: Readonly<CodeEditorProps>): ReactElement {
   // Keep the latest onSave reachable from the editor command without re-registering it.
   const onSaveRef = useRef(onSave);
   onSaveRef.current = onSave;
 
+  // The live editor instance, so a search-match click can scroll to + select a line.
+  const editorRef = useRef<monaco.editor.IStandaloneCodeEditor | null>(null);
+  // The Monaco namespace captured on mount, injected into the LSP wiring (kept out of a static
+  // import so the language client stays testable with a fake Monaco).
+  const monacoRef = useRef<Monaco | null>(null);
+  // Bumped on mount so the LSP effect (which needs the mounted editor + Monaco) re-runs once the
+  // async editor is ready — the effect otherwise runs before onMount sets the refs.
+  const [mountTick, setMountTick] = useState(0);
+  // The active LSP attachment's disposer, so a re-attach (file/repo/client change) tears the old
+  // one down first.
+  const lspDisposeRef = useRef<(() => void) | null>(null);
+  // The latest reveal target, read on mount so a line requested before Monaco finished loading
+  // still gets revealed once the editor is ready.
+  const revealRef = useRef(revealLine);
+  revealRef.current = revealLine;
+
+  // Keep the latest status callback reachable from the effect without re-attaching on identity.
+  const onLspStatusRef = useRef(onLspStatus);
+  onLspStatusRef.current = onLspStatus;
+
   const handleMount = useCallback<OnMount>((editor, m) => {
+    editorRef.current = editor;
+    monacoRef.current = m;
     // Save on Ctrl/Cmd+S from inside the editor; Monaco swallows the keystroke so the browser
     // never gets its "save page" dialog. Undo/redo (Ctrl/Cmd+Z, Ctrl/Cmd+Shift+Z) and the find/
     // replace widgets (Ctrl/Cmd+F, Ctrl/Cmd+H) are Monaco-native and left enabled — nothing here
     // disables the model's edit history or the find controller.
     editor.addCommand(m.KeyMod.CtrlCmd | m.KeyCode.KeyS, () => onSaveRef.current());
+    if (revealRef.current !== undefined) {
+      revealEditorLine(editor, revealRef.current);
+    }
+    // Let the LSP effect run now that the editor + Monaco are live.
+    setMountTick((tick) => tick + 1);
   }, []);
+
+  // LSP code intelligence (ADR-0102): attach the current model to a language server for its
+  // (repoRoot, language) when a client + root are provided and the language has a server. Guarded
+  // so tests and the no-LSP path (no client/root, or a language with no server) never run it —
+  // the file then keeps today's in-file IntelliSense. Re-attaches when the file/root/client
+  // changes; the disposer closes the document (and stops the server for its last file).
+  useEffect(() => {
+    lspDisposeRef.current?.();
+    lspDisposeRef.current = null;
+
+    const editor = editorRef.current;
+    const m = monacoRef.current;
+    if (editor === null || m === null || lspClient === undefined || repoRoot === undefined) {
+      onLspStatusRef.current?.(undefined);
+      return;
+    }
+    const languageId = languageForPath(path);
+    if (!isLspLanguage(languageId)) {
+      onLspStatusRef.current?.(undefined);
+      return;
+    }
+    const model = editor.getModel();
+    if (model === null) {
+      return;
+    }
+    lspDisposeRef.current = attachLanguageClient({
+      monaco: m,
+      model,
+      filePath: path,
+      root: repoRoot,
+      languageId,
+      client: lspClient,
+      onStatus: (status) => {
+        const note =
+          status === undefined || status.running ? undefined : status.reason || "language server not running";
+        onLspStatusRef.current?.(note);
+      }
+    });
+
+    return () => {
+      lspDisposeRef.current?.();
+      lspDisposeRef.current = null;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [path, repoRoot, lspClient, mountTick]);
+
+  // Reveal + select the requested line whenever it (or the nonce) changes, once the editor is up.
+  useEffect(() => {
+    if (revealLine !== undefined && editorRef.current !== null) {
+      revealEditorLine(editorRef.current, revealLine);
+    }
+  }, [revealLine, revealNonce]);
 
   const handleChange = useCallback<OnChange>(
     (next) => {

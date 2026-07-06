@@ -2,6 +2,8 @@ import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } fro
 import type { Dispatch, ReactElement, RefObject, SetStateAction } from "react";
 import type {
   BridgeEvent,
+  ContentMatch,
+  ContentSearchResults,
   DirListing,
   FileContents,
   GitBranches,
@@ -10,7 +12,8 @@ import type {
   GitFileVersions,
   GitOpResult,
   GitOverview,
-  GitStatus
+  GitStatus,
+  SearchResults
 } from "@honeydrunk/honeyhub-types";
 import type { WireClient } from "../../wire/client";
 import { basename, isWithin } from "../../paths";
@@ -273,6 +276,8 @@ interface RepoEventContext {
   client: WireClient;
   folderRef: RefObject<string>;
   activeRef: RefObject<boolean>;
+  searchQueryRef: RefObject<string>;
+  searchFlagsRef: RefObject<{ caseSensitive: boolean; wholeWord: boolean; isRegex: boolean }>;
   pendingDiff: RefObject<{ root: string; path?: string } | undefined>;
   savingPaths: RefObject<Set<string>>;
   refreshOverviewRef: RefObject<() => void>;
@@ -286,6 +291,9 @@ interface RepoEventContext {
   setFeedback: Dispatch<SetStateAction<GitOpResult | undefined>>;
   setBusy: Dispatch<SetStateAction<boolean>>;
   setCommitMessage: Dispatch<SetStateAction<string>>;
+  setSearchResults: Dispatch<SetStateAction<ContentSearchResults | undefined>>;
+  setFileHits: Dispatch<SetStateAction<SearchResults | undefined>>;
+  setSearching: Dispatch<SetStateAction<boolean>>;
 }
 
 type FileWrittenResult = Extract<BridgeEvent["payload"], { kind: "file_written" }>["result"];
@@ -354,6 +362,32 @@ function applyFileWritten(result: FileWrittenResult, ctx: RepoEventContext): voi
   }
 }
 
+/** Fold a content-search result set into state, but only when it answers the CURRENT scope +
+    query + flags (the event bus is shared, and a superseded query's late result must not clobber
+    a newer one; the same query with different case/word/regex flags is a different search).
+    Clears the in-flight indicator once a correlated result lands. */
+function applyContentSearchResults(results: ContentSearchResults, ctx: RepoEventContext): void {
+  const flags = ctx.searchFlagsRef.current;
+  if (
+    results.root === ctx.folderRef.current &&
+    results.query.trim() === ctx.searchQueryRef.current.trim() &&
+    results.caseSensitive === flags.caseSensitive &&
+    results.wholeWord === flags.wholeWord &&
+    results.isRegex === flags.isRegex
+  ) {
+    ctx.setSearchResults(results);
+    ctx.setSearching(false);
+  }
+}
+
+/** Fold a filename-search result set into state when it answers the CURRENT scope + query (the
+    filename search has no flags, so root + query is its full identity). */
+function applyFileSearchResults(results: SearchResults, ctx: RepoEventContext): void {
+  if (results.root === ctx.folderRef.current && results.query.trim() === ctx.searchQueryRef.current.trim()) {
+    ctx.setFileHits(results);
+  }
+}
+
 function applyFsChanged(paths: string[], ctx: RepoEventContext): void {
   if (
     ctx.activeRef.current &&
@@ -401,6 +435,12 @@ function applyRepoEvent(event: BridgeEvent, ctx: RepoEventContext): void {
       break;
     case "file_written":
       applyFileWritten(payload.result, ctx);
+      break;
+    case "content_search_results":
+      applyContentSearchResults(payload.results, ctx);
+      break;
+    case "search_results":
+      applyFileSearchResults(payload.results, ctx);
       break;
     case "fs_changed":
       applyFsChanged(payload.paths, ctx);
@@ -735,7 +775,17 @@ function BranchIcon(): ReactElement {
   );
 }
 
-type LeftPanel = "explorer" | "sourceControl";
+/** The activity rail's "Search" glyph: a magnifier. */
+function SearchIcon(): ReactElement {
+  return (
+    <svg viewBox="0 0 16 16" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="1.3" aria-hidden="true">
+      <circle cx="6.8" cy="6.8" r="4.4" />
+      <path d="M10 10l3.4 3.4" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+type LeftPanel = "explorer" | "sourceControl" | "search";
 
 interface ActivityRailProps {
   active: LeftPanel;
@@ -745,9 +795,10 @@ interface ActivityRailProps {
   onSelect: (panel: LeftPanel) => void;
 }
 
-/** The far-left activity rail (VS Code model): switches the sidebar between the file explorer and
-    the source-control panel. Only the active icon is highlighted; the panels themselves swap. The
-    Source control icon carries a change-count badge when the active repo has uncommitted files. */
+/** The far-left activity rail (VS Code model): switches the sidebar between the file explorer, the
+    repo-wide search panel, and the source-control panel. Only the active icon is highlighted; the
+    panels themselves swap. The Source control icon carries a change-count badge when the active
+    repo has uncommitted files. */
 function ActivityRail({ active, changeCount, onSelect }: Readonly<ActivityRailProps>): ReactElement {
   return (
     <nav className="repos-rail" aria-label="Views">
@@ -760,6 +811,16 @@ function ActivityRail({ active, changeCount, onSelect }: Readonly<ActivityRailPr
         onClick={() => onSelect("explorer")}
       >
         <ExplorerIcon />
+      </button>
+      <button
+        type="button"
+        className={`repos-rail-btn${active === "search" ? " is-active" : ""}`}
+        aria-label="Search"
+        aria-pressed={active === "search"}
+        title="Search"
+        onClick={() => onSelect("search")}
+      >
+        <SearchIcon />
       </button>
       <button
         type="button"
@@ -777,6 +838,369 @@ function ActivityRail({ active, changeCount, onSelect }: Readonly<ActivityRailPr
         )}
       </button>
     </nav>
+  );
+}
+
+/** Where the current search reveal points, so the editor can scroll to a clicked match. The
+    `nonce` forces a re-reveal even when the same line is clicked twice. */
+interface RevealTarget {
+  path: string;
+  line: number;
+  nonce: number;
+}
+
+/** Group a flat match list by file, preserving first-seen order (the bridge already returns
+    matches grouped per file, so this keeps that order for the collapsible headers). */
+function groupMatchesByFile(matches: ContentMatch[]): Array<{ path: string; matches: ContentMatch[] }> {
+  const order: string[] = [];
+  const byPath = new Map<string, ContentMatch[]>();
+  for (const match of matches) {
+    const existing = byPath.get(match.path);
+    if (existing === undefined) {
+      byPath.set(match.path, [match]);
+      order.push(match.path);
+    } else {
+      existing.push(match);
+    }
+  }
+  return order.map((path) => ({ path, matches: byPath.get(path) ?? [] }));
+}
+
+/** The length (in code points) of the matched substring at `start` in `text`, so the highlight
+    covers exactly the hit. Literal searches use the query length; a regex is matched stickily at
+    the match start (an invalid regex highlights nothing). */
+function matchLength(
+  text: string,
+  start: number,
+  query: string,
+  caseSensitive: boolean,
+  regex: boolean
+): number {
+  const trimmed = query.trim();
+  if (!regex) {
+    return [...trimmed].length;
+  }
+  // Regex highlighting only: the operator explicitly enabled regex-search mode, so the
+  // pattern is their own, matched against a single already-capped line (<= the bridge's
+  // MAX_LINE_TEXT_CHARS) in their own browser; an overlong pattern is skipped as a cheap
+  // catastrophic-backtracking guard, and a bad pattern is caught below.
+  if (trimmed.length > MAX_HIGHLIGHT_PATTERN_LEN) {
+    return 0;
+  }
+  try {
+    // eslint-disable-next-line security/detect-non-literal-regexp -- operator's own regex, capped line, self-scoped (see above)
+    const sticky = new RegExp(trimmed, `${caseSensitive ? "" : "i"}y`); // NOSONAR: user-intended regex-search feature on own local files
+    const sub = [...text].slice(start).join("");
+    sticky.lastIndex = 0;
+    const found = sticky.exec(sub);
+    return found !== null ? [...found[0]].length : 0;
+  } catch {
+    return 0;
+  }
+}
+
+/** Longest regex-search pattern honored for highlighting; a longer one is skipped as a
+    cheap guard against a pathological backtracking pattern. */
+const MAX_HIGHLIGHT_PATTERN_LEN = 200;
+
+/** Split a matched line into the text before the hit, the hit itself, and the text after — so the
+    hit can be wrapped in a `<mark>`. Works in code points so multi-byte characters stay intact. */
+function highlightSegments(
+  match: ContentMatch,
+  query: string,
+  caseSensitive: boolean,
+  regex: boolean
+): { before: string; hit: string; after: string } {
+  const chars = [...match.lineText];
+  const start = Math.max(0, (match.column ?? 1) - 1);
+  const length = matchLength(match.lineText, start, query, caseSensitive, regex);
+  if (length <= 0 || start >= chars.length) {
+    return { before: match.lineText, hit: "", after: "" };
+  }
+  return {
+    before: chars.slice(0, start).join(""),
+    hit: chars.slice(start, start + length).join(""),
+    after: chars.slice(start + length).join("")
+  };
+}
+
+interface SearchPanelProps {
+  /** The folder the search is scoped to (shown in the input placeholder). */
+  scopeLabel: string;
+  /** The scope's absolute root, used to render file hits with a repo-relative dir. */
+  scopeRoot: string;
+  query: string;
+  caseSensitive: boolean;
+  wholeWord: boolean;
+  regex: boolean;
+  searching: boolean;
+  error: string | undefined;
+  results: ContentSearchResults | undefined;
+  /** Filename hits for the same query (files whose NAME contains the query). */
+  fileHits: SearchResults | undefined;
+  onQuery: (value: string) => void;
+  onToggleCase: () => void;
+  onToggleWord: () => void;
+  onToggleRegex: () => void;
+  onOpenMatch: (match: ContentMatch) => void;
+  onOpenFile: (path: string) => void;
+}
+
+/** The repo-wide search panel (VS Code's "Find in Files"): a debounced query input, the
+    case/word/regex toggles, and results grouped by file with the matched substring highlighted.
+    Clicking a match asks the parent to open the file at that line. */
+function SearchPanel({
+  scopeLabel,
+  scopeRoot,
+  query,
+  caseSensitive,
+  wholeWord,
+  regex,
+  searching,
+  error,
+  results,
+  fileHits,
+  onQuery,
+  onToggleCase,
+  onToggleWord,
+  onToggleRegex,
+  onOpenMatch,
+  onOpenFile
+}: Readonly<SearchPanelProps>): ReactElement {
+  const [collapsed, setCollapsed] = useState<Set<string>>(() => new Set());
+  const toggleCollapsed = (path: string) => togglePathInSet(setCollapsed, path);
+  const groups = useMemo(() => groupMatchesByFile(results?.matches ?? []), [results]);
+
+  return (
+    <div className="repos-search" aria-label="Search">
+      <p className="repos-pane-title">Search</p>
+      <div className="repos-search-controls">
+        <input
+          className="repos-search-input"
+          aria-label="Search in files"
+          type="search"
+          value={query}
+          placeholder={`Search in ${scopeLabel}…`}
+          onChange={(event) => onQuery(event.target.value)}
+        />
+        <div className="repos-search-toggles" role="group" aria-label="Search options">
+          <button
+            type="button"
+            className={`repos-search-toggle${caseSensitive ? " is-active" : ""}`}
+            aria-label="Match case"
+            aria-pressed={caseSensitive}
+            title="Match case"
+            onClick={onToggleCase}
+          >
+            Aa
+          </button>
+          <button
+            type="button"
+            className={`repos-search-toggle${wholeWord ? " is-active" : ""}`}
+            aria-label="Match whole word"
+            aria-pressed={wholeWord}
+            title="Match whole word"
+            onClick={onToggleWord}
+          >
+            W
+          </button>
+          <button
+            type="button"
+            className={`repos-search-toggle${regex ? " is-active" : ""}`}
+            aria-label="Use regular expression"
+            aria-pressed={regex}
+            title="Use regular expression"
+            onClick={onToggleRegex}
+          >
+            .*
+          </button>
+        </div>
+      </div>
+      <FileHitsSection query={query} scopeRoot={scopeRoot} fileHits={fileHits} onOpenFile={onOpenFile} />
+      <SearchResultsBody
+        query={query}
+        searching={searching}
+        error={error}
+        results={results}
+        groups={groups}
+        collapsed={collapsed}
+        caseSensitive={caseSensitive}
+        regex={regex}
+        hasFileHits={fileHits !== undefined && fileHits.hits.length > 0}
+        onToggleCollapsed={toggleCollapsed}
+        onOpenMatch={onOpenMatch}
+      />
+    </div>
+  );
+}
+
+/** Cap on filename hits rendered in the panel (the bridge caps the walk separately). */
+const MAX_FILE_HITS_SHOWN = 25;
+
+interface FileHitsSectionProps {
+  query: string;
+  scopeRoot: string;
+  fileHits: SearchResults | undefined;
+  onOpenFile: (path: string) => void;
+}
+
+/** Files whose NAME contains the query (the "open the file called 0043" case), listed above the
+    content matches. Each hit shows the filename plus its scope-relative folder; clicking opens
+    the file in the editor. */
+function FileHitsSection({
+  query,
+  scopeRoot,
+  fileHits,
+  onOpenFile
+}: Readonly<FileHitsSectionProps>): ReactElement | null {
+  if (query.trim() === "" || fileHits === undefined || fileHits.hits.length === 0) {
+    return null;
+  }
+  const shown = fileHits.hits.slice(0, MAX_FILE_HITS_SHOWN);
+  const hidden = fileHits.hits.length - shown.length;
+  const fileWord = fileHits.hits.length === 1 ? "file" : "files";
+  return (
+    <div className="repos-search-filehits">
+      <p className="repos-search-summary">
+        {fileHits.hits.length} matching {fileWord}
+        {(hidden > 0 || fileHits.truncated) && (
+          <span className="repos-search-truncated"> · showing the first {shown.length}</span>
+        )}
+      </p>
+      <ul className="repos-search-groups">
+        {shown.map((hit) => (
+          <li key={hit.path} className="repos-search-group">
+            <button
+              type="button"
+              className="repos-search-file-head"
+              title={hit.path}
+              onClick={() => onOpenFile(hit.path)}
+            >
+              <span aria-hidden="true">{fileIcon(hit.name)}</span>
+              <span className="repos-search-filename">{hit.name}</span>
+              <span className="repos-search-filedir">{relativeDirLabel(hit.path, hit.name, scopeRoot)}</span>
+            </button>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+/** The scope-relative folder a hit lives in ("src/routes"), or "." at the scope root. */
+function relativeDirLabel(path: string, name: string, scopeRoot: string): string {
+  let dir = path.slice(0, Math.max(0, path.length - name.length)).replace(/[\\/]+$/, "");
+  if (scopeRoot !== "" && dir.toLowerCase().startsWith(scopeRoot.toLowerCase())) {
+    dir = dir.slice(scopeRoot.length).replace(/^[\\/]+/, "");
+  }
+  return dir === "" ? "." : dir.replaceAll("\\", "/");
+}
+
+interface SearchResultsBodyProps {
+  query: string;
+  searching: boolean;
+  error: string | undefined;
+  results: ContentSearchResults | undefined;
+  groups: Array<{ path: string; matches: ContentMatch[] }>;
+  collapsed: Set<string>;
+  caseSensitive: boolean;
+  regex: boolean;
+  /** True when the filename section above already lists hits, so an empty content result reads
+      "no content matches" instead of a flat (and then wrong-looking) "no results". */
+  hasFileHits: boolean;
+  onToggleCollapsed: (path: string) => void;
+  onOpenMatch: (match: ContentMatch) => void;
+}
+
+/** The results region under the search controls: empty-query (blank), searching, error, no-match,
+    or the grouped result list with a summary + truncation notice. */
+function SearchResultsBody({
+  query,
+  searching,
+  error,
+  results,
+  groups,
+  collapsed,
+  caseSensitive,
+  regex,
+  hasFileHits,
+  onToggleCollapsed,
+  onOpenMatch
+}: Readonly<SearchResultsBodyProps>): ReactElement | null {
+  if (query.trim() === "") {
+    // Empty query = empty panel (no results shown).
+    return null;
+  }
+  if (error !== undefined) {
+    return (
+      <p role="alert" className="settings-error">
+        {error}
+      </p>
+    );
+  }
+  if (results === undefined) {
+    return <p className="repos-hint">{searching ? "Searching…" : ""}</p>;
+  }
+  if (results.matches.length === 0) {
+    return <p className="repos-hint">{hasFileHits ? "No content matches." : "No results."}</p>;
+  }
+  const fileWord = results.fileCount === 1 ? "file" : "files";
+  const matchWord = results.matches.length === 1 ? "result" : "results";
+  return (
+    <div className="repos-search-results">
+      <p className="repos-search-summary">
+        {results.matches.length} {matchWord} in {results.fileCount} {fileWord}
+        {results.truncated && (
+          <span className="repos-search-truncated"> · showing the first {results.matches.length} (more not shown)</span>
+        )}
+      </p>
+      <ul className="repos-search-groups">
+        {groups.map((group) => {
+          const isCollapsed = collapsed.has(group.path);
+          return (
+            <li key={group.path} className="repos-search-group">
+              <button
+                type="button"
+                className="repos-search-file-head"
+                aria-expanded={!isCollapsed}
+                onClick={() => onToggleCollapsed(group.path)}
+                title={group.path}
+              >
+                <span className="repos-search-caret" aria-hidden="true">
+                  {isCollapsed ? "▸" : "▾"}
+                </span>
+                <span className="repos-search-filename">{basename(group.path)}</span>
+                <span className="repos-file-count">{group.matches.length}</span>
+              </button>
+              {!isCollapsed && (
+                <ul className="repos-search-matches">
+                  {group.matches.map((match) => {
+                    const seg = highlightSegments(match, query, caseSensitive, regex);
+                    return (
+                      <li key={`${match.line}:${match.column ?? 0}:${match.lineText}`}>
+                        <button
+                          type="button"
+                          className="repos-search-match"
+                          title={`${group.path}:${match.line}`}
+                          onClick={() => onOpenMatch(match)}
+                        >
+                          <span className="repos-search-lineno">{match.line}</span>
+                          <span className="repos-search-linetext">
+                            {seg.before}
+                            {seg.hit !== "" && <mark className="repos-search-hit">{seg.hit}</mark>}
+                            {seg.after}
+                          </span>
+                        </button>
+                      </li>
+                    );
+                  })}
+                </ul>
+              )}
+            </li>
+          );
+        })}
+      </ul>
+    </div>
   );
 }
 
@@ -818,9 +1242,25 @@ export function RepositoriesView({
   const [selected, setSelected] = useState<Set<string>>(() => new Set());
   const [menu, setMenu] = useState<ContextTarget | undefined>(undefined);
 
-  // Which panel the far-left activity rail shows (VS Code model): the explorer tree or the
-  // source-control panel. Only one is mounted at a time; the Monaco editor always holds the centre.
+  // Which panel the far-left activity rail shows (VS Code model): the explorer tree, the repo-wide
+  // search panel, or the source-control panel. Only one is mounted at a time; the Monaco editor
+  // always holds the centre.
   const [leftPanel, setLeftPanel] = useState<LeftPanel>("explorer");
+
+  // Repo-wide search (VS Code "Find in Files"): the debounced query, its case/word/regex flags, the
+  // in-flight indicator, the last error, and the latest results. Scoped to the selected `folder`.
+  const [searchQuery, setSearchQuery] = useState("");
+  const [searchCaseSensitive, setSearchCaseSensitive] = useState(false);
+  const [searchWholeWord, setSearchWholeWord] = useState(false);
+  const [searchRegex, setSearchRegex] = useState(false);
+  const [searching, setSearching] = useState(false);
+  const [searchError, setSearchError] = useState<string | undefined>(undefined);
+  const [searchResults, setSearchResults] = useState<ContentSearchResults | undefined>(undefined);
+  // Filename hits for the same query (the "find the file named 0043" case): the panel runs the
+  // bridge's filename search alongside the content search and lists matching files first.
+  const [fileHits, setFileHits] = useState<SearchResults | undefined>(undefined);
+  // Where a clicked search match wants the editor to scroll (path + 1-based line + a re-reveal nonce).
+  const [revealTarget, setRevealTarget] = useState<RevealTarget | undefined>(undefined);
 
   // Center pane: the editor (a tab strip of open files) or a diff.
   const [viewerMode, setViewerMode] = useState<"file" | "diff">("file");
@@ -836,6 +1276,10 @@ export function RepositoriesView({
 
   const activeFile = openFiles.find((tab) => tab.path === activeFilePath);
   const activeDirty = activeFile !== undefined && isDirtyTab(activeFile);
+  // The reveal target applies only to the currently-active tab (so switching tabs doesn't drag a
+  // stale search jump onto another file).
+  const revealForActive =
+    activeFile !== undefined && revealTarget?.path === activeFile.path ? revealTarget : undefined;
   // Every open tab with unsaved edits (drives the "N unsaved" indicator + the Save-all gate).
   const dirtyTabs = openFiles.filter(isDirtyTab);
   const dirtyCount = dirtyTabs.length;
@@ -859,6 +1303,20 @@ export function RepositoriesView({
   openFilesRef.current = openFiles;
   const activeFilePathRef = useRef(activeFilePath);
   activeFilePathRef.current = activeFilePath;
+  // Latest search query + flags, read synchronously by the event fold so a stale (superseded)
+  // result set for an earlier query or an earlier flag combination is ignored.
+  const searchQueryRef = useRef(searchQuery);
+  searchQueryRef.current = searchQuery;
+  const searchFlagsRef = useRef({
+    caseSensitive: searchCaseSensitive,
+    wholeWord: searchWholeWord,
+    isRegex: searchRegex
+  });
+  searchFlagsRef.current = {
+    caseSensitive: searchCaseSensitive,
+    wholeWord: searchWholeWord,
+    isRegex: searchRegex
+  };
 
   const loadDir = useCallback(
     (path: string) => {
@@ -890,6 +1348,8 @@ export function RepositoriesView({
       client,
       folderRef,
       activeRef,
+      searchQueryRef,
+      searchFlagsRef,
       pendingDiff,
       savingPaths,
       refreshOverviewRef,
@@ -902,7 +1362,10 @@ export function RepositoriesView({
       setFileVersions,
       setFeedback,
       setBusy,
-      setCommitMessage
+      setCommitMessage,
+      setSearchResults,
+      setFileHits,
+      setSearching
     };
     return client.subscribe((event) => applyRepoEvent(event, ctx));
   }, [client]);
@@ -955,6 +1418,50 @@ export function RepositoriesView({
     }
   }, [client, activeRepo]);
 
+  // Debounced repo-wide content search: fire `searchContent` a beat after the query/flags settle,
+  // scoped to the selected `folder`. An empty query clears the panel; the result lands via the
+  // `content_search_results` fold (correlated by root+query). Only runs while the panel is open.
+  useEffect(() => {
+    if (!active || leftPanel !== "search") {
+      return;
+    }
+    const trimmed = searchQuery.trim();
+    if (trimmed === "" || folder === "") {
+      setSearchResults(undefined);
+      setFileHits(undefined);
+      setSearching(false);
+      setSearchError(undefined);
+      return;
+    }
+    setSearching(true);
+    setSearchError(undefined);
+    const handle = setTimeout(() => {
+      void client
+        .searchContent(folder, trimmed, {
+          caseSensitive: searchCaseSensitive,
+          wholeWord: searchWholeWord,
+          isRegex: searchRegex
+        })
+        .catch((cause: unknown) => {
+          setSearching(false);
+          setSearchError(errorMessage(cause, "search failed"));
+        });
+      // The filename search rides the same query (its own result event, correlated
+      // independently); a failure here never blocks the content results.
+      void client.searchFiles(folder, trimmed).catch(() => undefined);
+    }, 250);
+    return () => clearTimeout(handle);
+  }, [
+    active,
+    leftPanel,
+    searchQuery,
+    searchCaseSensitive,
+    searchWholeWord,
+    searchRegex,
+    folder,
+    client
+  ]);
+
   const toggleDir = (path: string) => toggleExpandedDir(setExpandedDirs, listings, loadDir, path);
 
   const diffControls: DiffControls = { client, setViewerMode, setDiff, setFileVersions, pendingDiff };
@@ -977,6 +1484,15 @@ export function RepositoriesView({
       });
     });
   };
+
+  // Open a search match: open (or focus) its file in a tab through the same path as any other
+  // open, then record a reveal target so the editor scrolls to + selects the matched line. The
+  // nonce makes clicking the same match twice re-scroll.
+  const openFileAtLine = (path: string, line: number): void => {
+    openFile(path);
+    setRevealTarget({ path, line, nonce: Date.now() });
+  };
+  const onOpenMatch = (match: ContentMatch): void => openFileAtLine(match.path, match.line);
 
   const activateTab = (path: string): void => {
     setViewerMode("file");
@@ -1059,6 +1575,12 @@ export function RepositoriesView({
     savingPaths.current.clear();
     setViewerMode("file");
     setDiff(undefined);
+    // The search results belong to the old folder — clear them (the query text is kept so the
+    // user can re-run it against the new scope).
+    setSearchResults(undefined);
+    setSearching(false);
+    setSearchError(undefined);
+    setRevealTarget(undefined);
   };
 
   const repo = overview?.repos.find((candidate) => candidate.root === activeRepo);
@@ -1152,7 +1674,7 @@ export function RepositoriesView({
       <div className="repos-body">
         <ActivityRail active={leftPanel} changeCount={repo?.files.length ?? 0} onSelect={setLeftPanel} />
 
-        {leftPanel === "explorer" ? (
+        {leftPanel === "explorer" && (
           <aside className="repos-sidebar" aria-label="Explorer">
             <p className="repos-pane-title">Files</p>
             <ul className="repos-tree">
@@ -1166,7 +1688,32 @@ export function RepositoriesView({
               />
             </ul>
           </aside>
-        ) : (
+        )}
+
+        {leftPanel === "search" && (
+          <aside className="repos-sidebar" aria-label="Search panel">
+            <SearchPanel
+              scopeLabel={basename(folder)}
+              scopeRoot={folder}
+              query={searchQuery}
+              caseSensitive={searchCaseSensitive}
+              wholeWord={searchWholeWord}
+              regex={searchRegex}
+              searching={searching}
+              error={searchError}
+              results={searchResults}
+              fileHits={fileHits}
+              onQuery={setSearchQuery}
+              onToggleCase={() => setSearchCaseSensitive((prev) => !prev)}
+              onToggleWord={() => setSearchWholeWord((prev) => !prev)}
+              onToggleRegex={() => setSearchRegex((prev) => !prev)}
+              onOpenMatch={onOpenMatch}
+              onOpenFile={openFile}
+            />
+          </aside>
+        )}
+
+        {leftPanel === "sourceControl" && (
           <aside className="repos-sidebar" aria-label="Source control panel">
             <SourceControl
               repos={overview?.repos ?? []}
@@ -1233,6 +1780,14 @@ export function RepositoriesView({
               dirty={activeDirty}
               saving={activeFile?.saving ?? false}
               saveError={activeFile?.saveError}
+              revealLine={revealForActive?.line}
+              revealNonce={revealForActive?.nonce}
+              lspClient={client}
+              repoRoot={
+                activeFile === undefined
+                  ? undefined
+                  : repoForFile(overview?.repos ?? [], activeFile.path)
+              }
               onDraft={setActiveDraft}
               onSave={saveDraft}
               onRevert={revertDraft}
@@ -1631,6 +2186,14 @@ interface FilePaneProps {
   dirty: boolean;
   saving: boolean;
   saveError: string | undefined;
+  /** A 1-based line to scroll to + select (set when a search match is clicked). */
+  revealLine?: number | undefined;
+  /** Bumps to force a re-reveal of the same line. */
+  revealNonce?: number | undefined;
+  /** The bridge wire client, threaded to the editor for LSP code intelligence (ADR-0102). */
+  lspClient?: WireClient | undefined;
+  /** The open file's owning repo root, scoping its language server. */
+  repoRoot?: string | undefined;
   onDraft: (value: string) => void;
   onSave: () => void;
   onRevert: () => void;
@@ -1650,16 +2213,27 @@ function FilePane({
   dirty,
   saving,
   saveError,
+  revealLine,
+  revealNonce,
+  lspClient,
+  repoRoot,
   onDraft,
   onSave,
   onRevert
 }: Readonly<FilePaneProps>): ReactElement {
   const [previewMode, setPreviewMode] = useState(false);
+  // A quiet, honest note when a language server is not running/installed for this file
+  // (undefined when a server is running or no LSP applies). Shown unobtrusively in the header.
+  const [lspNote, setLspNote] = useState<string | undefined>(undefined);
   const path = file?.path;
   const markdown = path !== undefined && isMarkdownFile(path);
   // Each newly opened file defaults to Edit; reset the toggle whenever the open file changes.
   useEffect(() => {
     setPreviewMode(false);
+  }, [path]);
+  // Clear the stale note when the open file changes; the editor re-reports for the new file.
+  useEffect(() => {
+    setLspNote(undefined);
   }, [path]);
 
   if (loading) {
@@ -1708,7 +2282,9 @@ function FilePane({
               </button>
             </span>
           )}
-          <span className="file-viewer-meta">{file.truncated ? "truncated (too large to edit)" : ""}</span>
+          <span className="file-viewer-meta">
+            {file.truncated ? "truncated (too large to edit)" : lspNote !== undefined ? lspNote : ""}
+          </span>
           <button type="button" className="git-link" onClick={onRevert} disabled={saving || !dirty}>
             Revert
           </button>
@@ -1732,7 +2308,7 @@ function FilePane({
       {showPreview ? (
         <article className="markdown-body" dangerouslySetInnerHTML={{ __html: renderMarkdown(draft) }} />
       ) : (
-        <div className="repos-editor-host">
+        <div className="repos-editor-host" data-reveal-line={revealLine ?? undefined}>
           <Suspense fallback={<div className="file-viewer empty">Loading editor…</div>}>
             <CodeEditor
               path={file.path}
@@ -1740,6 +2316,11 @@ function FilePane({
               onChange={onDraft}
               onSave={onSave}
               readOnly={file.truncated}
+              revealLine={revealLine}
+              revealNonce={revealNonce}
+              lspClient={lspClient}
+              repoRoot={repoRoot}
+              onLspStatus={setLspNote}
             />
           </Suspense>
         </div>

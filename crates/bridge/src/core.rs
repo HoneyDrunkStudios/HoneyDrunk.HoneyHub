@@ -1182,6 +1182,13 @@ fn validate_stream_payload(
                 "a backend stream must not emit device-wide search results",
             ));
         }
+        BridgeEventPayload::ContentSearchResults { .. } => {
+            // Device-wide, host-synthesized content-search result — never streamed.
+            return Err(BridgeError::new(
+                "event_unexpected_content_search_results",
+                "a backend stream must not emit device-wide content search results",
+            ));
+        }
         BridgeEventPayload::WorkspaceFolders { .. } => {
             // Device-wide, host-synthesized workspace-file resolution — never streamed.
             return Err(BridgeError::new(
@@ -1411,6 +1418,20 @@ fn validate_stream_payload(
             return Err(BridgeError::new(
                 "event_unexpected_usage_probe",
                 "a backend stream must not emit device-wide usage probes",
+            ));
+        }
+        BridgeEventPayload::LspMessage { .. } => {
+            // Device-wide, host-synthesized LSP proxy message — never streamed (ADR-0102).
+            return Err(BridgeError::new(
+                "event_unexpected_lsp_message",
+                "a backend stream must not emit device-wide LSP messages",
+            ));
+        }
+        BridgeEventPayload::LspStatus { .. } => {
+            // Device-wide, host-synthesized LSP lifecycle status — never streamed.
+            return Err(BridgeError::new(
+                "event_unexpected_lsp_status",
+                "a backend stream must not emit device-wide LSP status",
             ));
         }
     }
@@ -3198,6 +3219,27 @@ mod tests {
                 },
             }),
             "event_unexpected_roadmap"
+        );
+        assert_eq!(
+            err_code(BridgeEventPayload::LspMessage {
+                root: "r".to_string(),
+                language_id: "typescript".to_string(),
+                message: serde_json::json!({ "jsonrpc": "2.0" }),
+            }),
+            "event_unexpected_lsp_message"
+        );
+        assert_eq!(
+            err_code(BridgeEventPayload::LspStatus {
+                status: crate::lsp::LspStatus {
+                    root: "r".to_string(),
+                    language_id: "typescript".to_string(),
+                    server_id: "typescript-language-server".to_string(),
+                    installed: true,
+                    running: true,
+                    reason: String::new(),
+                },
+            }),
+            "event_unexpected_lsp_status"
         );
     }
 }

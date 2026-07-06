@@ -263,6 +263,21 @@ export class WebSocketWireClient implements WireClient {
     await this.dispatch({ kind: "search_files", root, query });
   }
 
+  async searchContent(
+    root: string,
+    query: string,
+    options?: { caseSensitive?: boolean; wholeWord?: boolean; isRegex?: boolean }
+  ): Promise<void> {
+    await this.dispatch({
+      kind: "search_content",
+      root,
+      query,
+      caseSensitive: options?.caseSensitive ?? false,
+      wholeWord: options?.wholeWord ?? false,
+      isRegex: options?.isRegex ?? false
+    });
+  }
+
   async resolveWorkspaceFile(path: string): Promise<void> {
     await this.dispatch({ kind: "resolve_workspace_file", path });
   }
@@ -596,5 +611,17 @@ export class WebSocketWireClient implements WireClient {
 
   async runCheck(root: string, checkId: string): Promise<void> {
     await this.dispatch({ kind: "run_check", root, check: checkId });
+  }
+
+  async lspStart(root: string, languageId: string): Promise<void> {
+    await this.dispatch({ kind: "lsp_start", root, languageId });
+  }
+
+  async lspSend(root: string, languageId: string, message: unknown): Promise<void> {
+    await this.dispatch({ kind: "lsp_send", root, languageId, message });
+  }
+
+  async lspStop(root: string, languageId: string): Promise<void> {
+    await this.dispatch({ kind: "lsp_stop", root, languageId });
   }
 }

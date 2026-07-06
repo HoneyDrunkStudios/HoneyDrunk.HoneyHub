@@ -9,6 +9,7 @@ pub mod backend_catalog;
 pub mod checks;
 pub mod clock;
 pub mod coaching;
+pub mod contentsearch;
 pub mod core;
 pub mod dispatch;
 pub mod environment;
@@ -17,6 +18,7 @@ pub mod git;
 pub mod grafana;
 pub mod jobs;
 pub mod keyvault;
+pub mod lsp;
 pub mod network;
 pub mod notify;
 pub mod pairing;
@@ -52,6 +54,9 @@ pub use checks::{
     parse_extra_checks, resolve_check, run_check, CheckDenialReason, CheckDisposition, CheckOutcome,
 };
 pub use coaching::{coach, CoachingSnapshot};
+pub use contentsearch::{
+    search_content, ContentMatch, ContentSearchEngine, ContentSearchOptions, ContentSearchResults,
+};
 pub use core::{BridgeRuntime, ManagedRun, ReplyOutcome};
 pub use dispatch::{
     audit_dispatch, backend_id, child_cap_from_env, dispatch_backends_from_env, is_valid_model_id,
@@ -83,6 +88,7 @@ pub use keyvault::{
     AzureSubscription, AzureSubscriptionList, ExpiringObject, ExpiringObjects, KeyVault,
     KeyVaultList, SecretReveal, VaultObject, VaultObjectKind, VaultObjects,
 };
+pub use lsp::{LspServer, LspStatus, ServerSpec};
 pub use network::{reachable_addresses, NetAddress, NetAddressKind, NetworkInfo};
 pub use notify::{
     notification_for_artifact, notification_for_state, Notification, NotificationCenter,
