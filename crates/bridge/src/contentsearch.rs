@@ -382,7 +382,10 @@ fn search_with_fallback(
             "regex search needs ripgrep (rg) on PATH; it was not found",
         ));
     }
-    let needle = query.trim();
+    // Match on the RAW query (only empty-detection trims, done by the caller), so a
+    // fixed-string search for `" needle "` returns the same results whether ripgrep or this
+    // fallback runs. ripgrep receives the raw query too.
+    let needle = query;
     let mut acc = MatchAccumulator::new();
     let mut stack = vec![Path::new(root).to_path_buf()];
     let mut visited = 0usize;
@@ -621,6 +624,20 @@ mod tests {
         assert_eq!(hit.column, Some(9)); // 4 spaces + "let " = column 9
         assert_eq!(hit.line_text, "    let needle = 1;");
         assert!(!results.truncated);
+    }
+
+    #[test]
+    fn fallback_matches_the_raw_query_including_surrounding_whitespace() {
+        // The fallback must match on the RAW query (not a trimmed one) so it agrees with
+        // ripgrep's fixed-string behavior for a query that carries leading/trailing spaces.
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("f.txt"), b"a needle b\nneedle\n").unwrap();
+        let spaced =
+            search_with_fallback(dir.path().to_str().unwrap(), " needle ", opts()).unwrap();
+        // Only the line with a space on each side of `needle` matches; the bare `needle`
+        // line does not (it has no surrounding spaces).
+        assert_eq!(spaced.matches.len(), 1);
+        assert_eq!(spaced.matches[0].line, 1);
     }
 
     #[test]

@@ -195,6 +195,41 @@ async fn lsp_start_outside_the_allowlist_is_rejected() {
 }
 
 #[tokio::test]
+async fn client_shutdown_is_intercepted_not_forwarded() {
+    // A shared language server serves multiple cockpits; one cockpit's `shutdown` / `exit`
+    // must not terminate it for the others. The host intercepts these as no-ops (server
+    // lifecycle is host-owned), so the frame is acked, NOT surfaced as lsp_not_running and
+    // NOT forwarded to a server. Two cockpits are connected to prove the shared setting.
+    let (addr, token) = spawn_host().await;
+    let mut ws1 = connect(&addr, &token).await;
+    let ws2 = connect(&addr, &token).await;
+    send(
+        &mut ws1,
+        "frame-shutdown",
+        ClientCommand::LspSend {
+            root: workspace(),
+            language_id: "typescript".to_string(),
+            message: serde_json::json!({ "jsonrpc": "2.0", "id": 1, "method": "shutdown" }),
+        },
+    )
+    .await;
+
+    let outcome = read_until(&mut ws1, |frame| {
+        if frame.ack_frame_id.as_deref() == Some("frame-shutdown") {
+            Some((frame.kind.clone(), frame.error.as_ref().map(|e| e.code.clone())))
+        } else {
+            None
+        }
+    })
+    .await
+    .expect("a response for the shutdown frame");
+    assert_eq!(outcome.0, honeyhub_bridge::WireFrameKind::Ack);
+    assert!(outcome.1.is_none(), "shutdown must be acked, not errored");
+    // The second cockpit stays connected and unaffected.
+    drop(ws2);
+}
+
+#[tokio::test]
 async fn lsp_send_without_a_running_server_errors() {
     let (addr, token) = spawn_host().await;
     let mut ws = connect(&addr, &token).await;

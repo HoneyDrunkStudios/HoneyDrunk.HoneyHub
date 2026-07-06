@@ -366,7 +366,7 @@ mod tests {
             active_runs: Mutex::new(HashSet::new()),
             active_checks: Mutex::new(HashSet::new()),
             active_probes: Mutex::new(HashSet::new()),
-            active_lsp: Mutex::new(std::collections::HashMap::new()),
+            active_lsp: Mutex::new(crate::LspState::default()),
             connected_clients: std::sync::atomic::AtomicUsize::new(0),
             events: events_tx,
             watcher: Mutex::new(None),

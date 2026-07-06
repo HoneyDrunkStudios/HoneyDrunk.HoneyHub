@@ -61,7 +61,7 @@ struct Host {
     /// Live language servers, one per (canonical root, language) — long-lived supervised
     /// subprocesses reused across files, killed on stop / root-removal / last-client
     /// disconnect / shutdown (ADR-0102 D-C).
-    active_lsp: Mutex<HashMap<LspKey, honeyhub_bridge::LspServer>>,
+    active_lsp: Mutex<LspState>,
     /// Connected WebSocket clients. When the LAST one disconnects, every running language
     /// server is retired (ADR-0102 D-C: a server never outlives the cockpit it serves);
     /// a second paired device keeps them alive.
@@ -75,6 +75,19 @@ struct Host {
     /// poll loop can **revoke** a run's per-run capability token the moment the run reaches a
     /// terminal state, so a token cannot outlive the parent run it was minted for.
     dispatch: Option<Arc<DispatchGovernor>>,
+}
+
+/// The running language servers plus the allowlisted-roots snapshot they are validated
+/// against, behind ONE mutex so a frame's root-authorization check and the server
+/// write/broadcast are atomic with respect to root removal (ADR-0102 firm workspace-root
+/// removal). `SetWorkspaceRoots` updates `roots` and sweeps orphaned `servers` under this
+/// same lock, so no LSP path can observe "new roots but a still-registered server for a
+/// now-removed root" and slip a frame through. Kept OFF the runtime lock so a per-keystroke
+/// completion never queues behind a backend run.
+#[derive(Default)]
+struct LspState {
+    servers: HashMap<LspKey, honeyhub_bridge::LspServer>,
+    roots: honeyhub_bridge::WorkspaceAllowlist,
 }
 
 /// Identity of a language server: its workspace root (canonicalized so two spellings of
@@ -134,12 +147,19 @@ pub async fn serve(
     // endpoint may be served at all (ADR-0098 B — localhost only).
     let bound = listener.local_addr()?;
     let (events_tx, _events_rx) = broadcast::channel::<BridgeEvent>(1024);
+    // Seed the LSP roots snapshot from the runtime's initial allowlist, so LSP forwarding
+    // is authorized against the real roots before the first SetWorkspaceRoots (which then
+    // keeps the snapshot in sync under the active_lsp lock).
+    let initial_lsp = LspState {
+        servers: HashMap::new(),
+        roots: honeyhub_bridge::WorkspaceAllowlist::new(runtime.workspace_roots()),
+    };
     let host = Arc::new(Host {
         runtime: Mutex::new(runtime),
         active_runs: Mutex::new(std::collections::HashSet::new()),
         active_checks: Mutex::new(std::collections::HashSet::new()),
         active_probes: Mutex::new(std::collections::HashSet::new()),
-        active_lsp: Mutex::new(HashMap::new()),
+        active_lsp: Mutex::new(initial_lsp),
         connected_clients: std::sync::atomic::AtomicUsize::new(0),
         events: events_tx,
         watcher: Mutex::new(None),
@@ -436,8 +456,8 @@ async fn handle_socket(socket: WebSocket, host: Arc<Host>) {
         == 1
     {
         let orphans: Vec<honeyhub_bridge::LspServer> = {
-            let mut servers = host.active_lsp.lock().await;
-            servers.drain().map(|(_, server)| server).collect()
+            let mut state = host.active_lsp.lock().await;
+            state.servers.drain().map(|(_, server)| server).collect()
         };
         if !orphans.is_empty() {
             eprintln!(
@@ -522,18 +542,22 @@ async fn handle_command(
             ClientCommand::SetWorkspaceRoots { roots } => {
                 rewatch = Some(roots.clone());
                 runtime.set_workspace_roots(roots);
-                // Retire any language server whose root is no longer allowlisted — a
-                // supervised server must not outlive its authorization (ADR-0102). Collect the
-                // orphans while we still hold the runtime lock (so `workspace_allows` reflects
-                // the new set); they are dropped off-lock below.
-                let mut servers = host.active_lsp.lock().await;
-                let orphan_keys: Vec<LspKey> = servers
+                // Update the LSP roots snapshot AND sweep orphaned servers under the ONE
+                // active_lsp lock, so the two changes are atomic: no LSP send/pump can
+                // observe the new roots while a server for a now-removed root is still
+                // registered (ADR-0102 firm root removal + every-frame boundary). Orphans
+                // are dropped off-lock below.
+                let new_roots = runtime.workspace_roots();
+                let mut state = host.active_lsp.lock().await;
+                state.roots = honeyhub_bridge::WorkspaceAllowlist::new(new_roots);
+                let orphan_keys: Vec<LspKey> = state
+                    .servers
                     .keys()
-                    .filter(|key| !runtime.workspace_allows(&key.root))
+                    .filter(|key| !state.roots.allows(&key.root))
                     .cloned()
                     .collect();
                 for key in orphan_keys {
-                    if let Some(server) = servers.remove(&key) {
+                    if let Some(server) = state.servers.remove(&key) {
                         lsp_orphans.push(server);
                     }
                 }
@@ -1135,37 +1159,43 @@ async fn handle_lsp_command(
         } => {
             let mut message = message;
             let key = LspKey::new(&root, &language_id);
-            // Reject the whole send outright when the server's root is no longer
-            // allowlisted (ADR-0102 D-G): a URI-less frame (a bare notification) would
-            // otherwise keep flowing to a server rooted in a deauthorized directory until
-            // the orphan sweep tears it down. LspStop stays available for teardown.
-            if !host.runtime.lock().await.workspace_allows(&key.root) {
+            // A shared server serves multiple cockpits; one cockpit's `shutdown` / `exit`
+            // must not terminate the server out from under the others. Server lifecycle is
+            // host-owned (LspStop / disconnect teardown / root removal), so these are
+            // dropped here rather than forwarded (they are acknowledged as no-ops).
+            if matches!(
+                message.get("method").and_then(|m| m.as_str()),
+                Some("shutdown" | "exit")
+            ) {
+                return Ok(None);
+            }
+            // The proxy is a URI-validating gateway, not a dumb pipe (ADR-0102 D-G):
+            // command/config methods are denied, initializationOptions stripped, and every
+            // file URI must resolve inside THIS server's own canonical root (one server /
+            // one root). Validation runs against the roots snapshot HELD in active_lsp, and
+            // the root re-check + the server write happen under that SAME lock, so a
+            // concurrent SetWorkspaceRoots (which updates the snapshot and sweeps servers
+            // under the same lock) can never slip a frame to a server whose root it is
+            // removing (ADR-0102 firm root removal).
+            let mut state = host.active_lsp.lock().await;
+            if !state.roots.allows(&key.root) {
                 eprintln!("[lsp] refused frame for a deauthorized root ({language_id} in {root})");
                 return Err(BridgeError::new(
                     "lsp_root_not_allowed",
                     "the language server's workspace root is no longer allowlisted",
                 ));
             }
-            // ADR-0102 D-G: the proxy is a URI-validating gateway, not a dumb pipe.
-            // Command- and configuration-bearing methods are denied, client
-            // initializationOptions are stripped (configuration is host-owned), and every
-            // file URI in the frame must resolve inside THIS server's own canonical root
-            // (one server / one root), or the frame is refused. Scoping to the server's
-            // own root, not the union of all roots, means a server for root A can never
-            // name a file in an unrelated allowlisted root B.
-            let allowlist = lsp_scope_allowlist(host, &key.root).await;
+            let allowlist = honeyhub_bridge::WorkspaceAllowlist::new(vec![key.root.clone()]);
             if let Err(error) =
                 honeyhub_bridge::lsp::sanitize_client_message(&mut message, &allowlist)
             {
-                // Denial audit line, so a refused frame is diagnosable from the console.
                 eprintln!(
                     "[lsp] denied client frame ({language_id} in {root}): {}",
                     error.message
                 );
                 return Err(error);
             }
-            let mut servers = host.active_lsp.lock().await;
-            match servers.get_mut(&key) {
+            match state.servers.get_mut(&key) {
                 Some(server) => server.write_message(&message).map(|()| None),
                 None => Err(BridgeError::new(
                     "lsp_not_running",
@@ -1175,7 +1205,7 @@ async fn handle_lsp_command(
         }
         ClientCommand::LspStop { root, language_id } => {
             let key = LspKey::new(&root, &language_id);
-            let removed = host.active_lsp.lock().await.remove(&key);
+            let removed = host.active_lsp.lock().await.servers.remove(&key);
             if let Some(server) = removed {
                 // Drop off the async worker — Drop kills the tree and joins the reader thread.
                 tokio::task::spawn_blocking(move || drop(server));
@@ -1186,22 +1216,6 @@ async fn handle_lsp_command(
             "unsupported_command",
             "not an lsp command",
         )),
-    }
-}
-
-/// The allowlist a running server's frames are validated against (ADR-0102 D-G): exactly
-/// its own canonical root, and only while that root is still allowlisted (one server / one
-/// root). An empty allowlist (root removed) denies every URI until the orphan sweep tears
-/// the server down.
-async fn lsp_scope_allowlist(
-    host: &Arc<Host>,
-    server_root: &str,
-) -> honeyhub_bridge::WorkspaceAllowlist {
-    let runtime = host.runtime.lock().await;
-    if runtime.workspace_allows(server_root) {
-        honeyhub_bridge::WorkspaceAllowlist::new(vec![server_root.to_string()])
-    } else {
-        honeyhub_bridge::WorkspaceAllowlist::new(Vec::new())
     }
 }
 
@@ -1241,8 +1255,8 @@ fn spawn_lsp(host: &Arc<Host>, root: String, language_id: String) {
 
         // 2. Reuse a running server for this (language, root) across files.
         {
-            let mut servers = host.active_lsp.lock().await;
-            if let Some(server) = servers.get_mut(&key) {
+            let mut state = host.active_lsp.lock().await;
+            if let Some(server) = state.servers.get_mut(&key) {
                 if server.poll_exit().is_none() {
                     let server_id = server.server_id().to_string();
                     let _ = host.events.send(status(
@@ -1254,7 +1268,7 @@ fn spawn_lsp(host: &Arc<Host>, root: String, language_id: String) {
                     return;
                 }
                 // A dead husk lingered — drop it and re-spawn below.
-                let dead = servers.remove(&key);
+                let dead = state.servers.remove(&key);
                 drop(dead);
             }
         }
@@ -1301,18 +1315,15 @@ fn spawn_lsp(host: &Arc<Host>, root: String, language_id: String) {
             };
 
         // 5. Register (reconciling a start race: if a concurrent start won, drop ours).
-        // Authorization is RE-CHECKED here, under the runtime lock, because the LspStart
-        // gate ran before the async locate/spawn work and a concurrent SetWorkspaceRoots
-        // may have removed the root since. Holding the runtime lock across the insert
-        // serializes registration with the SetWorkspaceRoots orphan sweep (same lock
-        // order: runtime, then active_lsp), so a server can never be registered for a
-        // deauthorized root and then missed by the sweep.
+        // Authorization is RE-CHECKED here against the roots snapshot HELD in active_lsp,
+        // because the LspStart gate ran before the async locate/spawn work and a concurrent
+        // SetWorkspaceRoots may have removed the root since. Since SetWorkspaceRoots updates
+        // that snapshot and sweeps orphans under this same lock, a server can never be
+        // registered for a deauthorized root and then missed by the sweep.
         let server_process_id = {
-            let runtime = host.runtime.lock().await;
-            let mut servers = host.active_lsp.lock().await;
-            if !runtime.workspace_allows(&root) {
-                drop(servers);
-                drop(runtime);
+            let mut state = host.active_lsp.lock().await;
+            if !state.roots.allows(&key.root) {
+                drop(state);
                 tokio::task::spawn_blocking(move || drop(server));
                 let _ = host.events.send(status(
                     true,
@@ -1331,8 +1342,7 @@ fn spawn_lsp(host: &Arc<Host>, root: String, language_id: String) {
                 .load(std::sync::atomic::Ordering::SeqCst)
                 == 0
             {
-                drop(servers);
-                drop(runtime);
+                drop(state);
                 tokio::task::spawn_blocking(move || drop(server));
                 let _ = host.events.send(status(
                     true,
@@ -1342,9 +1352,8 @@ fn spawn_lsp(host: &Arc<Host>, root: String, language_id: String) {
                 ));
                 return;
             }
-            if servers.contains_key(&key) {
-                drop(servers);
-                drop(runtime);
+            if state.servers.contains_key(&key) {
+                drop(state);
                 tokio::task::spawn_blocking(move || drop(server));
                 let _ = host.events.send(status(
                     true,
@@ -1355,7 +1364,7 @@ fn spawn_lsp(host: &Arc<Host>, root: String, language_id: String) {
                 return;
             }
             let process_id = server.process_id();
-            servers.insert(key.clone(), server);
+            state.servers.insert(key.clone(), server);
             process_id
         };
         pump_lsp(
@@ -1390,21 +1399,21 @@ fn pump_lsp(
     let host = Arc::clone(host);
     tokio::task::spawn_blocking(move || {
         while let Ok(message) = inbound.recv() {
-            // ADR-0102 D-G, server-to-client direction: locations / watch registrations
-            // are filtered to THIS server's own root, command payloads are stripped, an
-            // out-of-root notification is dropped, and a denied server request (an
-            // out-of-root applyEdit or showDocument) is answered back to the server
-            // (applied/success: false) rather than forwarded or left hanging. Scoped to
-            // the server's own canonical root and re-read per frame, so a root removal
-            // takes effect immediately (an empty allowlist denies everything).
-            let allowlist = {
-                let runtime = host.runtime.blocking_lock();
-                if runtime.workspace_allows(&key.root) {
-                    honeyhub_bridge::WorkspaceAllowlist::new(vec![key.root.clone()])
-                } else {
-                    honeyhub_bridge::WorkspaceAllowlist::new(Vec::new())
-                }
-            };
+            // ADR-0102 D-G, server-to-client direction: the root check, the URI/command
+            // filtering, and the broadcast/reply all happen under the ONE active_lsp lock,
+            // so a concurrent SetWorkspaceRoots (which updates the roots snapshot + sweeps
+            // servers under the same lock) can never let a frame from a now-removed root
+            // reach a cockpit. If our server is no longer the one under our key (stopped /
+            // swept / a respawn owns it) or its root is deauthorized, the frame is dropped.
+            let mut state = host.active_lsp.blocking_lock();
+            let ours = state.servers.get(&key).map(|s| s.process_id()) == Some(process_id);
+            if !ours || !state.roots.allows(&key.root) {
+                eprintln!(
+                    "[lsp] dropped server frame for a retired/deauthorized server ({language_id} in {root})"
+                );
+                continue;
+            }
+            let allowlist = honeyhub_bridge::WorkspaceAllowlist::new(vec![key.root.clone()]);
             match honeyhub_bridge::lsp::filter_server_message(message, &allowlist) {
                 honeyhub_bridge::lsp::ServerFrameAction::Forward(message) => {
                     let _ = host.events.send(BridgeEvent::lsp_message(
@@ -1419,15 +1428,10 @@ fn pump_lsp(
                     eprintln!("[lsp] dropped out-of-root server frame ({language_id} in {root})");
                 }
                 honeyhub_bridge::lsp::ServerFrameAction::Reply(reply) => {
-                    eprintln!(
-                        "[lsp] denied server request, replying refusal ({language_id} in {root})"
-                    );
-                    // Identity-check: only write to the server THIS pump owns, never a
-                    // respawn that took the key after ours exited.
-                    if let Some(server) = host.active_lsp.blocking_lock().get_mut(&key) {
-                        if server.process_id() == process_id {
-                            let _ = server.write_message(&reply);
-                        }
+                    eprintln!("[lsp] answered server request centrally ({language_id} in {root})");
+                    // `ours` above already confirmed this is the server THIS pump owns.
+                    if let Some(server) = state.servers.get_mut(&key) {
+                        let _ = server.write_message(&reply);
                     }
                 }
             }
@@ -1437,10 +1441,10 @@ fn pump_lsp(
         // (LspStart after our server exited) may already hold the key, and evicting it
         // would cause flapping restarts. Identity-checked by the pid captured at spawn.
         let retired = {
-            let mut servers = host.active_lsp.blocking_lock();
-            if servers.get(&key).map(|s| s.process_id()) == Some(process_id) {
-                let removed = servers.remove(&key);
-                drop(servers);
+            let mut state = host.active_lsp.blocking_lock();
+            if state.servers.get(&key).map(|s| s.process_id()) == Some(process_id) {
+                let removed = state.servers.remove(&key);
+                drop(state);
                 drop(removed);
                 true
             } else {
