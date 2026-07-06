@@ -374,6 +374,9 @@ const URI_KEYS: &[&str] = &[
     "uri",
     "rootUri",
     "targetUri",
+    // `DocumentLink.target` is a bare `target` DocumentUri (go-to on a link); without this
+    // a server could point a link at a file outside the allowlisted roots.
+    "target",
     "scopeUri",
     "baseUri",
     "newUri",
@@ -503,6 +506,15 @@ pub fn filter_server_message(
             }
             None => ServerFrameAction::Drop,
         };
+    }
+
+    // client/registerCapability can register `workspace/didChangeWatchedFiles` watchers
+    // whose glob patterns name paths to watch. A glob outside the allowlisted root would
+    // ask the editor to watch files the bridge never exposed (ADR-0102 D-G), so prune any
+    // out-of-root watcher before the registration is forwarded. The remaining URI-keyed
+    // fields still go through `scrub` below.
+    if method.as_deref() == Some("client/registerCapability") {
+        prune_watched_file_registrations(&mut message, allowlist);
     }
 
     // Server-initiated workspace/applyEdit is denied by default (ADR-0102 D-G): a
@@ -645,6 +657,76 @@ fn scrub(value: &mut Value, allowlist: &WorkspaceAllowlist) -> bool {
         }
         _ => true,
     }
+}
+
+/// Prune out-of-root watchers from a `client/registerCapability` frame's
+/// `workspace/didChangeWatchedFiles` registrations (ADR-0102 D-G): a watcher whose glob
+/// names paths outside every allowlisted root is removed, so the server can never ask the
+/// editor to watch files the bridge did not expose. In-root and workspace-relative
+/// watchers are kept.
+fn prune_watched_file_registrations(message: &mut Value, allowlist: &WorkspaceAllowlist) {
+    let Some(registrations) = message
+        .pointer_mut("/params/registrations")
+        .and_then(Value::as_array_mut)
+    else {
+        return;
+    };
+    for registration in registrations.iter_mut() {
+        if registration.get("method").and_then(Value::as_str)
+            != Some("workspace/didChangeWatchedFiles")
+        {
+            continue;
+        }
+        if let Some(watchers) = registration
+            .pointer_mut("/registerOptions/watchers")
+            .and_then(Value::as_array_mut)
+        {
+            watchers.retain(|watcher| watcher_in_root(watcher, allowlist));
+        }
+    }
+}
+
+/// Whether a `FileSystemWatcher`'s glob stays inside an allowlisted root. A relative string
+/// glob (`**/*.rs`) is workspace-relative and kept; an absolute string glob is judged by
+/// its non-glob path prefix; a `RelativePattern` object is judged by its `baseUri`.
+fn watcher_in_root(watcher: &Value, allowlist: &WorkspaceAllowlist) -> bool {
+    let Some(glob) = watcher.get("globPattern") else {
+        return true; // no glob to bound; nothing to watch out-of-root
+    };
+    match glob {
+        // RelativePattern { baseUri, pattern }: the base is what anchors it to the fs.
+        Value::Object(pattern) => match pattern.get("baseUri").and_then(Value::as_str) {
+            Some(base) => uri_allowed(base, allowlist),
+            None => true,
+        },
+        Value::String(pattern) => {
+            // A relative glob is anchored to the (already in-root) workspace and is kept.
+            // Only a glob anchored at a filesystem root can escape, so detect that
+            // cross-platform (a leading `/` or `\\`, or a Windows `X:` drive prefix) rather
+            // than via `Path::is_absolute`, which is false for a Unix-rooted glob on Windows
+            // and vice-versa. An anchored glob is judged by its literal non-glob path prefix.
+            if !is_fs_anchored(pattern) {
+                return true;
+            }
+            let prefix: PathBuf = Path::new(pattern)
+                .components()
+                .take_while(|component| {
+                    let text = component.as_os_str().to_string_lossy();
+                    !text.contains(['*', '?', '{', '['])
+                })
+                .collect();
+            path_allowed(&prefix, allowlist)
+        }
+        _ => true,
+    }
+}
+
+/// Whether a glob string is anchored at a filesystem root (so it can escape the workspace),
+/// judged cross-platform: a leading `/` or `\`, or a `X:` Windows drive prefix.
+fn is_fs_anchored(pattern: &str) -> bool {
+    let bytes = pattern.as_bytes();
+    matches!(bytes.first(), Some(b'/' | b'\\'))
+        || (bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':')
 }
 
 /// A bare `Command` literal (`{"title": ..., "command": "server.cmd"}`) surfaced as an
@@ -1166,6 +1248,64 @@ mod tests {
             filter_server_message(in_root, &allowlist),
             ServerFrameAction::Forward(_)
         ));
+    }
+
+    #[test]
+    fn document_link_targets_are_filtered_to_allowlisted_roots() {
+        let (allowlist, inside, outside) = boundary_fixture();
+        // A textDocument/documentLink response: each link's `target` is a DocumentUri.
+        // An out-of-root target is dropped so go-to-link cannot escape the allowlist.
+        let response = serde_json::json!({
+            "jsonrpc": "2.0", "id": 20,
+            "result": [
+                { "range": {}, "target": inside },
+                { "range": {}, "target": outside }
+            ]
+        });
+        let ServerFrameAction::Forward(filtered) = filter_server_message(response, &allowlist)
+        else {
+            panic!("expected Forward");
+        };
+        let links = filtered
+            .get("result")
+            .and_then(Value::as_array)
+            .expect("array");
+        assert_eq!(links.len(), 1);
+        assert_eq!(
+            links[0].get("target").and_then(Value::as_str),
+            Some(inside.as_str())
+        );
+    }
+
+    #[test]
+    fn watched_file_registrations_are_pruned_to_allowlisted_roots() {
+        let (allowlist, inside_uri, outside_uri) = boundary_fixture();
+        // client/registerCapability registering didChangeWatchedFiles: watchers whose glob
+        // reaches out-of-root (an absolute string glob, or a RelativePattern baseUri) are
+        // pruned; relative and in-root watchers survive.
+        let register = serde_json::json!({
+            "jsonrpc": "2.0", "id": 21, "method": "client/registerCapability",
+            "params": { "registrations": [ {
+                "id": "r1", "method": "workspace/didChangeWatchedFiles",
+                "registerOptions": { "watchers": [
+                    { "globPattern": "**/*.rs" },
+                    { "globPattern": "/etc/**/*.conf" },
+                    { "globPattern": { "baseUri": inside_uri, "pattern": "**/*.toml" } },
+                    { "globPattern": { "baseUri": outside_uri, "pattern": "**/*.toml" } }
+                ] }
+            } ] }
+        });
+        let ServerFrameAction::Forward(filtered) = filter_server_message(register, &allowlist)
+        else {
+            panic!("expected Forward");
+        };
+        let watchers = filtered
+            .pointer("/params/registrations/0/registerOptions/watchers")
+            .and_then(Value::as_array)
+            .expect("watchers");
+        // Kept: the relative glob and the in-root baseUri. Dropped: the absolute /etc glob
+        // and the out-of-root baseUri.
+        assert_eq!(watchers.len(), 2);
     }
 
     #[test]

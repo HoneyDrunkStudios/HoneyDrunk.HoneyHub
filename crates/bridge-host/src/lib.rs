@@ -1135,6 +1135,17 @@ async fn handle_lsp_command(
         } => {
             let mut message = message;
             let key = LspKey::new(&root, &language_id);
+            // Reject the whole send outright when the server's root is no longer
+            // allowlisted (ADR-0102 D-G): a URI-less frame (a bare notification) would
+            // otherwise keep flowing to a server rooted in a deauthorized directory until
+            // the orphan sweep tears it down. LspStop stays available for teardown.
+            if !host.runtime.lock().await.workspace_allows(&key.root) {
+                eprintln!("[lsp] refused frame for a deauthorized root ({language_id} in {root})");
+                return Err(BridgeError::new(
+                    "lsp_root_not_allowed",
+                    "the language server's workspace root is no longer allowlisted",
+                ));
+            }
             // ADR-0102 D-G: the proxy is a URI-validating gateway, not a dumb pipe.
             // Command- and configuration-bearing methods are denied, client
             // initializationOptions are stripped (configuration is host-owned), and every
@@ -1258,6 +1269,21 @@ fn spawn_lsp(host: &Arc<Host>, root: String, language_id: String) {
             ));
             return;
         };
+
+        // 3b. Re-check authorization immediately before spawn: the LspStart gate ran before
+        // the async resolve/locate work, so a concurrent SetWorkspaceRoots may have removed
+        // the root since. (The post-spawn registration re-checks again under the active_lsp
+        // lock to close the register-side race; this check avoids even spawning a process
+        // for a root that was just deauthorized.)
+        if !host.runtime.lock().await.workspace_allows(&root) {
+            let _ = host.events.send(status(
+                true,
+                false,
+                spec.server_id,
+                "workspace root was removed before the language server could start",
+            ));
+            return;
+        }
 
         // 4. Spawn shell-free, in its own process group, scoped to the allowlisted root.
         let (server, inbound) =

@@ -23,6 +23,7 @@ use std::borrow::Cow;
 use std::io::{BufRead, BufReader, Read};
 use std::path::Path;
 use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 /// Cap on total matches returned in one response. Beyond this the walk stops and the
 /// response is flagged `truncated` so the UI can say "showing the first N".
@@ -37,6 +38,22 @@ const MAX_LINE_TEXT_CHARS: usize = 500;
 const MAX_FALLBACK_FILE_BYTES: u64 = 5_242_880; // 5 MiB
 /// Cap on directories the fallback walk visits, so a huge tree can never hang it.
 const MAX_FALLBACK_DIRS: usize = 60_000;
+/// Wall-clock bound on a single search, so a pathological regex, a slow/networked
+/// filesystem, or a no-match scan of a huge tree cannot run unbounded (the result caps
+/// alone do not bound a scan that matches nothing). Overridable via
+/// `HONEYHUB_SEARCH_TIMEOUT_SECS`; a hit stops the engine and flags the result `truncated`.
+const DEFAULT_SEARCH_TIMEOUT_SECS: u64 = 20;
+const SEARCH_TIMEOUT_ENV: &str = "HONEYHUB_SEARCH_TIMEOUT_SECS";
+
+/// The configured search timeout (env override, else the default).
+fn search_timeout() -> Duration {
+    let secs = std::env::var(SEARCH_TIMEOUT_ENV)
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .filter(|secs| *secs > 0)
+        .unwrap_or(DEFAULT_SEARCH_TIMEOUT_SECS);
+    Duration::from_secs(secs)
+}
 
 /// Directory names skipped by both engines — the heavy/generated trees from the host's
 /// `FS_IGNORED_DIRS` (`.git`, `node_modules`, `target`, `dist`). rg also honors `.gitignore`.
@@ -221,20 +238,50 @@ fn search_with_ripgrep(
         })
     });
 
-    let mut acc = MatchAccumulator::new();
-    let mut capped = false;
-    for line in BufReader::new(stdout).lines() {
-        let Ok(line) = line else { break };
-        if let Some(m) = parse_ripgrep_match(&line) {
-            if acc.push(m) {
-                capped = true;
-                break;
+    // Read rg's stream on its own thread so the main thread can enforce a wall-clock
+    // timeout: on timeout it kills the child, which EOFs the reader. Without this a
+    // pathological/no-match rg run could stream (or stall) unbounded.
+    let (tx, rx) = std::sync::mpsc::channel::<(MatchAccumulator, bool)>();
+    let reader = std::thread::spawn(move || {
+        let mut acc = MatchAccumulator::new();
+        let mut capped = false;
+        for line in BufReader::new(stdout).lines() {
+            let Ok(line) = line else { break };
+            if let Some(m) = parse_ripgrep_match(&line) {
+                if acc.push(m) {
+                    capped = true;
+                    break;
+                }
             }
         }
-    }
-    if capped {
-        // We stopped rg mid-stream, so its exit status is not meaningful; make sure the
-        // child is not left running and return what was accumulated (flagged truncated).
+        let _ = tx.send((acc, capped));
+    });
+
+    let deadline = Instant::now() + search_timeout();
+    let mut timed_out = false;
+    let (mut acc, capped) = loop {
+        match rx.recv_timeout(Duration::from_millis(50)) {
+            Ok(result) => break result,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) if Instant::now() >= deadline => {
+                let _ = child.kill(); // EOF the reader so it hands back what it has
+                timed_out = true;
+                break rx
+                    .recv()
+                    .unwrap_or_else(|_| (MatchAccumulator::new(), false));
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                break (MatchAccumulator::new(), false)
+            }
+        }
+    };
+    let _ = reader.join();
+
+    if capped || timed_out {
+        // We stopped rg mid-stream (cap or timeout), so its exit status is not meaningful;
+        // make sure the child is not left running and return what was accumulated, flagged
+        // truncated so the UI can say the results are partial.
+        acc.truncated = true;
         let _ = child.kill();
         let _ = child.wait();
         if let Some(reader) = stderr_reader {
@@ -320,9 +367,13 @@ fn search_with_fallback(
     let mut acc = MatchAccumulator::new();
     let mut stack = vec![Path::new(root).to_path_buf()];
     let mut visited = 0usize;
+    let deadline = Instant::now() + search_timeout();
     'walk: while let Some(dir) = stack.pop() {
         visited += 1;
-        if visited > MAX_FALLBACK_DIRS {
+        // Bound the walk by directory count AND wall clock: a slow or networked filesystem
+        // can make even a modest directory count take a long time, and the result caps do
+        // not bound a scan that matches nothing.
+        if visited > MAX_FALLBACK_DIRS || Instant::now() >= deadline {
             acc.truncated = true;
             break;
         }
