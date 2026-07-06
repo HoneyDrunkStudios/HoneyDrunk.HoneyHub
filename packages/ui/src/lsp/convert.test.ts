@@ -113,17 +113,48 @@ describe("toMonacoLocations", () => {
 
 describe("toMonacoWorkspaceEdit", () => {
   it("flattens the changes map into resource text edits", () => {
-    const edit = toMonacoWorkspaceEdit(fakeMonaco(), {
+    const { edit, unsupportedOperations } = toMonacoWorkspaceEdit(fakeMonaco(), {
       changes: {
         "file:///a.ts": [
           { range: { start: { line: 0, character: 0 }, end: { line: 0, character: 3 } }, newText: "Bar" }
         ]
       }
     });
+    expect(unsupportedOperations).toBe(false);
     expect(edit.edits).toHaveLength(1);
     const first = edit.edits[0] as import("monaco-editor").languages.IWorkspaceTextEdit;
     expect(first.resource.toString()).toBe("file:///a.ts");
     expect(first.textEdit.text).toBe("Bar");
+  });
+
+  it("flattens documentChanges text edits", () => {
+    const { edit, unsupportedOperations } = toMonacoWorkspaceEdit(fakeMonaco(), {
+      documentChanges: [
+        {
+          textDocument: { uri: "file:///a.ts", version: 2 },
+          edits: [{ range: { start: { line: 1, character: 0 }, end: { line: 1, character: 2 } }, newText: "Xy" }]
+        }
+      ]
+    });
+    expect(unsupportedOperations).toBe(false);
+    expect(edit.edits).toHaveLength(1);
+  });
+
+  it("refuses the whole edit atomically when it contains a file operation", () => {
+    // A WorkspaceEdit is all-or-nothing. A rename that also renames a file must not apply
+    // the text-edit subset in-editor (that would desync buffer and server); it is refused
+    // whole with the unsupported flag so the caller can surface it.
+    const { edit, unsupportedOperations } = toMonacoWorkspaceEdit(fakeMonaco(), {
+      documentChanges: [
+        {
+          textDocument: { uri: "file:///a.ts", version: 2 },
+          edits: [{ range: { start: { line: 0, character: 0 }, end: { line: 0, character: 3 } }, newText: "Bar" }]
+        },
+        { kind: "rename", oldUri: "file:///a.ts", newUri: "file:///b.ts" }
+      ]
+    });
+    expect(unsupportedOperations).toBe(true);
+    expect(edit.edits).toHaveLength(0);
   });
 });
 

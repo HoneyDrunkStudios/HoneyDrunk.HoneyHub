@@ -42,6 +42,33 @@ describe("createBridgeLspConnection", () => {
     await expect(pending).resolves.toEqual({ ok: true });
   });
 
+  it("does not cross-resolve a shared server's response between two clients", async () => {
+    // A shared language server broadcasts every response to all cockpit clients. Two
+    // clients allocate request sequences independently (both from 0), so without a
+    // per-connection id prefix client A's response would resolve client B's pending
+    // request. The prefix must keep them isolated.
+    const a = fakeTransport();
+    const b = fakeTransport();
+    const connA = createBridgeLspConnection(a.transport);
+    const connB = createBridgeLspConnection(b.transport);
+
+    const pendingA = connA.sendRequest<{ who: string }>("textDocument/hover");
+    const pendingB = connB.sendRequest<{ who: string }>("textDocument/hover");
+    const idA = a.sent[0]?.id;
+    const idB = b.sent[0]?.id;
+    expect(idA).not.toEqual(idB); // distinct prefixes even at the same sequence number
+
+    // A's response is broadcast to BOTH clients. B must ignore it (id not in its map).
+    const responseForA = { jsonrpc: "2.0", id: idA, result: { who: "A" } };
+    a.deliver(responseForA);
+    b.deliver(responseForA);
+    await expect(pendingA).resolves.toEqual({ who: "A" });
+
+    // B still resolves only from its own response.
+    b.deliver({ jsonrpc: "2.0", id: idB, result: { who: "B" } });
+    await expect(pendingB).resolves.toEqual({ who: "B" });
+  });
+
   it("rejects a request when the server returns an error", async () => {
     const { transport, sent, deliver } = fakeTransport();
     const connection = createBridgeLspConnection(transport);

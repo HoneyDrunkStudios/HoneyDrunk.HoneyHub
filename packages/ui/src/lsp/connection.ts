@@ -44,6 +44,10 @@ export interface BridgeLspConnection {
   sendRequest<R = unknown>(method: string, params?: unknown): Promise<R>;
   /** Send a notification (fire-and-forget). */
   sendNotification(method: string, params?: unknown): void;
+  /** Send a notification and return the send promise, so the caller can react to a
+      refusal (e.g. a dropped `didChange` that must trigger a document resync). Rejects if
+      the transport refuses the frame or the connection is disposed. */
+  sendNotificationTracked(method: string, params?: unknown): Promise<void>;
   /** Handle a server notification (last registration for a method wins). */
   onNotification(method: string, handler: (params: unknown) => void): void;
   /** Handle a server->client request; the return value becomes the response result. */
@@ -67,11 +71,21 @@ interface PendingRequest {
   timer?: ReturnType<typeof setTimeout>;
 }
 
-let nextRequestId = 1;
+/** A per-connection-unique id prefix. Language servers can be SHARED across cockpit
+    clients (device-wide `lsp_message` broadcast), and each client allocates request ids
+    independently: without a unique prefix, client A's response to request `5` would
+    resolve client B's own pending `5`, cross-wiring hovers/completions/rename edits. A
+    per-connection prefix means a foreign response's id is never in this connection's
+    pending map, so it is ignored. */
+function connectionIdPrefix(): string {
+  const uuid = globalThis.crypto?.randomUUID?.();
+  return uuid ?? `c${Math.random().toString(36).slice(2)}${Date.now().toString(36)}`;
+}
 
-/** Build a JSON-RPC connection over `transport`. Pure: no Monaco, no bridge, no globals
-    beyond a shared request-id counter (ids only need per-connection uniqueness).
-    `requestTimeoutMs` bounds how long a request waits for its response. */
+/** Build a JSON-RPC connection over `transport`. Pure: no Monaco, no bridge, no globals.
+    Request ids are prefixed with a per-connection-unique token so a shared server's
+    responses can never cross-resolve between clients. `requestTimeoutMs` bounds how long a
+    request waits for its response. */
 export function createBridgeLspConnection(
   transport: LspTransport,
   requestTimeoutMs: number = DEFAULT_REQUEST_TIMEOUT_MS
@@ -79,6 +93,8 @@ export function createBridgeLspConnection(
   const pending = new Map<JsonRpcId, PendingRequest>();
   const notificationHandlers = new Map<string, (params: unknown) => void>();
   const requestHandlers = new Map<string, (params: unknown) => unknown>();
+  const idPrefix = connectionIdPrefix();
+  let requestSeq = 0;
   let disposed = false;
 
   /** Remove a pending request and clear its timeout, returning it so the caller settles it. */
@@ -157,8 +173,8 @@ export function createBridgeLspConnection(
       if (disposed) {
         return Promise.reject(new Error("lsp connection disposed"));
       }
-      const id = nextRequestId;
-      nextRequestId += 1;
+      const id = `${idPrefix}-${requestSeq}`;
+      requestSeq += 1;
       return new Promise<R>((resolve, reject) => {
         const entry: PendingRequest = { resolve: resolve as (value: unknown) => void, reject };
         // Bound the wait: a server that starts but never answers must not hang the request.
@@ -193,6 +209,18 @@ export function createBridgeLspConnection(
             : { jsonrpc: "2.0", method, params }
         )
       ).catch(() => undefined);
+    },
+    sendNotificationTracked(method: string, params?: unknown): Promise<void> {
+      if (disposed) {
+        return Promise.reject(new Error("lsp connection disposed"));
+      }
+      return Promise.resolve(
+        transport.send(
+          params === undefined
+            ? { jsonrpc: "2.0", method }
+            : { jsonrpc: "2.0", method, params }
+        )
+      );
     },
     onNotification(method: string, handler: (params: unknown) => void): void {
       notificationHandlers.set(method, handler);

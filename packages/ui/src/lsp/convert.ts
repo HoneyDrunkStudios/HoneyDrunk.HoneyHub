@@ -212,15 +212,28 @@ export function toMonacoLocations(
   });
 }
 
+/** The result of converting an LSP WorkspaceEdit for Monaco. A `WorkspaceEdit` is an
+    all-or-nothing protocol contract, so when it carries operations this in-editor path
+    cannot apply (create/rename/delete file operations in `documentChanges`), the whole
+    edit is refused rather than applying the text-edit subset: a partial apply would leave
+    the buffer and the server disagreeing. `unsupportedOperations` tells the caller to
+    surface that refusal instead of silently doing a partial edit. */
+export interface MonacoWorkspaceEditResult {
+  edit: Monaco.languages.WorkspaceEdit;
+  unsupportedOperations: boolean;
+}
+
 /** LSP WorkspaceEdit -> a Monaco WorkspaceEdit (text edits per resource). Handles the
-    `changes` map form; the `documentChanges` form is flattened to its text edits. */
+    `changes` map form and the `documentChanges` text-edit form. If `documentChanges`
+    contains any file resource operation (create/rename/delete), the edit is refused whole
+    (`unsupportedOperations: true`, empty edit) to preserve atomicity. */
 export function toMonacoWorkspaceEdit(
   monaco: MonacoNamespace,
   edit: WorkspaceEdit | null | undefined
-): Monaco.languages.WorkspaceEdit {
+): MonacoWorkspaceEditResult {
   const edits: Monaco.languages.IWorkspaceTextEdit[] = [];
   if (edit === null || edit === undefined) {
-    return { edits };
+    return { edit: { edits }, unsupportedOperations: false };
   }
   const push = (uri: string, textEdits: TextEdit[]): void => {
     for (const textEdit of textEdits) {
@@ -240,10 +253,14 @@ export function toMonacoWorkspaceEdit(
     for (const change of edit.documentChanges) {
       if ("textDocument" in change && "edits" in change) {
         push(change.textDocument.uri, change.edits as TextEdit[]);
+      } else {
+        // A create/rename/delete file operation: this in-editor path applies only text
+        // edits, so refuse the whole edit rather than apply a partial (non-atomic) subset.
+        return { edit: { edits: [] }, unsupportedOperations: true };
       }
     }
   }
-  return { edits };
+  return { edit: { edits }, unsupportedOperations: false };
 }
 
 /** LSP diagnostics -> Monaco marker data (mapping severities onto MarkerSeverity). */

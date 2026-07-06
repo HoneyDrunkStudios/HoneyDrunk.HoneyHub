@@ -74,6 +74,10 @@ interface OpenDoc {
   fileUri: string;
   version: number;
   changeSub: Monaco.IDisposable;
+  /** Set when a `didChange` was refused (backpressure/dead socket) and the server's copy
+      is now stale; a pending resync re-sends the full document until it lands, so the
+      server model can never permanently desync from the buffer. */
+  resyncTimer?: ReturnType<typeof setTimeout> | undefined;
 }
 
 interface SharedClient {
@@ -217,24 +221,66 @@ function openDocument(
   });
   const changeSub = model.onDidChangeContent(() => {
     const doc = shared.docs.get(modelUri);
-    if (doc === undefined || shared.connection === undefined) {
+    if (doc === undefined) {
       return;
     }
     doc.version += 1;
-    // Full-document sync: simplest correct strategy; the server re-parses the whole file.
-    shared.connection.sendNotification(DidChangeTextDocumentNotification.method, {
-      textDocument: { uri: doc.fileUri, version: doc.version },
-      contentChanges: [{ text: model.getValue() }]
-    });
+    sendDidChange(shared, doc);
   });
   shared.docs.set(modelUri, { model, fileUri: uri, version: 1, changeSub });
   docIndex.set(modelUri, shared);
+}
+
+/** Full-document sync (the server re-parses the whole file). If the notification is
+    refused (backpressure/dead socket), the server's copy is now stale, so schedule a
+    resync that re-sends the latest full document until it lands. Because every sync is a
+    full-document replace, a later resend naturally carries the newest content, so the
+    server model can never permanently desync from the buffer. */
+function sendDidChange(shared: SharedClient, doc: OpenDoc): void {
+  const connection = shared.connection;
+  if (connection === undefined) {
+    return;
+  }
+  void connection
+    .sendNotificationTracked(DidChangeTextDocumentNotification.method, {
+      textDocument: { uri: doc.fileUri, version: doc.version },
+      contentChanges: [{ text: doc.model.getValue() }]
+    })
+    .then(() => {
+      if (doc.resyncTimer !== undefined) {
+        clearTimeout(doc.resyncTimer);
+        doc.resyncTimer = undefined;
+      }
+    })
+    .catch(() => scheduleResync(shared, doc));
+}
+
+const DIDCHANGE_RESYNC_DELAY_MS = 500;
+
+function scheduleResync(shared: SharedClient, doc: OpenDoc): void {
+  if (doc.resyncTimer !== undefined || shared.connection === undefined) {
+    return; // a resync is already pending, or the connection is gone
+  }
+  doc.resyncTimer = setTimeout(() => {
+    doc.resyncTimer = undefined;
+    // Re-send only if the doc is still open on a live connection; bump the version so the
+    // resend supersedes the dropped change, and carry the latest full content.
+    if (shared.connection === undefined || !shared.docs.has(doc.model.uri.toString())) {
+      return;
+    }
+    doc.version += 1;
+    sendDidChange(shared, doc);
+  }, DIDCHANGE_RESYNC_DELAY_MS);
 }
 
 function closeDocument(monaco: MonacoNamespace, shared: SharedClient, modelUri: string): void {
   const doc = shared.docs.get(modelUri);
   if (doc === undefined) {
     return;
+  }
+  if (doc.resyncTimer !== undefined) {
+    clearTimeout(doc.resyncTimer);
+    doc.resyncTimer = undefined;
   }
   doc.changeSub.dispose();
   shared.connection?.sendNotification(DidCloseTextDocumentNotification.method, {
@@ -247,6 +293,10 @@ function closeDocument(monaco: MonacoNamespace, shared: SharedClient, modelUri: 
 
 function degrade(monaco: MonacoNamespace, shared: SharedClient): void {
   for (const doc of shared.docs.values()) {
+    if (doc.resyncTimer !== undefined) {
+      clearTimeout(doc.resyncTimer);
+      doc.resyncTimer = undefined;
+    }
     monaco.editor.setModelMarkers(doc.model, LSP_MARKER_OWNER, []);
   }
   shared.connection?.dispose();
@@ -456,7 +506,20 @@ function registerProviders(monaco: MonacoNamespace, languageId: string): void {
           position: toLspPosition(position),
           newName
         });
-        return toMonacoWorkspaceEdit(monaco, result);
+        const { edit, unsupportedOperations } = toMonacoWorkspaceEdit(monaco, result);
+        if (unsupportedOperations) {
+          // The rename spans file create/rename/delete operations this in-editor path
+          // cannot apply atomically; refuse it whole (never a partial buffer edit) and
+          // surface Monaco's native rejection so the operator can drive it through an
+          // agent/PR flow instead.
+          return {
+            edits: [],
+            rejectReason:
+              "This rename also creates, renames, or deletes files. HoneyHub's editor applies " +
+              "text edits only, so nothing was changed. Use an agent or a PR for cross-file renames."
+          };
+        }
+        return edit;
       } catch {
         return { edits: [] };
       }

@@ -411,6 +411,12 @@ pub fn sanitize_client_message(
                 // Host-owned configuration (ADR-0102 D-G): never forward an opaque
                 // client payload that can redefine what the server executes.
                 params.remove("initializationOptions");
+                // Strip the DEPRECATED `rootPath` field: unlike `rootUri` /
+                // `workspaceFolders` (which the URI walk validates), a relative
+                // `rootPath` such as `..` or `../outside` carries no scheme for the
+                // walk to canonicalize and could steer the server's workspace root
+                // outside the allowlist. It is superseded by `rootUri` and safe to drop.
+                params.remove("rootPath");
             }
         }
     }
@@ -541,9 +547,11 @@ pub fn filter_server_message(
     }
 }
 
-/// Depth-first search for the first URI (or `rootPath`) that resolves outside every
-/// allowlisted root. Only URI-keyed strings are checked, so document content never
-/// trips the boundary.
+/// Depth-first search for the first URI that resolves outside every allowlisted root. Only
+/// URI-keyed strings are checked, so document content never trips the boundary. (The
+/// deprecated `rootPath` field is not path-checked here: it carries a scheme-less path a
+/// relative value could slip past, so it is stripped outright at `initialize` in
+/// [`sanitize_client_message`] rather than validated.)
 fn first_denied_uri<'a>(value: &'a Value, allowlist: &WorkspaceAllowlist) -> Option<&'a str> {
     match value {
         Value::Object(map) => {
@@ -560,13 +568,6 @@ fn first_denied_uri<'a>(value: &'a Value, allowlist: &WorkspaceAllowlist) -> Opt
                 }
                 if let Some(text) = child.as_str() {
                     if URI_KEYS.contains(&key.as_str()) && !uri_allowed(text, allowlist) {
-                        return Some(text);
-                    }
-                    // The deprecated `rootPath` initialize field carries a plain path.
-                    if key == "rootPath"
-                        && Path::new(text).is_absolute()
-                        && !path_allowed(Path::new(text), allowlist)
-                    {
                         return Some(text);
                     }
                 }
@@ -1061,6 +1062,16 @@ mod tests {
         assert!(sanitize_client_message(&mut init, &allowlist).is_ok());
         assert!(init.pointer("/params/initializationOptions").is_none());
         assert!(init.pointer("/params/capabilities").is_some());
+
+        // A relative `rootPath` must not slip past the URI walk (which only sees schemed
+        // URIs): it is stripped outright on initialize, so it can never steer the server's
+        // workspace root outside the allowlist.
+        let mut relative_root = serde_json::json!({
+            "jsonrpc": "2.0", "id": 2, "method": "initialize",
+            "params": { "rootPath": "../outside", "rootUri": inside, "capabilities": {} }
+        });
+        assert!(sanitize_client_message(&mut relative_root, &allowlist).is_ok());
+        assert!(relative_root.pointer("/params/rootPath").is_none());
 
         // didChangeConfiguration is denied outright.
         let mut change = serde_json::json!({
