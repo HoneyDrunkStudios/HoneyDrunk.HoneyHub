@@ -1,6 +1,10 @@
 import { fireEvent, render, screen, within } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
-import { BridgeSettings } from "./BridgeSettings";
+import {
+  PairingSettings,
+  ProvidersModelsSettings,
+  WorkspaceRootsSettings
+} from "./BridgeSettings";
 import type { PairingFactory } from "./settingsModel";
 
 function fixedFactory(): PairingFactory {
@@ -12,9 +16,9 @@ function fixedFactory(): PairingFactory {
   };
 }
 
-describe("BridgeSettings", () => {
+describe("PairingSettings", () => {
   it("pairs a device, shows the token once, then revokes it", () => {
-    render(<BridgeSettings factory={fixedFactory()} />);
+    render(<PairingSettings factory={fixedFactory()} />);
 
     fireEvent.change(screen.getByLabelText("Device name"), {
       target: { value: "Pixel phone" }
@@ -34,9 +38,11 @@ describe("BridgeSettings", () => {
     fireEvent.click(within(devices).getByRole("button", { name: "Revoke" }));
     expect(within(devices).getByText("revoked")).toBeTruthy();
   });
+});
 
+describe("WorkspaceRootsSettings", () => {
   it("surfaces an explicit error for a relative workspace root", () => {
-    render(<BridgeSettings factory={fixedFactory()} />);
+    render(<WorkspaceRootsSettings />);
 
     fireEvent.change(screen.getByLabelText("Or enter an absolute path"), {
       target: { value: "relative/path" }
@@ -47,14 +53,29 @@ describe("BridgeSettings", () => {
   });
 
   it("adds an absolute workspace root", () => {
-    render(<BridgeSettings factory={fixedFactory()} />);
+    render(<WorkspaceRootsSettings />);
 
     fireEvent.change(screen.getByLabelText("Or enter an absolute path"), {
       target: { value: "/home/dev/work" }
     });
     fireEvent.click(screen.getByRole("button", { name: "Add root" }));
 
-    const roots = screen.getByRole("list", { name: "Workspace roots" });
+    const roots = screen.getByRole("list", { name: "Workspace Roots" });
     expect(within(roots).getByText("/home/dev/work")).toBeTruthy();
+  });
+});
+
+describe("ProvidersModelsSettings", () => {
+  it("renders backend toggles and enables a provider", () => {
+    render(<ProvidersModelsSettings />);
+
+    const toggles = screen.getAllByRole("checkbox");
+    expect(toggles.length).toBeGreaterThan(0);
+
+    // Providers start disabled (empty allowlist); toggling one enables it (uncontrolled state).
+    const first = toggles[0] as HTMLInputElement;
+    expect(first.checked).toBe(false);
+    fireEvent.click(first);
+    expect(first.checked).toBe(true);
   });
 });

@@ -56,6 +56,26 @@ pub struct GitDiff {
     pub truncated: bool,
 }
 
+/// Both versions of a single file for a side-by-side diff view: its content at `HEAD`
+/// (the committed baseline) and in the working tree. Powers the Monaco `DiffEditor`, which
+/// needs the two full texts rather than a unified patch.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitFileVersions {
+    /// The repo root this is for (echoed so the UI can correlate).
+    pub root: String,
+    /// The repo-relative path (echoed so the UI can correlate).
+    pub path: String,
+    /// The file content at `HEAD` (empty when the path is not in `HEAD`, e.g. a new file).
+    pub original: String,
+    /// The working-tree file content (empty when the file was deleted from disk).
+    pub modified: String,
+    /// True when the path existed in `HEAD` (distinguishes a new file from an empty one).
+    pub existed_in_head: bool,
+    /// True when the file exists in the working tree (distinguishes a deleted file from empty).
+    pub existed_in_work: bool,
+}
+
 /// The git status of every repo discovered under a selected folder (or just the one repo
 /// when the selected root is itself a repo). Powers the multi-repo dashboard.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -139,6 +159,60 @@ pub fn diff(root: &str, path: Option<&str>) -> Result<GitDiff, BridgeError> {
         path: path.map(str::to_string),
         patch,
         truncated,
+    })
+}
+
+/// Read both sides of a single file for the side-by-side diff view: its `HEAD` (committed)
+/// content and its working-tree content. `path` is repo-relative (like [`diff`]'s path).
+///
+/// **original** is `git -C <root> show HEAD:<path>`. When the path is not tracked in `HEAD`
+/// (a newly-added file), git exits non-zero — that is treated as "absent from HEAD" (empty
+/// content, `existed_in_head = false`), not an error. **modified** is the working-tree file
+/// read directly from `<root>/<path>`; a missing file (deleted in the working tree) yields
+/// empty content with `existed_in_work = false`.
+pub fn file_versions(root: &str, path: &str) -> Result<GitFileVersions, BridgeError> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .arg("show")
+        .arg(format!("HEAD:{path}"))
+        .output()
+        .map_err(|error| BridgeError::new("git_unavailable", error.to_string()))?;
+    let (original, existed_in_head) = if output.status.success() {
+        (String::from_utf8_lossy(&output.stdout).to_string(), true)
+    } else {
+        // A path absent from HEAD (new file) is not an error — git reports it on a
+        // non-zero exit ("exists on disk, but not in 'HEAD'" / "does not exist in 'HEAD'").
+        (String::new(), false)
+    };
+
+    // Guard the working-tree read against a client-supplied `path` escaping the repo root
+    // (path traversal): only read when the file's canonical location is inside the canonical
+    // root. `canonicalize` also requires existence, so a deleted file (or a `..` escape that
+    // does not resolve) simply yields an absent `modified`. This keeps the read inside the
+    // allowlisted root the host already gated, matching the bridge's read-posture boundary.
+    let work_path = Path::new(root).join(path);
+    let within_root = match (work_path.canonicalize(), Path::new(root).canonicalize()) {
+        (Ok(resolved), Ok(canonical_root)) if resolved.starts_with(&canonical_root) => {
+            Some(resolved)
+        }
+        _ => None,
+    };
+    let (modified, existed_in_work) = match within_root {
+        Some(resolved) => match std::fs::read(&resolved) {
+            Ok(bytes) => (String::from_utf8_lossy(&bytes).to_string(), true),
+            Err(_) => (String::new(), false),
+        },
+        None => (String::new(), false),
+    };
+
+    Ok(GitFileVersions {
+        root: root.to_string(),
+        path: path.to_string(),
+        original,
+        modified,
+        existed_in_head,
+        existed_in_work,
     })
 }
 

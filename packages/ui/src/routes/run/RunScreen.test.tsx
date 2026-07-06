@@ -1,5 +1,5 @@
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type {
   AgentBackend,
   BackendCapability,
@@ -11,6 +11,7 @@ import {
 } from "@honeydrunk/honeyhub-types";
 import { RunScreen } from "./RunScreen";
 import { MockWireClient } from "../../wire/mockClient";
+import { getChat, loadChats, renameChat, saveChat, type ChatRecord } from "../../chatHistory";
 
 // The surfaced backends configured — the realistic state in which routing chooses
 // among options (an unconfigured cockpit offers only the proven-initial backend).
@@ -42,6 +43,30 @@ const CATALOG: BackendCapability[] = [
     modelSource: "cli_cache"
   }
 ];
+
+/** A minimal in-memory Storage for tests (jsdom here exposes no localStorage), enough
+    for the chat-history store's getItem/setItem round-trip. */
+class MemoryStorage implements Storage {
+  private readonly store = new Map<string, string>();
+  get length(): number {
+    return this.store.size;
+  }
+  clear(): void {
+    this.store.clear();
+  }
+  getItem(key: string): string | null {
+    return this.store.has(key) ? (this.store.get(key) as string) : null;
+  }
+  key(index: number): string | null {
+    return [...this.store.keys()][index] ?? null;
+  }
+  removeItem(key: string): void {
+    this.store.delete(key);
+  }
+  setItem(key: string, value: string): void {
+    this.store.set(key, String(value));
+  }
+}
 
 /** A mock client that records every StartRunRequest it is asked to launch. */
 function recordingClient(): { client: MockWireClient; started: StartRunRequest[] } {
@@ -163,17 +188,67 @@ describe("RunScreen", () => {
     expect(screen.getByText(/Light task/)).toBeTruthy();
   });
 
-  it("checks plan usage from the config panel and renders the meters", async () => {
+  it("auto-probes plan usage on mount and re-checks on demand, rendering the meters", async () => {
     render(<RunScreen client={new MockWireClient()} availableBackends={ALL_BACKENDS} />);
     openConfigPanel();
 
-    // Fire both probes; the mock answers with scripted vendor meters.
-    fireEvent.click(screen.getByRole("button", { name: "Check Claude Code" }));
-    expect(await screen.findByText(/Current session \(5h\): 34% used/)).toBeTruthy();
+    // Wave E: the composer auto-probes each backend's plan usage on mount (feeding the
+    // router's cap-awareness), so the meters render without a manual click — one report
+    // per backend, both scripted with the same vendor meters by the mock.
+    expect(
+      (await screen.findAllByText(/Current session \(5h\): 34% used/)).length
+    ).toBeGreaterThanOrEqual(2);
     expect(screen.getByText(/Claude Code · as of/)).toBeTruthy();
+    expect(screen.getByText(/Codex · as of/)).toBeTruthy();
 
-    fireEvent.click(screen.getByRole("button", { name: "Check Codex" }));
-    await waitFor(() => expect(screen.getByText(/Codex · as of/)).toBeTruthy());
+    // The manual "Check" buttons still re-probe on demand via the same usage_probe path.
+    fireEvent.click(screen.getByRole("button", { name: "Check Claude Code" }));
+    await waitFor(() =>
+      expect(screen.getAllByText(/Current session \(5h\): 34% used/).length).toBeGreaterThanOrEqual(2)
+    );
+  });
+
+  it("shifts the optimize pick to the freshly-reset backend using auto-probed headroom", async () => {
+    // The router only sees headroom because the composer auto-probes on mount. Script
+    // per-backend meters so Codex reads freshly reset (0% used) and Claude half-burned.
+    class SplitHeadroomClient extends MockWireClient {
+      override async probeUsage(backend: AgentBackend): Promise<void> {
+        const usedPercent = backend === "codex.local" ? 0 : 50;
+        this.emitDevice({
+          kind: "usage_probe",
+          report: {
+            backend,
+            ok: true,
+            windows: [{ line: `Current week: ${usedPercent}% used`, usedPercent }],
+            raw: "(demo) usage panel capture",
+            capturedAt: "2026-07-05T00:00:00Z"
+          }
+        });
+      }
+    }
+    render(
+      <RunScreen
+        client={new SplitHeadroomClient()}
+        availableBackends={ALL_BACKENDS}
+        // Both flat plans collapse cost to zero, so headroom is what decides.
+        plans={{ "claude.local": { type: "flat" }, "codex.local": { type: "flat" } }}
+      />
+    );
+    fireEvent.change(screen.getByLabelText("Task"), { target: { value: "Fix a typo" } });
+    openConfigPanel();
+
+    // Codex wins on headroom, and the rationale says so in the operator's words.
+    await waitFor(() => {
+      const rationale = document.querySelector(".panel-rationale")?.textContent ?? "";
+      expect(rationale).toMatch(/more headroom/);
+    });
+    const rationale = document.querySelector(".panel-rationale")?.textContent ?? "";
+    expect(rationale).toMatch(/Codex/);
+    expect(rationale).toMatch(/just reset/);
+    // The config chip reflects the routed backend.
+    expect(screen.getByRole("button", { name: "Configure run" }).textContent).toContain(
+      "Optimize · Codex"
+    );
   });
 
   it("degrades a usage probe to the raw capture (or the failure) when parsing found nothing", async () => {
@@ -448,6 +523,41 @@ describe("RunScreen", () => {
     expect(within(diagnostics).getByText(/claude\.local/)).toBeTruthy();
   });
 
+  it("starts a new chat from an active run and keeps the old thread in the list", async () => {
+    // The save effect persists the live chat through localStorage; jsdom here does not
+    // expose one, so back it with an in-memory store for this test (RecentChats reads it
+    // to list the just-started thread).
+    vi.stubGlobal("localStorage", new MemoryStorage());
+    try {
+      render(<RunScreen client={new MockWireClient()} />);
+      // Launch a run so we are in the live transcript view (not the composer).
+      const task = "Wire the new-chat button";
+      fireEvent.change(screen.getByLabelText("Task"), { target: { value: task } });
+      fireEvent.click(screen.getByRole("button", { name: "Start session" }));
+
+      // We are in the live run: the transcript shows the user's turn and a run-state pill.
+      await waitFor(() =>
+        expect(screen.getByLabelText("Run state").textContent).toBe("needs_input")
+      );
+      const transcript = screen.getByLabelText("Transcript");
+      expect(within(transcript).getByText(task)).toBeTruthy();
+
+      // The always-available header control starts a fresh thread from the active run.
+      fireEvent.click(screen.getByRole("button", { name: "New chat" }));
+
+      // Back at the empty composer: the "Do anything" placeholder shows and the live
+      // transcript is gone.
+      expect(screen.getByPlaceholderText("Do anything")).toBeTruthy();
+      expect(screen.queryByLabelText("Transcript")).toBeNull();
+
+      // The just-started thread was persisted, so it is retrievable from the Chats list.
+      const chats = screen.getByRole("list", { name: "Chats" });
+      expect(within(chats).getByText(task)).toBeTruthy();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it("stops an active run", async () => {
     startRun();
     await waitFor(() =>
@@ -461,5 +571,212 @@ describe("RunScreen", () => {
     );
     // Stop control is gone once the run is terminal.
     expect(screen.queryByRole("button", { name: "Stop" })).toBeNull();
+  });
+
+  it("resolves the raw model id to its full catalog label on the chip and launching line", () => {
+    render(
+      <RunScreen client={new MockWireClient()} availableBackends={ALL_BACKENDS} catalog={CATALOG} />
+    );
+    pickModelMode();
+    pickModelOption(/Claude Opus 4\.8/);
+
+    // The chip shows the full label, not the raw "opus" id.
+    const chip = screen.getByRole("button", { name: "Configure run" });
+    expect(chip.textContent).toContain("Claude Code · Claude Opus 4.8");
+    expect(chip.textContent).not.toContain("· opus");
+
+    // The drop-up's launching line resolves it too.
+    expect(document.querySelector(".panel-rationale")?.textContent).toContain(
+      "Launching Claude Code · Claude Opus 4.8"
+    );
+  });
+
+  it("persists a renameable draft thread on New chat and the first run reuses its id", async () => {
+    vi.stubGlobal("localStorage", new MemoryStorage());
+    try {
+      const { client, started } = recordingClient();
+      render(<RunScreen client={client} availableBackends={ALL_BACKENDS} catalog={CATALOG} />);
+
+      // Reach the live view, then start a fresh thread from its header. That mints and
+      // persists an empty "New chat" placeholder immediately — before any typing.
+      fireEvent.change(screen.getByLabelText("Task"), { target: { value: "First thread" } });
+      fireEvent.click(screen.getByRole("button", { name: "Start session" }));
+      await waitFor(() =>
+        expect(screen.getByLabelText("Run state").textContent).toBe("needs_input")
+      );
+      fireEvent.click(screen.getByRole("button", { name: "New chat" }));
+
+      // The placeholder is persisted and listed before anything is typed.
+      const drafts = loadChats().filter((chat) => chat.task === "New chat");
+      expect(drafts).toHaveLength(1);
+      const draftId = drafts[0]!.id;
+      expect(within(screen.getByRole("list", { name: "Chats" })).getByText("New chat")).toBeTruthy();
+
+      // The operator renames the fresh thread up front (before the first message).
+      renameChat(draftId, "Planning session");
+      expect(getChat(draftId)?.title).toBe("Planning session");
+
+      // Dispatching a run ADOPTS the draft id (requestedRunId), so the same record updates
+      // in place: no duplicate thread, and the pre-typing rename survives.
+      fireEvent.change(screen.getByLabelText("Task"), { target: { value: "Do the planning" } });
+      fireEvent.click(screen.getByRole("button", { name: "Start session" }));
+      await waitFor(() => expect(started).toHaveLength(2));
+      expect(started[1]?.requestedRunId).toBe(draftId);
+
+      await waitFor(() => expect(getChat(draftId)?.task).toBe("Do the planning"));
+      expect(getChat(draftId)?.title).toBe("Planning session");
+      // Two threads total (first run + adopted draft) — no orphaned "New chat" row.
+      expect(loadChats()).toHaveLength(2);
+      expect(loadChats().filter((chat) => chat.task === "New chat")).toHaveLength(0);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("lights active threads and done-with-answers threads distinctly", () => {
+    vi.stubGlobal("localStorage", new MemoryStorage());
+    try {
+      const message = (id: string): ChatRecord["messages"][number] => ({
+        id: `m-${id}`,
+        sessionId: "s",
+        runId: id,
+        role: "agent",
+        body: "here you go",
+        createdAt: "2026-07-05T00:00:00Z"
+      });
+      const base = {
+        totalUsd: 0,
+        totalTokens: 0,
+        createdAt: "2026-07-05T00:00:00Z"
+      };
+      // A finished thread with answers, an in-flight thread, and an empty draft.
+      saveChat({
+        ...base,
+        id: "done1",
+        task: "Finished",
+        state: "completed",
+        messages: [message("done1")],
+        updatedAt: "2026-07-05T03:00:00Z"
+      });
+      saveChat({
+        ...base,
+        id: "live1",
+        task: "Running",
+        state: "running",
+        messages: [message("live1")],
+        updatedAt: "2026-07-05T02:00:00Z"
+      });
+      saveChat({
+        ...base,
+        id: "draft1",
+        task: "New chat",
+        state: "created",
+        messages: [],
+        updatedAt: "2026-07-05T01:00:00Z"
+      });
+
+      render(
+        <RunScreen client={new MockWireClient()} availableBackends={ALL_BACKENDS} catalog={CATALOG} />
+      );
+      const chats = screen.getByRole("list", { name: "Chats" });
+
+      expect(within(chats).getByLabelText("Chat done with answers")).toBeTruthy();
+      expect(within(chats).getByLabelText("Run active")).toBeTruthy();
+      // The empty draft has neither: only the two lights above exist.
+      expect(
+        within(chats).getAllByLabelText(/Run active|Chat done with answers/)
+      ).toHaveLength(2);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("renders the session-history dropdown (sidebar) with status lights, no inline list", () => {
+    vi.stubGlobal("localStorage", new MemoryStorage());
+    try {
+      const message = (id: string): ChatRecord["messages"][number] => ({
+        id: `m-${id}`,
+        sessionId: "s",
+        runId: id,
+        role: "agent",
+        body: "here you go",
+        createdAt: "2026-07-05T00:00:00Z"
+      });
+      const base = { totalUsd: 0, totalTokens: 0, createdAt: "2026-07-05T00:00:00Z" };
+      saveChat({
+        ...base,
+        id: "done1",
+        task: "Finished",
+        state: "completed",
+        messages: [message("done1")],
+        updatedAt: "2026-07-05T03:00:00Z"
+      });
+      saveChat({
+        ...base,
+        id: "live1",
+        task: "Running",
+        state: "running",
+        messages: [message("live1")],
+        updatedAt: "2026-07-05T02:00:00Z"
+      });
+
+      const onClose = vi.fn();
+      render(
+        <RunScreen
+          client={new MockWireClient()}
+          variant="sidebar"
+          threadsMenuOpen
+          onCloseThreadsMenu={onClose}
+          availableBackends={ALL_BACKENDS}
+          catalog={CATALOG}
+        />
+      );
+
+      // The dock drops the inline "Threads" section — history lives in the dropdown now.
+      expect(screen.queryByText("Threads")).toBeNull();
+      const dialog = screen.getByRole("dialog", { name: "Sessions" });
+
+      // The Wave-1 status lights ride onto the Local rows.
+      expect(within(dialog).getByLabelText("Chat done with answers")).toBeTruthy();
+      expect(within(dialog).getByLabelText("Run active")).toBeTruthy();
+
+      // Opening a row asks the dock to dismiss the panel.
+      fireEvent.click(within(dialog).getByText("Finished"));
+      expect(onClose).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("keeps the selected model and backend across a new chat", async () => {
+    vi.stubGlobal("localStorage", new MemoryStorage());
+    try {
+      const { client, started } = recordingClient();
+      render(<RunScreen client={client} availableBackends={ALL_BACKENDS} catalog={CATALOG} />);
+
+      // Pin a distinct backend + model (Codex GPT-5.5).
+      pickModelMode();
+      pickModelOption(/GPT-5\.5/);
+      expect(modelButtonText()).toContain("GPT-5.5");
+
+      // Run, then start a fresh chat from the live view.
+      fireEvent.change(screen.getByLabelText("Task"), { target: { value: "First" } });
+      fireEvent.click(screen.getByRole("button", { name: "Start session" }));
+      await waitFor(() => expect(started).toHaveLength(1));
+      fireEvent.click(screen.getByRole("button", { name: "New chat" }));
+
+      // The pinned model/backend survive the new chat: still manual, still GPT-5.5.
+      openConfigPanel();
+      expect(modelButtonText()).toContain("GPT-5.5");
+
+      // And the next run still launches on that pinned backend + model.
+      fireEvent.change(screen.getByLabelText("Task"), { target: { value: "Second" } });
+      fireEvent.click(screen.getByRole("button", { name: "Start session" }));
+      await waitFor(() => expect(started).toHaveLength(2));
+      expect(started[1]?.session.backend).toBe("codex.local");
+      expect(started[1]?.model).toBe("gpt-5.5");
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 });

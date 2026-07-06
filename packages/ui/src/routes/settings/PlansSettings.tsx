@@ -25,7 +25,7 @@ export interface PlansSettingsProps {
 
 /** Per-backend plan editor. A compact row per configurable backend: a plan-type select
     and, for flat-rate, a monthly-$ input. Persists via the caller's `onChange`. */
-export function PlansSettings({ plans, onChange, heading = "Subscription plans" }: Readonly<PlansSettingsProps>) {
+export function PlansSettings({ plans, onChange, heading = "Subscription Plans" }: Readonly<PlansSettingsProps>) {
   const setType = (backend: AgentBackend, type: PlanType) => {
     const current = getPlan(plans, backend);
     // Keep a known monthly amount when staying/becoming flat; drop it otherwise.
@@ -58,7 +58,7 @@ export function PlansSettings({ plans, onChange, heading = "Subscription plans" 
         </button>
       </legend>
       <p className="plans-why">{WHY_PLANS}</p>
-      <ul className="plan-rows" aria-label="Subscription plans">
+      <ul className="plan-rows" aria-label="Subscription Plans">
         {allBackends.map((backend) => {
           const plan = getPlan(plans, backend);
           return (

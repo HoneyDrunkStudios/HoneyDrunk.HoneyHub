@@ -180,11 +180,19 @@ impl BridgeRuntime {
         }
         let handle = self.adapter_for(backend)?.start(request.clone())?;
         self.ensure_run_id_available(&handle.run_id)?;
-        let mut record = DispatchRunRecord::new(DispatchRun::new(
-            handle.run_id.clone(),
-            request.session.id.clone(),
-            request.task.clone(),
-        ));
+        // Stamp the dispatching parent (ADR-0098 C) onto the persisted run when an agent
+        // started it through `dispatch_agent`; an operator-started run carries `None`.
+        let mut record = DispatchRunRecord::new(
+            DispatchRun::new(
+                handle.run_id.clone(),
+                request.session.id.clone(),
+                request.task.clone(),
+            )
+            .with_parent(
+                request.parent_run_id.clone(),
+                request.parent_session_id.clone(),
+            ),
+        );
         let control_events = vec![
             record.transition_to(DispatchRunState::Queued, created_at.clone())?,
             record.transition_to(DispatchRunState::Starting, created_at.clone())?,
@@ -367,6 +375,10 @@ impl BridgeRuntime {
             // Attachments belong to the originating turn; a resume-based follow-up does not
             // re-materialize them (the agent already has them on disk from the first turn).
             attachments: Vec::new(),
+            // A follow-up is not a dispatch: it continues the same run, so it carries no
+            // parent linkage (parent linkage marks an agent-initiated child, ADR-0098 C).
+            parent_run_id: None,
+            parent_session_id: None,
         };
         if let Some(requested_run_id) = &request.requested_run_id {
             self.ensure_run_id_available(requested_run_id)?;
@@ -1156,6 +1168,13 @@ fn validate_stream_payload(
                 "a backend stream must not emit device-wide file contents",
             ));
         }
+        BridgeEventPayload::FileWritten { .. } => {
+            // Device-wide, host-synthesized file-write result — never streamed.
+            return Err(BridgeError::new(
+                "event_unexpected_file_written",
+                "a backend stream must not emit device-wide file-write results",
+            ));
+        }
         BridgeEventPayload::SearchResults { .. } => {
             // Device-wide, host-synthesized search result — never streamed.
             return Err(BridgeError::new(
@@ -1322,6 +1341,13 @@ fn validate_stream_payload(
             return Err(BridgeError::new(
                 "event_unexpected_git_diff",
                 "a backend stream must not emit device-wide git diff",
+            ));
+        }
+        BridgeEventPayload::GitFileVersions { .. } => {
+            // Device-wide, host-synthesized single-file diff versions — never streamed.
+            return Err(BridgeError::new(
+                "event_unexpected_git_file_versions",
+                "a backend stream must not emit device-wide git file versions",
             ));
         }
         BridgeEventPayload::GitOverview { .. } => {
@@ -1563,6 +1589,8 @@ mod tests {
                 "secret-value".to_string(),
             ]),
             attachments: Vec::new(),
+            parent_run_id: None,
+            parent_session_id: None,
         }
     }
 
@@ -1656,6 +1684,70 @@ mod tests {
         if let Some(usage) = usage {
             assert_eq!(usage.session_count, 1);
         }
+
+        let _ = fs::remove_dir_all(&store_root);
+    }
+
+    #[test]
+    fn start_records_parent_linkage_on_a_dispatched_child_run() {
+        // A dispatched child (ADR-0098 C) carries its parent through the same start
+        // path as any run; an operator-started run stays parentless. Both round-trip
+        // through the durable store (only the prompt task is redacted there).
+        let (allowlist_root, workspace_root) = workspace_paths();
+        let store_root =
+            std::env::temp_dir().join(format!("honeyhub-core-parent-{}", uuid::Uuid::new_v4()));
+        let adapter = FakeAdapter::new(CapabilityFlags::claude_local());
+        let mut runtime = BridgeRuntime::new(
+            adapter,
+            WorkspaceAllowlist::new(vec![allowlist_root]),
+            BackendAllowlist::new(vec![AgentBackend::ClaudeLocal]),
+        )
+        .with_store(LocalStore::open(&store_root).expect("store opens"));
+
+        let mut child = request(&workspace_root);
+        child.requested_run_id = Some("child-run".to_string());
+        child.parent_run_id = Some("parent-run".to_string());
+        child.parent_session_id = Some("parent-session".to_string());
+        let handle = runtime
+            .start(child, "2026-07-05T12:00:00Z")
+            .expect("child run starts");
+
+        let child_run = runtime
+            .run(&handle.run_id)
+            .expect("child run exists")
+            .record
+            .run
+            .clone();
+        assert_eq!(child_run.parent_run_id.as_deref(), Some("parent-run"));
+        assert_eq!(
+            child_run.parent_session_id.as_deref(),
+            Some("parent-session")
+        );
+
+        // The parent linkage survives persistence (the durable record redacts only
+        // the task prompt).
+        let (runs, _, _) = runtime.stored_session_detail("session-1");
+        let stored = runs
+            .iter()
+            .find(|run| run.id == "child-run")
+            .expect("child run is persisted");
+        assert_eq!(stored.parent_run_id.as_deref(), Some("parent-run"));
+        assert_eq!(stored.parent_session_id.as_deref(), Some("parent-session"));
+
+        // An operator-started run (no parent fields) records no parent linkage.
+        let mut operator = request(&workspace_root);
+        operator.requested_run_id = Some("operator-run".to_string());
+        let op_handle = runtime
+            .start(operator, "2026-07-05T12:00:01Z")
+            .expect("operator run starts");
+        let op_run = runtime
+            .run(&op_handle.run_id)
+            .expect("operator run exists")
+            .record
+            .run
+            .clone();
+        assert!(op_run.parent_run_id.is_none());
+        assert!(op_run.parent_session_id.is_none());
 
         let _ = fs::remove_dir_all(&store_root);
     }
@@ -2913,6 +3005,16 @@ mod tests {
             "event_unexpected_file_contents"
         );
         assert_eq!(
+            err_code(BridgeEventPayload::FileWritten {
+                result: crate::fsbrowse::FileWriteResult {
+                    path: "x".to_string(),
+                    ok: true,
+                    message: None,
+                },
+            }),
+            "event_unexpected_file_written"
+        );
+        assert_eq!(
             err_code(BridgeEventPayload::SearchResults {
                 results: crate::fsbrowse::SearchResults {
                     root: "r".to_string(),
@@ -3045,6 +3147,19 @@ mod tests {
                 },
             }),
             "event_unexpected_git_diff"
+        );
+        assert_eq!(
+            err_code(BridgeEventPayload::GitFileVersions {
+                result: crate::git::GitFileVersions {
+                    root: "/r".to_string(),
+                    path: "a.txt".to_string(),
+                    original: String::new(),
+                    modified: String::new(),
+                    existed_in_head: false,
+                    existed_in_work: true,
+                },
+            }),
+            "event_unexpected_git_file_versions"
         );
         assert_eq!(
             err_code(BridgeEventPayload::SessionList {

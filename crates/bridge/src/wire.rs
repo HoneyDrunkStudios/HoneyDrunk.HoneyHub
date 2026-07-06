@@ -5,8 +5,8 @@ use crate::artifact::DispatchArtifact;
 use crate::backend_catalog::BackendCapability;
 use crate::checks::CheckOutcome;
 use crate::environment::EnvironmentInfo;
-use crate::fsbrowse::{DirListing, FileContents, SearchResults, WorkspaceFolders};
-use crate::git::{GitBranches, GitDiff, GitOpResult, GitOverview, GitStatus};
+use crate::fsbrowse::{DirListing, FileContents, FileWriteResult, SearchResults, WorkspaceFolders};
+use crate::git::{GitBranches, GitDiff, GitFileVersions, GitOpResult, GitOverview, GitStatus};
 use crate::grafana::GrafanaSummary;
 use crate::jobs::{JobProbe, JobSnapshot};
 use crate::keyvault::{
@@ -185,6 +185,14 @@ pub enum ClientCommand {
     /// [`BridgeEventPayload::FileContents`] (or an error for binary/oversized/denied).
     ReadFile {
         path: String,
+    },
+    /// Write a file's full UTF-8 text (the in-app editor's Save). The host gates the
+    /// target against the workspace allowlist (the target itself when it exists, else its
+    /// parent directory for a new file) and answers with a
+    /// [`BridgeEventPayload::FileWritten`] result.
+    WriteFile {
+        path: String,
+        content: String,
     },
     /// Recursively search a root for files whose name contains `query` (read-only).
     /// The host gates `root` against the allowlist and answers with a
@@ -399,6 +407,14 @@ pub enum ClientCommand {
         root: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         path: Option<String>,
+    },
+    /// Read both versions of a single file (its `HEAD` content + working-tree content) for
+    /// the side-by-side diff view. `path` is repo-relative (like [`ClientCommand::GitDiff`]).
+    /// The host gates `root` against the allowlist and answers with
+    /// [`BridgeEventPayload::GitFileVersions`].
+    GitFileVersions {
+        root: String,
+        path: String,
     },
     /// Discover the git repos under a selected folder (or the folder itself when it is a
     /// repo) and read each one's status. The host gates `root` against the allowlist and
@@ -783,6 +799,23 @@ impl BridgeEvent {
             sequence: 0,
             created_at: created_at.into(),
             payload: BridgeEventPayload::FileContents { file },
+        }
+    }
+
+    /// A device-wide file-written event (the in-app editor's Save). Not scoped to a run
+    /// or session, so `session_id`/`run_id` are empty and `sequence` is `0`.
+    pub fn file_written(
+        id: impl Into<String>,
+        created_at: impl Into<String>,
+        result: FileWriteResult,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            session_id: String::new(),
+            run_id: String::new(),
+            sequence: 0,
+            created_at: created_at.into(),
+            payload: BridgeEventPayload::FileWritten { result },
         }
     }
 
@@ -1252,6 +1285,24 @@ impl BridgeEvent {
         }
     }
 
+    /// A device-wide git file-versions event (a single file's `HEAD` + working-tree content
+    /// for the side-by-side diff). Not scoped to a run or session, so `session_id`/`run_id`
+    /// are empty and `sequence` is `0`.
+    pub fn git_file_versions(
+        id: impl Into<String>,
+        created_at: impl Into<String>,
+        result: GitFileVersions,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            session_id: String::new(),
+            run_id: String::new(),
+            sequence: 0,
+            created_at: created_at.into(),
+            payload: BridgeEventPayload::GitFileVersions { result },
+        }
+    }
+
     /// A device-wide group-check result (one declared command run in a repo root). Not scoped
     /// to a run or session, so `session_id`/`run_id` are empty and `sequence` is `0`.
     pub fn check_result(
@@ -1388,6 +1439,9 @@ pub enum BridgeEventPayload {
     FileContents {
         file: FileContents,
     },
+    FileWritten {
+        result: FileWriteResult,
+    },
     SearchResults {
         results: SearchResults,
     },
@@ -1459,6 +1513,9 @@ pub enum BridgeEventPayload {
     },
     GitDiff {
         diff: GitDiff,
+    },
+    GitFileVersions {
+        result: GitFileVersions,
     },
     GitOverview {
         overview: GitOverview,
@@ -1628,6 +1685,97 @@ mod tests {
     }
 
     #[test]
+    fn serializes_write_file_command_and_file_written_event() {
+        // The command tag is snake_case and its fields camelCase.
+        let command = ClientCommand::WriteFile {
+            path: "C:/work/a.txt".to_string(),
+            content: "hello".to_string(),
+        };
+        assert_eq!(
+            serde_json::to_value(command).expect("command serializes"),
+            json!({
+                "kind": "write_file",
+                "path": "C:/work/a.txt",
+                "content": "hello"
+            })
+        );
+
+        // The event payload tag is snake_case and the result's fields camelCase; the
+        // optional `message` is omitted when absent.
+        let event = BridgeEvent::file_written(
+            "e",
+            "2026-07-04T00:00:00Z",
+            FileWriteResult {
+                path: "C:/work/a.txt".to_string(),
+                ok: true,
+                message: None,
+            },
+        );
+        let value = serde_json::to_value(&event).expect("event serializes");
+        assert_eq!(value["payload"]["kind"], json!("file_written"));
+        assert_eq!(value["payload"]["result"]["path"], json!("C:/work/a.txt"));
+        assert_eq!(value["payload"]["result"]["ok"], json!(true));
+        assert!(value["payload"]["result"].get("message").is_none());
+
+        // And it round-trips back to the same variant.
+        let decoded: BridgeEvent = serde_json::from_value(value).expect("event deserializes");
+        assert!(matches!(
+            decoded.payload,
+            BridgeEventPayload::FileWritten { .. }
+        ));
+    }
+
+    #[test]
+    fn serializes_git_file_versions_command_and_event() {
+        // The command tag is snake_case and its fields camelCase.
+        let command = ClientCommand::GitFileVersions {
+            root: "C:/repo".to_string(),
+            path: "src/app.tsx".to_string(),
+        };
+        assert_eq!(
+            serde_json::to_value(&command).expect("command serializes"),
+            json!({
+                "kind": "git_file_versions",
+                "root": "C:/repo",
+                "path": "src/app.tsx"
+            })
+        );
+        // And the command round-trips back to the same variant.
+        let decoded: ClientCommand =
+            serde_json::from_value(serde_json::to_value(&command).unwrap())
+                .expect("command deserializes");
+        assert!(matches!(decoded, ClientCommand::GitFileVersions { .. }));
+
+        // The event payload tag is snake_case and the result's fields camelCase.
+        let event = BridgeEvent::git_file_versions(
+            "e",
+            "2026-07-05T00:00:00Z",
+            GitFileVersions {
+                root: "C:/repo".to_string(),
+                path: "src/app.tsx".to_string(),
+                original: "old".to_string(),
+                modified: "new".to_string(),
+                existed_in_head: true,
+                existed_in_work: true,
+            },
+        );
+        let value = serde_json::to_value(&event).expect("event serializes");
+        assert_eq!(value["payload"]["kind"], json!("git_file_versions"));
+        assert_eq!(value["payload"]["result"]["path"], json!("src/app.tsx"));
+        assert_eq!(value["payload"]["result"]["original"], json!("old"));
+        assert_eq!(value["payload"]["result"]["modified"], json!("new"));
+        assert_eq!(value["payload"]["result"]["existedInHead"], json!(true));
+        assert_eq!(value["payload"]["result"]["existedInWork"], json!(true));
+
+        // And it round-trips back to the same variant.
+        let decoded: BridgeEvent = serde_json::from_value(value).expect("event deserializes");
+        assert!(matches!(
+            decoded.payload,
+            BridgeEventPayload::GitFileVersions { .. }
+        ));
+    }
+
+    #[test]
     fn serializes_usage_summary_query_as_fieldless_tagged_command() {
         // The query carries no payload; it must serialize as just the tag so the
         // client can send a bare `{"kind":"usage_summary"}` (snake_case, per the
@@ -1764,6 +1912,8 @@ mod tests {
                         transcript: Vec::new(),
                         launch_command: None,
                         attachments: Vec::new(),
+                        parent_run_id: None,
+                        parent_session_id: None,
                     }),
                 },
                 created_at,
@@ -2184,6 +2334,17 @@ mod tests {
                 }),
             ),
             BridgeEventPayload::FileContents { .. }
+        );
+        check!(
+            BridgeEvent::file_written(
+                "e",
+                at,
+                from_json!(FileWriteResult, {
+                    "path": "C:/work/a.txt",
+                    "ok": true
+                }),
+            ),
+            BridgeEventPayload::FileWritten { .. }
         );
         check!(
             BridgeEvent::search_results(

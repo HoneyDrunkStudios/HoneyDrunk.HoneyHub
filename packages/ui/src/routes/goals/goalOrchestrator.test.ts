@@ -35,6 +35,7 @@ class FakeClient implements WireClient {
   async setWorkspaceRoots(): Promise<void> {}
   async browseDir(): Promise<void> {}
   async readFile(): Promise<void> {}
+  async writeFile(): Promise<void> {}
   async searchFiles(): Promise<void> {}
   async resolveWorkspaceFile(): Promise<void> {}
   async writeAgent(): Promise<void> {}
@@ -59,6 +60,7 @@ class FakeClient implements WireClient {
   async sentrySummary(): Promise<void> {}
   async gitStatus(): Promise<void> {}
   async gitDiff(): Promise<void> {}
+  async gitFileVersions(): Promise<void> {}
   async gitOverview(): Promise<void> {}
   async gitBranches(): Promise<void> {}
   async gitStage(): Promise<void> {}

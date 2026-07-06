@@ -318,18 +318,20 @@ button:not([class]):disabled {
 
 .app-shell {
   display: grid;
-  grid-template-columns: var(--sidebar-w) minmax(0, 1fr);
+  /* The left sidebar is gone (replaced by the floating hive launcher), so content runs
+     edge-to-edge — one column, minus the chat dock when it is shown. */
+  grid-template-columns: minmax(0, 1fr);
   min-height: 100vh;
 }
 
-/* When the right-hand chat dock is shown, the shell grows a third column sized to
-   the panel (expanded, at its dragged width) or a slim rail (collapsed). On the
-   small-screen Chat page the dock is removed entirely (no modifier → two columns). */
+/* When the right-hand chat dock is shown, the shell grows a second column sized to the
+   panel (expanded, at its dragged width) or a slim rail (collapsed). On the small-screen
+   Chat page the dock is removed entirely (no modifier → single column). */
 .app-shell.chat-open {
-  grid-template-columns: var(--sidebar-w) minmax(0, 1fr) var(--chat-dock-w, 380px);
+  grid-template-columns: minmax(0, 1fr) var(--chat-dock-w, 380px);
 }
 .app-shell.chat-collapsed {
-  grid-template-columns: var(--sidebar-w) minmax(0, 1fr) 52px;
+  grid-template-columns: minmax(0, 1fr) 52px;
 }
 
 /* The Chat nav item exists for small screens (the dock does not fit there, and is
@@ -515,6 +517,346 @@ button:not([class]):disabled {
   cursor: pointer;
 }
 
+/* --------------------------------------------------------- hive launcher
+   HoneyHub's signature navigation: a collapsed hex "hive" that blooms into a honeycomb of
+   hexagonal view-tiles (one hex per nav view). Honey-gold with a cyberpunk neon edge; all
+   colours come from the shared theme variables so it follows every theme. Floats bottom-left,
+   clear of the right-hand chat dock. */
+
+/* --- collapsed hive (the floating launcher button) --- */
+.hive-launch {
+  position: fixed;
+  left: 22px;
+  bottom: 22px;
+  z-index: 35;
+  width: 58px;
+  height: 64px;
+}
+.hive-launch.is-open {
+  /* Lift the launcher above its own bloom backdrop (.ws-backdrop, z-40) while open. */
+  z-index: 43;
+}
+
+.hive-button {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: none;
+  cursor: pointer;
+  /* pointy-top hexagon */
+  clip-path: polygon(50% 0%, 100% 25%, 100% 75%, 50% 100%, 0% 75%, 0% 25%);
+  /* App-icon launcher: a subtle dark hex frame with a thin honey ring (the 2px reveal), the
+     brand logo centred — brand-forward, not a flat honey fill. */
+  background: var(--honey-line);
+  filter: drop-shadow(0 6px 16px rgba(0, 0, 0, 0.45)) drop-shadow(0 0 10px var(--honey-glow));
+  transition: transform 0.14s ease, filter 0.14s ease, background 0.14s ease;
+}
+.hive-button::before {
+  /* Dark inner face — the 2px reveal of the parent is the honey ring. */
+  content: "";
+  position: absolute;
+  inset: 2px;
+  clip-path: polygon(50% 0%, 100% 25%, 100% 75%, 50% 100%, 0% 75%, 0% 25%);
+  background: linear-gradient(155deg, var(--bg-elev), var(--panel-2));
+  pointer-events: none;
+}
+.hive-button:hover {
+  transform: scale(1.06);
+  background: var(--honey-bright);
+  filter: drop-shadow(0 6px 18px rgba(0, 0, 0, 0.5)) drop-shadow(0 0 16px var(--honey-line));
+}
+.hive-button:focus-visible {
+  outline: 2px solid var(--neon-blue);
+  outline-offset: 3px;
+}
+.hive-button-mark {
+  position: relative;
+  z-index: 1;
+  font-family: var(--font-mono);
+  font-size: 1.12rem;
+  font-weight: 700;
+  letter-spacing: -0.03em;
+  color: var(--honey-bright);
+  text-shadow: 0 0 10px var(--honey-glow);
+}
+/* Unread badge on the collapsed launcher (mirrors the header bell's badge; shown only while the
+   bloom is closed). */
+.hive-launch-badge {
+  position: absolute;
+  top: -3px;
+  right: -3px;
+  z-index: 2;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  display: grid;
+  place-items: center;
+  border-radius: var(--radius-pill);
+  background: var(--neon-pink);
+  color: #fff;
+  font-size: 0.66rem;
+  font-weight: 700;
+  box-shadow: 0 0 0 2px var(--bg), var(--glow-pink);
+}
+
+/* --- bloomed honeycomb panel --- */
+.hive-bloom {
+  position: fixed;
+  left: 22px;
+  bottom: 96px;
+  z-index: 42;
+  width: min(468px, calc(100vw - 36px));
+  max-height: calc(100vh - 128px);
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  /* Tight left padding so the HoneyHub wordmark sits close to the panel's left edge. */
+  padding: 14px 16px 14px 12px;
+  border: 1px solid var(--honey-line);
+  border-radius: 18px;
+  background: linear-gradient(180deg, var(--glass-top), var(--glass-bottom)), var(--panel);
+  box-shadow: 0 18px 50px rgba(0, 0, 0, 0.55), var(--glow-gold);
+  animation: hive-bloom-in 0.18s ease both;
+}
+@keyframes hive-bloom-in {
+  from {
+    opacity: 0;
+    transform: translateY(10px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+.hive-bloom-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.hive-bloom-name {
+  font-size: 1.08rem;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  text-shadow: 0 0 14px var(--honey-glow);
+}
+
+/* Config/trust surfaces: a small right-aligned icon cluster in the bloom header (bell / download
+   / gear), opposite the wordmark. Ghost circular buttons, honey-tinted on hover/current. */
+.hive-bloom-config {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.hive-bloom-config-btn {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+  background: var(--panel-2);
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: border-color 0.14s ease, color 0.14s ease, box-shadow 0.14s ease;
+}
+.hive-bloom-config-btn:hover {
+  color: var(--honey-bright);
+  border-color: var(--honey-line);
+  box-shadow: var(--glow-gold);
+}
+.hive-bloom-config-btn:focus-visible {
+  outline: 2px solid var(--neon-blue);
+  outline-offset: 2px;
+}
+.hive-bloom-config-btn.is-current {
+  color: var(--honey-bright);
+  border-color: var(--honey-line);
+  box-shadow: 0 0 0 1px var(--honey-line), var(--glow-gold);
+}
+.hive-bloom-config-icon {
+  display: grid;
+  place-items: center;
+}
+.hive-bloom-config-badge {
+  position: absolute;
+  top: -5px;
+  right: -5px;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  display: grid;
+  place-items: center;
+  border-radius: var(--radius-pill);
+  background: var(--neon-pink);
+  color: #fff;
+  font-size: 0.6rem;
+  font-weight: 700;
+  box-shadow: 0 0 0 2px var(--panel), var(--glow-pink);
+}
+
+/* The honeycomb itself: a brick tessellation — fixed columns per row with alternate rows shifted
+   half a hex, so every hex (including a short last row) nestles into a valley of the row above. The
+   comb is a fit-content block centred in the panel; a negative top margin overlaps the rows. */
+.hive-comb {
+  --hex-w: 88px;
+  --hex-h: 100px;
+  --hex-gap: 6px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  width: fit-content;
+  margin: 2px auto 0;
+}
+.hive-row {
+  display: flex;
+  gap: var(--hex-gap);
+}
+.hive-row.is-offset {
+  /* Shift the brick row by half a hex (+ half a gap) so its hexes land in the valleys above. */
+  margin-left: calc((var(--hex-w) + var(--hex-gap)) / 2);
+}
+.hive-row + .hive-row {
+  margin-top: calc(var(--hex-h) * -0.26);
+}
+
+.hive-cell-wrap {
+  position: relative;
+  width: var(--hex-w);
+  height: var(--hex-h);
+  /* A non-clipped positioning shell: its overlapping corners must not steal clicks from the
+     row below, and the alert badge must be free to sit outside the hex silhouette. */
+  pointer-events: none;
+  animation: hive-cell-in 0.26s ease both;
+  animation-delay: calc(var(--hive-i, 0) * 22ms);
+}
+@keyframes hive-cell-in {
+  from {
+    opacity: 0;
+    transform: scale(0.55);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+.hive-cell {
+  position: absolute;
+  inset: 0;
+  pointer-events: auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  padding: 0 8px;
+  border: none;
+  cursor: pointer;
+  /* Clip the hit-area to the hex so overlapping rows never steal each other's clicks. */
+  clip-path: polygon(50% 0%, 100% 25%, 100% 75%, 50% 100%, 0% 75%, 0% 25%);
+  /* Solid honey background; the 2.5px reveal around the inner face is the honey cell wall
+     (a real border would be clipped by clip-path, so the double-hex reveal does the outline). */
+  background: var(--honey);
+  color: var(--honey-soft);
+  font: inherit;
+  filter: drop-shadow(0 3px 8px rgba(0, 0, 0, 0.4));
+  transition: filter 0.14s ease, color 0.14s ease, background 0.14s ease;
+}
+.hive-cell::before {
+  content: "";
+  position: absolute;
+  inset: 2.5px;
+  z-index: 0;
+  clip-path: polygon(50% 0%, 100% 25%, 100% 75%, 50% 100%, 0% 75%, 0% 25%);
+  background: linear-gradient(180deg, var(--panel), var(--panel-2));
+}
+.hive-cell:hover {
+  color: var(--honey-bright);
+  background: var(--honey-bright);
+  filter: drop-shadow(0 0 12px var(--honey-glow));
+}
+.hive-cell:hover::before {
+  background: linear-gradient(180deg, var(--bg-elev), var(--panel-2));
+}
+.hive-cell:focus-visible {
+  outline: none;
+  color: var(--honey-bright);
+  background: var(--honey-bright);
+  filter: drop-shadow(0 0 12px var(--honey-line));
+}
+/* Selected ("you are here"): a solid honey fill with DARK icon + label, so the active page is
+   clearly legible (a honey-on-honey selected cell was unreadable). */
+.hive-cell.is-current {
+  color: #1a1405;
+  background: var(--honey-bright);
+  filter: drop-shadow(0 0 14px var(--honey-line));
+}
+.hive-cell.is-current::before {
+  background: linear-gradient(180deg, var(--honey-bright), var(--honey));
+}
+.hive-cell-icon {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  place-items: center;
+}
+.hive-cell-label {
+  position: relative;
+  z-index: 1;
+  max-width: 92%;
+  font-size: 0.6rem;
+  font-weight: 600;
+  line-height: 1.1;
+  text-align: center;
+  letter-spacing: 0.01em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Reuses .conn-state + .bridge-connect (rehomed from the old sidebar footer). */
+.hive-foot {
+  display: grid;
+  gap: 10px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border-hair);
+}
+
+/* The Chat hex is a phone-only affordance (desktop gets the dock); HiveNav already drops it in
+   JS on wide viewports, so no CSS hide is needed here. */
+
+@media (prefers-reduced-motion: reduce) {
+  .hive-bloom,
+  .hive-cell-wrap {
+    animation: none;
+  }
+}
+
+@media (max-width: 860px) {
+  .hive-launch {
+    left: 16px;
+    bottom: calc(16px + env(safe-area-inset-bottom, 0px));
+  }
+  .hive-bloom {
+    left: 12px;
+    right: 12px;
+    width: auto;
+    bottom: calc(84px + env(safe-area-inset-bottom, 0px));
+    max-height: calc(100vh - 150px);
+  }
+  .hive-comb {
+    --hex-w: 76px;
+    --hex-h: 86px;
+  }
+}
+
 /* ---------------------------------------------------------------- content */
 
 .content {
@@ -527,6 +869,15 @@ button:not([class]):disabled {
   width: min(1080px, 100%);
   margin: 0 auto;
   padding: 34px 36px 56px;
+}
+
+/* Repositories runs as a full-window IDE: drop the 1080px reading cap and trim the side padding
+   so the editor uses the whole content area (window minus the left nav + chat dock). Applied only
+   while the Repositories view is active, so every other page keeps its centred reading column. */
+.content-inner--wide {
+  width: 100%;
+  max-width: none;
+  padding: 14px 20px 16px;
 }
 
 /* shared section eyebrow + title — mono cyan label (cyberpunk cue) */
@@ -2703,16 +3054,55 @@ h2 {
   box-shadow: 0 0 0 3px var(--honey-glow);
 }
 
+/* Buttons in the settings pages. The DEFAULT is a quiet honey-ghost (secondary/utility:
+   Remove, Revoke, Done) — a thin honey outline over the dark panel that lights up on hover.
+   The single primary action per section (Pair device, Add root) opts into `.is-primary` for
+   the solid honey fill, so a page reads as one clear CTA plus quiet helpers rather than a row
+   of saturated yellow slabs. */
 .bridge-settings button {
   justify-self: start;
-  padding: 9px 16px;
-  border: 1px solid var(--honey);
+  padding: 7px 14px;
+  border: 1px solid var(--honey-line);
   border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--honey-soft);
+  font: inherit;
+  font-size: 0.85rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.12s ease, border-color 0.12s ease, color 0.12s ease;
+}
+
+.bridge-settings button:hover:not(:disabled) {
+  background: var(--honey-glow);
+  border-color: var(--honey);
+  color: var(--honey-bright);
+}
+
+.bridge-settings button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.bridge-settings button:focus-visible {
+  outline: none;
+  border-color: var(--honey);
+  box-shadow: 0 0 0 3px var(--honey-glow);
+}
+
+/* The one solid honey call-to-action per section. */
+.bridge-settings button.is-primary {
+  border-color: var(--honey);
   background: linear-gradient(180deg, var(--honey-bright), var(--honey));
   color: #2a1a04;
-  font: inherit;
   font-weight: 700;
-  cursor: pointer;
+}
+
+.bridge-settings button.is-primary:hover:not(:disabled) {
+  background: linear-gradient(180deg, var(--honey-bright), var(--honey));
+  border-color: var(--honey);
+  color: #2a1a04;
+  filter: brightness(1.05);
 }
 
 .bridge-settings ul {
@@ -3697,6 +4087,98 @@ h2 {
   gap: 1px;
 }
 
+/* Folder-browser controls, scoped so they win over the `.bridge-settings button` fill when the
+   browser is embedded in Workspace Roots (a bare `.crumb`/`.folder-use`/`.entry` selector loses
+   to it on specificity, which is what made every row and button a saturated honey slab). The
+   look here is the honeypunk secondary set: a quiet honey-ghost "Up", a soft honey-tinted "Use
+   this folder", and clean rows that only wash honey + grow a honey left-edge when hovered or
+   focused — a subtle selected state, not a full-yellow bar. */
+.folder-browser .crumb {
+  padding: 5px 12px;
+  border: 1px solid var(--honey-line);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--honey-soft);
+  font: inherit;
+  font-size: 0.78rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.12s ease, border-color 0.12s ease, color 0.12s ease;
+}
+
+.folder-browser .crumb:hover:not(:disabled) {
+  background: var(--honey-glow);
+  border-color: var(--honey);
+  color: var(--honey-bright);
+}
+
+.folder-browser .crumb:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.folder-browser .crumb:focus-visible {
+  outline: none;
+  border-color: var(--honey);
+  box-shadow: 0 0 0 3px var(--honey-glow);
+}
+
+.folder-browser .folder-use {
+  flex: 0 0 auto;
+  padding: 5px 12px;
+  border: 1px solid var(--honey-line);
+  border-radius: var(--radius-sm);
+  background: var(--honey-glow);
+  color: var(--honey-bright);
+  font: inherit;
+  font-weight: 600;
+  font-size: 0.8rem;
+  cursor: pointer;
+  transition: background 0.12s ease, border-color 0.12s ease;
+}
+
+.folder-browser .folder-use:hover:not(:disabled) {
+  background: var(--honey-line);
+  border-color: var(--honey);
+}
+
+.folder-browser .folder-use:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.folder-browser .folder-use:focus-visible {
+  outline: none;
+  border-color: var(--honey);
+  box-shadow: 0 0 0 3px var(--honey-glow);
+}
+
+.folder-browser .entry {
+  padding: 7px 10px;
+  border: 1px solid transparent;
+  border-left: 2px solid transparent;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.1s ease, border-color 0.1s ease;
+}
+
+.folder-browser .entry:hover {
+  background: var(--honey-glow);
+  border-color: var(--honey-line);
+  border-left-color: var(--honey);
+}
+
+.folder-browser .entry:focus-visible {
+  outline: none;
+  background: var(--honey-glow);
+  border-color: var(--honey-line);
+  border-left-color: var(--honey);
+}
+
 .picked-roots {
   width: 100%;
   list-style: none;
@@ -3764,6 +4246,20 @@ h2 {
 .chat-heading {
   font-size: 1.9rem;
   text-align: center;
+}
+
+/* Empty-state hero: float the rotating prompt + composer to the vertical center of the
+   pane (a fresh ChatGPT/Claude-style empty state), leaving the "Chats" list to flow
+   beneath. Auto margins above the heading and below the composer soak up the free
+   space, so the pair sits centered with no history and floats in the space above the
+   list when there is some (auto margins take priority over justify-content on the main
+   axis). Scoped to the full pane — the sidebar keeps its own bottom-anchored composer
+   layout defined further below. */
+.chat:not(.chat--sidebar) .chat-start .chat-heading {
+  margin-top: auto;
+}
+.chat:not(.chat--sidebar) .chat-start .composer {
+  margin-bottom: auto;
 }
 
 .composer {
@@ -3874,6 +4370,150 @@ h2 {
   margin: 0;
   background: transparent;
   cursor: default;
+}
+
+/* --- Settings modal (left section-nav + scrollable pane) --- */
+/* A true web modal: a dim full-viewport backdrop over the whole app (content + honeycomb + chat
+   dock), with the centered card on top. Distinct from the transparent `.ws-backdrop` so only the
+   Settings modal dims the page behind it. */
+.settings-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  border: none;
+  padding: 0;
+  margin: 0;
+  background: rgba(4, 4, 10, 0.55);
+  cursor: default;
+}
+
+.settings-modal {
+  position: fixed;
+  z-index: 41;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  display: grid;
+  grid-template-columns: 200px 1fr;
+  width: min(880px, calc(100vw - 32px));
+  max-height: 85vh;
+  overflow: hidden;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-card);
+  outline: none;
+}
+
+.settings-modal-nav {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 16px 10px;
+  background: var(--panel-2);
+  border-right: 1px solid var(--border);
+  overflow-y: auto;
+}
+
+.settings-modal-nav-item {
+  appearance: none;
+  text-align: left;
+  padding: 8px 12px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-muted);
+  font: inherit;
+  cursor: pointer;
+}
+
+.settings-modal-nav-item:hover {
+  background: var(--hover);
+  color: var(--text);
+}
+
+.settings-modal-nav-item.is-active {
+  background: var(--hover);
+  color: var(--text);
+  box-shadow: inset 2px 0 0 var(--honey);
+}
+
+.settings-modal-body {
+  padding: 20px 24px 24px;
+  overflow-y: auto;
+}
+
+.settings-modal-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.settings-modal-head h2 {
+  margin: 0;
+}
+
+.settings-modal-close {
+  appearance: none;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--panel-2);
+  color: var(--text-muted);
+  width: 30px;
+  height: 30px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.settings-modal-close:hover {
+  background: var(--hover);
+  color: var(--text);
+}
+
+/* Bridge settings, grouped into labeled subsections (pairing, workspace roots, providers, …)
+   so the long pane reads as clear concerns rather than a wall of controls. */
+.settings-group {
+  padding: 14px 0 4px;
+  border-top: 1px solid var(--border-hair);
+}
+.settings-group:first-of-type {
+  padding-top: 2px;
+  border-top: none;
+}
+.settings-group-title {
+  margin: 0 0 2px;
+  font-size: 0.98rem;
+  font-weight: 700;
+  color: var(--honey-soft);
+}
+.settings-group-hint {
+  margin: 0 0 10px;
+  font-size: 0.82rem;
+  color: var(--text-muted);
+  max-width: 60ch;
+}
+
+.page-prefs-hint {
+  color: var(--text-muted);
+  margin: 0 0 12px;
+}
+
+.page-prefs-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.page-prefs-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
 }
 
 .ws-popover {
@@ -4182,6 +4822,15 @@ h2 {
   justify-content: space-between;
   gap: 10px;
 }
+/* The "Threads" section header: a clear, honey-accented label so the thread list is
+   obviously discoverable in the narrow dock. */
+.recent-chats-title {
+  margin: 0;
+  font-size: 0.82rem;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  color: var(--honey);
+}
 
 .recent-search {
   flex: 0 1 200px;
@@ -4288,6 +4937,40 @@ h2 {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+/* Per-thread status light at the head of a row: "active" pulses in neon while the
+   thread's run is still going; "done" is a steady honey glow once it finished with
+   answers. An empty draft placeholder gets no light at all. */
+.recent-status {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  margin-right: 6px;
+  border-radius: 50%;
+  vertical-align: middle;
+}
+.recent-status--active {
+  background: var(--neon-blue);
+  box-shadow: 0 0 6px var(--neon-blue);
+  animation: recent-status-pulse 1.4s ease-in-out infinite;
+}
+.recent-status--done {
+  background: var(--honey);
+  box-shadow: 0 0 5px var(--honey-line);
+}
+@keyframes recent-status-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .recent-status--active {
+    animation: none;
+  }
+}
 
 .recent-meta {
   flex: 0 0 auto;
@@ -4338,6 +5021,36 @@ h2 {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* Right-side controls in the chat header (run-state pill + the always-available
+   "New chat" button), kept together against the header's space-between. */
+.chat-head-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 0 0 auto;
+}
+
+/* Start-a-fresh-thread control, present in the active-run and history headers so a new
+   chat is one click away from anywhere. Quiet chrome that matches the header. */
+.chat-new {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-muted);
+  font: inherit;
+  font-size: 0.8rem;
+  cursor: pointer;
+}
+
+.chat-new:hover {
+  color: var(--text);
+  border-color: var(--honey-line);
 }
 
 .chat-main .transcript {
@@ -5643,6 +6356,62 @@ button:focus-visible,
   color: var(--text-muted);
   margin-top: 2px;
 }
+
+/* "Changes in progress": repos with uncommitted work. Each row jumps into Repositories, opening
+   that repo's Source Control. */
+.hub-changes {
+  margin-top: 18px;
+}
+.hub-changes-title {
+  font-size: 0.78rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-muted);
+  margin: 0 0 8px;
+}
+.hub-changes-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.hub-change-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  text-align: left;
+  padding: 8px 12px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--honey);
+  background: var(--bg);
+  color: var(--text);
+  cursor: pointer;
+  font: inherit;
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+.hub-change-row:hover {
+  border-color: var(--honey-line);
+  box-shadow: 0 0 0 3px var(--honey-glow);
+}
+.hub-change-name {
+  font-family: var(--font-mono);
+  font-weight: 600;
+}
+.hub-change-branch {
+  font-size: 0.78rem;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+}
+.hub-change-count {
+  margin-left: auto;
+  font-size: 0.74rem;
+  color: var(--honey-bright);
+  white-space: nowrap;
+}
 .updated-stamp {
   font-size: 0.72rem;
   color: var(--text-muted);
@@ -6506,6 +7275,50 @@ button:focus-visible,
   border-color: var(--neon-blue-line);
   color: var(--neon-blue);
 }
+/* The dock header's right-side controls: the always-available "New chat" button and
+   the collapse chevron, grouped against the header's space-between. */
+.chat-sidebar-head-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+/* "New chat" in the dock header — a bare "+" so a fresh thread is an obvious one-click
+   away from any chat state (empty, mid-run, or history). Same 28px square as the sessions
+   + collapse icons, kept honey-outlined so the primary action stands out among them. */
+.chat-sidebar-new {
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 1px solid var(--honey-line);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text);
+  cursor: pointer;
+}
+.chat-sidebar-new:hover {
+  background: rgba(255, 191, 0, 0.1);
+  border-color: var(--honey-line);
+}
+/* The header's session-history (clock) button — same slim, icon-only treatment as the
+   collapse chevron, lit neon on hover/open. */
+.chat-sidebar-history {
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+.chat-sidebar-history:hover,
+.chat-sidebar-history[aria-expanded="true"] {
+  border-color: var(--neon-blue-line);
+  color: var(--neon-blue);
+}
 .chat-sidebar-body {
   flex: 1 1 auto;
   min-height: 0;
@@ -6535,11 +7348,17 @@ button:focus-visible,
    shaped like an editor chat panel — history in the middle, the composer pinned to
    the bottom, controls in one tight row. */
 .chat--sidebar {
+  position: relative;
   min-height: 0;
   height: 100%;
   display: flex;
   flex-direction: column;
 }
+/* Empty-state dock layout: the greeting fills the space above the composer and centers
+   itself there (a fresh-chat hero), while the composer stays pinned at the BOTTOM where
+   you type, with the recent-chats / synced history tucked just above it. The greeting's
+   flex-grow is what pushes the composer down; `overflow-y: auto` lets a long history
+   scroll rather than clip. */
 .chat--sidebar .chat-start {
   width: 100%;
   height: 100%;
@@ -6547,16 +7366,35 @@ button:focus-visible,
   justify-content: flex-start;
   gap: 10px;
   padding-top: 10px;
-  overflow: hidden;
+  overflow-y: auto;
 }
-/* Bottom-anchored composer, editor-panel style: the (randomized) heading sits over
-   the history area; the composer + its cost/routing lines dock at the bottom. */
 .chat--sidebar .chat-heading {
   order: 0;
   font-size: 1.05rem;
   text-align: center;
   color: var(--text-muted);
   margin: 6px 0 0;
+}
+/* Ordering + sizing scoped to .chat-start so the active-run composer keeps its own
+   layout: greeting grows + centers (order 0), thread lists next, composer last (bottom). */
+.chat--sidebar .chat-start .chat-heading {
+  flex: 1 1 auto;
+  display: grid;
+  place-items: center;
+  margin: 0;
+  min-height: 72px;
+}
+.chat--sidebar .chat-start .recent-chats {
+  order: 1;
+  flex: 0 1 auto;
+  margin-top: 10px;
+}
+.chat--sidebar .chat-start .synced-history {
+  order: 2;
+}
+.chat--sidebar .chat-start .composer {
+  order: 3;
+  margin-top: 10px;
 }
 .chat--sidebar .recent-chats {
   order: 1;
@@ -6614,6 +7452,178 @@ button:focus-visible,
 .chat--sidebar .composer-input {
   min-height: 44px;
   font-size: 0.92rem;
+}
+/* The narrow dock has no room for the "New chat" label; the + icon (plus its
+   aria-label/title) carries it. */
+.chat--sidebar .chat-new {
+  padding: 4px 7px;
+}
+.chat--sidebar .chat-new-label {
+  display: none;
+}
+
+/* ── Session-history dropdown (Claude Code's session picker, replicated) ─────────────
+   A floating panel anchored near the top of the dock, opened by the header clock. Dock
+   width, dark + rounded, with an internal scroll. The backdrop catches outside clicks. */
+.threads-menu-backdrop {
+  position: absolute;
+  inset: 0;
+  z-index: 60;
+  border: none;
+  padding: 0;
+  background: transparent;
+  cursor: default;
+}
+.threads-menu {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  right: 8px;
+  z-index: 61;
+  display: flex;
+  flex-direction: column;
+  max-height: min(72%, 460px);
+  padding: 8px;
+  border: 1px solid var(--border-strong);
+  border-radius: 14px;
+  background: linear-gradient(180deg, rgba(0, 209, 255, 0.03), rgba(0, 0, 0, 0.14)),
+    var(--panel);
+  box-shadow: var(--shadow-card), 0 0 0 1px rgba(0, 0, 0, 0.2);
+}
+/* Search box with a leading magnifier (the panel's top control — one unified list of
+   sessions sits below it, with no source tabs). */
+.threads-search {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 7px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--panel-2);
+  color: var(--text-dim);
+}
+.threads-search:focus-within {
+  border-color: var(--honey-line);
+}
+.threads-search-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  border: none;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 0.82rem;
+  outline: none;
+}
+.threads-search-input::placeholder {
+  color: var(--text-dim);
+}
+/* Scrollable list of session rows. */
+.threads-list {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+  display: grid;
+  gap: 2px;
+  overflow-y: auto;
+  min-height: 0;
+}
+.threads-empty {
+  padding: 12px 8px;
+  color: var(--text-dim);
+  font-size: 0.82rem;
+  text-align: center;
+}
+.threads-row {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  border-radius: var(--radius-sm);
+}
+.threads-row:hover {
+  background: var(--panel-2);
+}
+/* The active/open row: honey-tinted, actions always visible. */
+.threads-row.is-current {
+  background: var(--honey-glow);
+  box-shadow: inset 0 0 0 1px var(--honey-line);
+}
+.threads-open {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 8px 10px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.threads-title {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.86rem;
+}
+.threads-time {
+  flex: 0 0 auto;
+  color: var(--text-dim);
+  font-size: 0.74rem;
+  font-variant-numeric: tabular-nums;
+}
+/* Rename + delete: hidden until hover, always shown on the current row. */
+.threads-actions {
+  display: flex;
+  align-items: center;
+  gap: 1px;
+  padding-right: 4px;
+  opacity: 0;
+  transition: opacity 120ms ease;
+}
+.threads-row:hover .threads-actions,
+.threads-row:focus-within .threads-actions,
+.threads-row.is-current .threads-actions {
+  opacity: 1;
+}
+.threads-action {
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-dim);
+  cursor: pointer;
+}
+.threads-action:hover {
+  border-color: var(--border);
+  background: var(--panel-3);
+  color: var(--text);
+}
+.threads-action.is-danger {
+  border-color: var(--danger, #e5484d);
+  color: var(--danger, #e5484d);
+}
+.threads-rename {
+  flex: 1 1 auto;
+  min-width: 0;
+  margin: 2px;
+  padding: 7px 10px;
+  border: 1px solid var(--honey-line);
+  border-radius: var(--radius-sm);
+  background: var(--panel-2);
+  color: var(--text);
+  font: inherit;
+  font-size: 0.86rem;
+  outline: none;
 }
 
 /* Attachment chips (shared by the composer + the follow-up box). */
@@ -6897,4 +7907,679 @@ button:focus-visible,
 .info-tip:focus-visible {
   border-color: var(--neon-blue);
   color: var(--neon-blue);
+}
+
+/* --- Repositories (the IDE surface: explorer + source control + viewer/editor) --- */
+.repos {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  height: calc(100vh - 120px);
+}
+
+/* In the full-window (wide) layout the content padding is trimmed, so the IDE can claim almost
+   the whole viewport height (leaving only the wide top/bottom padding). */
+.content-inner--wide .repos {
+  height: calc(100vh - 34px);
+}
+
+.repos-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.repos-header h2 {
+  font-size: 1.05rem;
+}
+
+.repos-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.repos-body {
+  display: grid;
+  grid-template-columns: 48px 300px minmax(0, 1fr);
+  gap: 14px;
+  flex: 1;
+  min-height: 0;
+}
+
+/* Far-left activity rail: a thin column of view-switch icons (VS Code model). It toggles the
+   sidebar between the explorer tree and the source-control panel; the editor keeps the centre. */
+.repos-rail {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: linear-gradient(180deg, var(--glass-top), var(--glass-bottom)), var(--panel-2);
+  box-shadow: var(--shadow-card);
+}
+
+.repos-rail-btn {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: none;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+/* Change-count badge on the Source control icon: a small honey pill in the top-right corner. */
+.repos-rail-badge {
+  position: absolute;
+  top: -3px;
+  right: -3px;
+  min-width: 15px;
+  height: 15px;
+  padding: 0 4px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  background: var(--honey);
+  color: #1a1206;
+  font-size: 0.62rem;
+  font-weight: 700;
+  line-height: 1;
+  font-family: var(--font-mono);
+  box-shadow: 0 0 0 1px var(--honey-line);
+}
+
+.repos-rail-btn:hover {
+  color: var(--text);
+  background: var(--hover);
+}
+
+.repos-rail-btn.is-active {
+  color: var(--honey-bright);
+  border-color: var(--honey-line);
+  background: var(--honey-glow);
+  box-shadow: 0 0 0 1px var(--honey-line) inset;
+}
+
+.repos-rail-btn:focus-visible {
+  outline: none;
+  border-color: var(--honey-line);
+  box-shadow: 0 0 0 3px var(--honey-glow);
+}
+
+.repos-sidebar,
+.repos-viewer {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: linear-gradient(180deg, var(--glass-top), var(--glass-bottom)), var(--panel);
+  box-shadow: var(--shadow-card);
+  overflow: auto;
+  min-height: 0;
+}
+
+.repos-sidebar {
+  display: flex;
+  flex-direction: column;
+  padding: 10px;
+  gap: 10px;
+}
+
+/* When the source-control panel is the whole sidebar, it no longer needs the divider that once
+   separated it from the explorer tree above it. */
+.repos-sidebar > .repos-scm {
+  border-top: none;
+  padding-top: 0;
+}
+
+.repos-pane-title {
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-muted);
+  margin: 2px 4px;
+}
+
+.repos-tree,
+.repos-files {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.repos-tree .repos-tree {
+  padding: 0;
+}
+
+.repos-hint {
+  color: var(--text-muted);
+  font-size: 0.82rem;
+  padding: 4px 8px;
+}
+
+.repos-tree-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 4px 8px;
+  background: none;
+  border: none;
+  color: var(--text);
+  text-align: left;
+  font-size: 0.84rem;
+  cursor: pointer;
+  border-radius: var(--radius-sm);
+}
+
+.repos-tree-row:hover {
+  background: var(--hover);
+}
+
+.repos-tree-row.is-open {
+  background: var(--honey-soft);
+  color: var(--honey-bright);
+}
+
+.repos-tree-caret {
+  flex: none;
+  width: 12px;
+  color: var(--text-muted);
+}
+
+.repos-tree-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.repos-scm {
+  border-top: 1px solid var(--border-hair);
+  padding-top: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.repos-scm-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.repos-branch-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.repos-new-branch {
+  display: flex;
+  gap: 4px;
+}
+
+.repos-new-branch input {
+  min-width: 0;
+  flex: 1;
+}
+
+.repos-remote-actions {
+  display: flex;
+  gap: 6px;
+}
+
+.repos-bulk {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 4px 8px;
+  font-size: 0.8rem;
+  color: var(--text-dim);
+  background: var(--honey-soft);
+  border-radius: var(--radius-sm);
+}
+
+.repos-scm-group-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: 6px;
+}
+
+.repos-scm-group-title {
+  font-size: 0.78rem;
+  color: var(--text-dim);
+}
+
+.repos-file-count {
+  color: var(--text-muted);
+}
+
+.repos-file-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  border-radius: var(--radius-sm);
+}
+
+.repos-file-row.is-selected {
+  background: var(--neon-blue-line);
+}
+
+.repos-file {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  flex: 1;
+  background: none;
+  border: none;
+  color: var(--text);
+  text-align: left;
+  padding: 3px 6px;
+  cursor: pointer;
+  font-size: 0.82rem;
+}
+
+.repos-file:hover {
+  background: var(--hover);
+}
+
+.repos-file-path {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.repos-file-actions {
+  display: flex;
+  gap: 4px;
+  flex: none;
+}
+
+.repos-commit {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.repos-commit textarea {
+  resize: vertical;
+  font-family: inherit;
+}
+
+.repos-viewer {
+  display: flex;
+  flex-direction: column;
+}
+
+/* The editor/diff body fills the viewer beneath the tab strip. Scoped to the Repositories viewer
+   so the shared `.file-viewer`/`.git-diff` blocks elsewhere are untouched. */
+.repos-viewer > .file-viewer,
+.repos-viewer > .git-diff {
+  flex: 1 1 auto;
+  min-height: 0;
+  height: auto;
+}
+
+.repos-viewer > .git-diff {
+  display: flex;
+  flex-direction: column;
+}
+
+.repos-viewer > .git-diff .git-diff-head {
+  flex: none;
+}
+
+/* The unified-patch fallback (no side-by-side versions) scrolls inside the fixed-height pane. */
+.repos-viewer > .git-diff .diff-figure {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+}
+
+/* The markdown Preview needs a shrinkable flex box so its own overflow:auto can scroll. */
+.repos-viewer > .file-viewer .markdown-body {
+  min-height: 0;
+}
+
+/* The Monaco editor host: fills the remaining pane height so Monaco's automaticLayout can
+   measure a real box, and carries the editor's own dark background so nothing flashes behind
+   the lazy chunk on first open. */
+.repos-editor-host {
+  flex: 1 1 auto;
+  min-height: 0;
+  position: relative;
+  background: #0b0a11;
+}
+
+/* ---- Editor tab strip (VS Code style) ---- */
+/* The tab strip and the editor-wide actions (unsaved count + Save all) share one bar; the tabs
+   scroll and grow while the actions stay pinned to the right. */
+.repos-editor-tabbar {
+  display: flex;
+  align-items: stretch;
+  flex: none;
+  min-height: 34px;
+  border-bottom: 1px solid var(--border-hair);
+  background: var(--panel-2);
+}
+
+.repos-editor-tabbar > .repos-tabs {
+  flex: 1 1 auto;
+  min-width: 0;
+  border-bottom: none;
+  background: transparent;
+}
+
+.repos-editor-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: none;
+  padding: 0 12px;
+  white-space: nowrap;
+}
+
+.repos-unsaved {
+  font-size: 0.74rem;
+  font-family: var(--font-mono);
+  color: var(--honey-bright);
+}
+
+.repos-save-all {
+  flex: none;
+}
+
+.repos-tabs {
+  display: flex;
+  align-items: stretch;
+  overflow-x: auto;
+  overflow-y: hidden;
+  flex: none;
+  min-height: 34px;
+  border-bottom: 1px solid var(--border-hair);
+  background: var(--panel-2);
+  scrollbar-width: thin;
+}
+
+.repos-tab {
+  display: inline-flex;
+  align-items: center;
+  flex: none;
+  max-width: 220px;
+  border-right: 1px solid var(--border-hair);
+  color: var(--text-muted);
+  background: transparent;
+  position: relative;
+}
+
+.repos-tab:hover {
+  background: var(--hover);
+  color: var(--text);
+}
+
+/* The active tab blends into the editor's own dark background, with a honey top accent. */
+.repos-tab.is-active {
+  background: #0b0a11;
+  color: var(--honey-bright);
+  box-shadow: inset 0 2px 0 var(--honey);
+}
+
+.repos-tab-open {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  padding: 6px 4px 6px 12px;
+  border: none;
+  background: none;
+  color: inherit;
+  font: inherit;
+  font-family: var(--font-mono);
+  font-size: 0.8rem;
+  cursor: pointer;
+}
+
+.repos-tab-icon {
+  display: inline-flex;
+  flex: none;
+}
+
+.repos-tab-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.repos-tab-close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  margin: 0 6px 0 2px;
+  padding: 0;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: none;
+  color: inherit;
+  cursor: pointer;
+  position: relative;
+}
+
+.repos-tab-close:hover {
+  background: var(--hover);
+  color: var(--danger);
+}
+
+/* A dirty tab shows a filled dot; on hover (of the tab) it flips to the close ✕. A clean tab
+   shows the ✕ (dimmed until hovered). */
+.repos-tab-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--honey-bright);
+}
+
+.repos-tab-x {
+  display: none;
+  font-size: 0.7rem;
+  line-height: 1;
+}
+
+.repos-tab:not(.is-dirty) .repos-tab-dot {
+  display: none;
+}
+
+.repos-tab:not(.is-dirty) .repos-tab-x {
+  display: inline;
+  opacity: 0.55;
+}
+
+.repos-tab:hover .repos-tab-dot {
+  display: none;
+}
+
+.repos-tab:hover .repos-tab-x {
+  display: inline;
+  opacity: 1;
+}
+
+/* ---- File-type icons (tree rows + tabs) ---- */
+.file-icon {
+  display: block;
+  flex: none;
+}
+
+.repos-tree-icon {
+  display: inline-flex;
+  flex: none;
+  width: 16px;
+  justify-content: center;
+}
+
+.repos-monaco {
+  height: 100%;
+}
+
+/* Repositories control polish: consistent sizing + a honey focus ring on the pane's selects,
+   the new-branch input, and the commit box (a light pass over the shared form styles, not a
+   redesign). */
+.repos-actions select,
+.repos-scm-head select,
+.repos-branch-switch select,
+.repos-new-branch input,
+.repos-commit textarea {
+  padding: 5px 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--panel-2);
+  color: var(--text);
+  font: inherit;
+  font-size: 0.82rem;
+}
+
+.repos-actions select:hover,
+.repos-scm-head select:hover,
+.repos-branch-switch select:hover,
+.repos-new-branch input:hover,
+.repos-commit textarea:hover {
+  border-color: var(--border-strong);
+}
+
+.repos-actions select:focus-visible,
+.repos-scm-head select:focus-visible,
+.repos-branch-switch select:focus-visible,
+.repos-new-branch input:focus-visible,
+.repos-commit textarea:focus-visible {
+  outline: none;
+  border-color: var(--honey-line);
+  box-shadow: 0 0 0 3px var(--honey-glow);
+}
+
+.repos-context-menu {
+  position: fixed;
+  z-index: 60;
+  min-width: 160px;
+  display: flex;
+  flex-direction: column;
+  padding: 4px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--panel-2);
+  box-shadow: var(--shadow-card);
+}
+
+.repos-context-menu button {
+  text-align: left;
+  background: none;
+  border: none;
+  color: var(--text);
+  padding: 6px 10px;
+  font-size: 0.82rem;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+
+.repos-context-menu button:hover {
+  background: var(--hover);
+}
+
+.repos-context-menu button.git-discard {
+  color: var(--danger);
+}
+
+.repos-empty {
+  color: var(--text-muted);
+  padding: 12px 4px;
+}
+
+.file-viewer-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* Markdown Edit/Preview segmented toggle (shown only for .md files). */
+.file-viewer-modes {
+  display: inline-flex;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+}
+
+.file-viewer-mode {
+  padding: 3px 10px;
+  border: none;
+  background: var(--panel-2);
+  color: var(--text-muted);
+  font: inherit;
+  font-size: 0.76rem;
+  cursor: pointer;
+}
+
+.file-viewer-mode + .file-viewer-mode {
+  border-left: 1px solid var(--border);
+}
+
+.file-viewer-mode:hover {
+  color: var(--text);
+  background: var(--hover);
+}
+
+.file-viewer-mode.is-active {
+  color: var(--honey-bright);
+  background: var(--honey-glow);
+}
+
+.file-viewer-mode:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px var(--honey-glow) inset;
+}
+
+@media (max-width: 860px) {
+  .repos-body {
+    grid-template-columns: 44px minmax(0, 1fr);
+  }
+  /* Narrow: rail + sidebar share the top row, the editor/diff spans full width below. */
+  .repos-viewer {
+    grid-column: 1 / -1;
+  }
+}
+
+/* --- Updates: the app's own self-update card --- */
+.updates-app-card {
+  border-color: var(--honey-line);
+}
+
+.updates-app-card .updates-version {
+  color: var(--honey-bright);
+}
+
+/* --- Groups: one-line explainer of groups + run checks --- */
+.groups-intro {
+  color: var(--text-dim);
+  font-size: 0.85rem;
+  max-width: 62ch;
+  margin: 2px 0 8px;
+}
+
+/* --- Ambient code-rain backdrop (MatrixRain): faint, behind all content --- */
+.matrix-rain {
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
 }

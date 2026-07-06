@@ -255,6 +255,10 @@ export class WebSocketWireClient implements WireClient {
     await this.dispatch({ kind: "read_file", path });
   }
 
+  async writeFile(path: string, content: string): Promise<void> {
+    await this.dispatch({ kind: "write_file", path, content });
+  }
+
   async searchFiles(root: string, query: string): Promise<void> {
     await this.dispatch({ kind: "search_files", root, query });
   }
@@ -488,6 +492,10 @@ export class WebSocketWireClient implements WireClient {
     await this.dispatch(
       path === undefined ? { kind: "git_diff", root } : { kind: "git_diff", root, path }
     );
+  }
+
+  async gitFileVersions(root: string, path: string): Promise<void> {
+    await this.dispatch({ kind: "git_file_versions", root, path });
   }
 
   async gitOverview(root: string): Promise<void> {

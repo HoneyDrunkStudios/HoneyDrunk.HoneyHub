@@ -261,6 +261,13 @@ export interface StartRunRequest {
       materializes them to a temp dir and appends their paths to the task so the agent
       can read them. Omitted/empty = none. */
   attachments?: ChatAttachment[];
+  /** The run that dispatched this one, when an agent started it through the
+      `dispatch_agent` capability (ADR-0098 C). Omitted for every operator-started run.
+      Additive on the wire so existing frames stay byte-compatible; paired with
+      `parentSessionId` so a child records who dispatched it. */
+  parentRunId?: string;
+  /** The session of the dispatching parent (ADR-0098 C). Omitted for operator runs. */
+  parentSessionId?: string;
 }
 
 /** Per-model USD pricing (per million tokens), when the bridge knows an authoritative
@@ -338,6 +345,14 @@ export interface FileContents {
   truncated: boolean;
   /** The file's full size in bytes (even when truncated). */
   byteSize: number;
+}
+
+/** The outcome of a host-owned file write (the in-app editor's Save), surfaced as
+    feedback. A failed write is `ok: false` with the io error in `message`. */
+export interface FileWriteResult {
+  path: string;
+  ok: boolean;
+  message?: string;
 }
 
 /** A filename-search match (the in-repo file search). */
@@ -849,6 +864,19 @@ export interface GitDiff {
   truncated: boolean;
 }
 
+/** Both versions of a single file for a side-by-side diff: its content at `HEAD` (the
+    committed baseline) and in the working tree. Powers the Monaco `DiffEditor`, which needs
+    the two full texts rather than a unified patch. `existedInHead` distinguishes a new file
+    (empty original) from an empty one; `existedInWork` distinguishes a deleted file. */
+export interface GitFileVersions {
+  root: string;
+  path: string;
+  original: string;
+  modified: string;
+  existedInHead: boolean;
+  existedInWork: boolean;
+}
+
 /** The status of every repo discovered under a selected folder (or just the one repo when
     the selected root is itself a repo). Powers the multi-repo Git dashboard. */
 export interface GitOverview {
@@ -929,6 +957,7 @@ export type ClientCommand =
   | { kind: "set_workspace_roots"; roots: string[] }
   | { kind: "browse_dir"; path?: string }
   | { kind: "read_file"; path: string }
+  | { kind: "write_file"; path: string; content: string }
   | { kind: "search_files"; root: string; query: string }
   | { kind: "resolve_workspace_file"; path: string }
   | {
@@ -1006,6 +1035,7 @@ export type ClientCommand =
   | { kind: "sentry_summary"; baseUrl?: string; org: string; project: string; token?: string }
   | { kind: "git_status"; root: string }
   | { kind: "git_diff"; root: string; path?: string }
+  | { kind: "git_file_versions"; root: string; path: string }
   | { kind: "git_overview"; root: string }
   | { kind: "git_branches"; root: string }
   | { kind: "git_stage"; root: string; paths: string[] }
@@ -1071,6 +1101,7 @@ export type BridgeEventPayload =
   | { kind: "backend_catalog"; backends: BackendCapability[] }
   | { kind: "dir_listing"; listing: DirListing }
   | { kind: "file_contents"; file: FileContents }
+  | { kind: "file_written"; result: FileWriteResult }
   | { kind: "search_results"; results: SearchResults }
   | { kind: "workspace_folders"; folders: WorkspaceFolders }
   | { kind: "agent_written"; agent: AgentWriteOutcome }
@@ -1095,6 +1126,7 @@ export type BridgeEventPayload =
   | { kind: "sentry_summary"; summary: SentrySummary }
   | { kind: "git_status"; status: GitStatus }
   | { kind: "git_diff"; diff: GitDiff }
+  | { kind: "git_file_versions"; result: GitFileVersions }
   | { kind: "git_overview"; overview: GitOverview }
   | { kind: "git_branches"; branches: GitBranches }
   | { kind: "git_op"; result: GitOpResult }

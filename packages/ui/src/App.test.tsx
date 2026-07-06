@@ -33,6 +33,25 @@ function renderCockpit() {
   fireEvent.click(screen.getByRole("button", { name: "Enter the cockpit" }));
 }
 
+/** The nav lives in the floating hive launcher now: click it to bloom the honeycomb, then the
+    view hexes (role="menuitem") become clickable. */
+function openHive() {
+  fireEvent.click(screen.getByRole("button", { name: /open navigation/i }));
+}
+
+/** Open the hive and click a primary view's hex (role="menuitem"). */
+function navigate(view: string | RegExp) {
+  openHive();
+  fireEvent.click(screen.getByRole("menuitem", { name: view }));
+}
+
+/** Open the hive and click a config surface (Alerts / Updates / Settings). These are small icon
+    buttons in the bloom header (role="button"), not honeycomb hexes. */
+function openConfig(name: string | RegExp) {
+  openHive();
+  fireEvent.click(screen.getByRole("button", { name }));
+}
+
 describe("App", () => {
   it("shows the first-run provider selection before the cockpit", () => {
     render(<App />);
@@ -45,29 +64,51 @@ describe("App", () => {
   it("renders the HoneyHub cockpit shell after onboarding", () => {
     renderCockpit();
 
-    expect(screen.getByRole("heading", { name: "HoneyHub" })).toBeTruthy();
     // The composer heading is one of the rotating prompts (chosen per mount).
     const headings = screen.getAllByRole("heading");
     expect(headings.some((heading) => COMPOSER_PROMPTS.includes(heading.textContent ?? ""))).toBe(
       true
     );
+    // The HoneyHub wordmark now lives in the hive launcher's bloom (the brand moved off the
+    // removed sidebar), so it appears once the honeycomb is opened.
+    openHive();
+    expect(screen.getByRole("heading", { name: "HoneyHub" })).toBeTruthy();
   });
 
-  it("switches to the settings view", () => {
+  it("opens Settings as a modal over the current page from the header gear", () => {
     renderCockpit();
 
-    fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+    openConfig("Settings");
 
+    expect(screen.getByRole("dialog", { name: "Settings" })).toBeTruthy();
     expect(screen.getByRole("heading", { name: "Settings" })).toBeTruthy();
+    // The page behind stays mounted (the composer is still there under the modal) — Settings no
+    // longer blanks the page.
+    const headings = screen.getAllByRole("heading");
+    expect(headings.some((heading) => COMPOSER_PROMPTS.includes(heading.textContent ?? ""))).toBe(
+      true
+    );
+    // Reach a real control: the bridge concerns are their own sections now.
+    fireEvent.click(screen.getByRole("button", { name: "Pairing & Devices" }));
     expect(screen.getByLabelText("Device name")).toBeTruthy();
+  });
+
+  it("shows Alerts as a bell button in the bloom header", () => {
+    renderCockpit();
+
+    openHive();
+    // Alerts is a header icon button, not a honeycomb hex.
+    expect(screen.getByRole("button", { name: /alerts/i })).toBeTruthy();
+    expect(screen.queryByRole("menuitem", { name: /alerts/i })).toBeNull();
   });
 
   it("renders the subscription plans panel in Settings and persists a change", () => {
     renderCockpit();
 
-    fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+    openConfig("Settings");
+    fireEvent.click(screen.getByRole("button", { name: "Plans & Costs" }));
 
-    // The plans editor (wired via `plans` + `onPlansChange`) renders in Settings.
+    // The plans editor (wired via `plans` + `onPlansChange`) renders in the Plans & Costs section.
     const claudePlan = screen.getByLabelText("Claude Code plan") as HTMLSelectElement;
     expect(claudePlan).toBeTruthy();
 
@@ -117,18 +158,29 @@ describe("App", () => {
     ).toBeTruthy();
   });
 
-  it("switches to the browse view", () => {
+  it("switches to the repositories view", () => {
     renderCockpit();
 
-    fireEvent.click(screen.getByRole("button", { name: "Browse" }));
+    navigate("Repositories");
 
-    expect(screen.getByRole("heading", { name: "Your repos" })).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "Repositories" })).toBeTruthy();
+  });
+
+  it("opens the Settings modal and closes it back to the cockpit", () => {
+    renderCockpit();
+
+    openConfig("Settings");
+    expect(screen.getByRole("dialog", { name: "Settings" })).toBeTruthy();
+
+    // The backdrop closes the modal (onClose → back to the Hub).
+    fireEvent.click(screen.getByRole("button", { name: "Close settings" }));
+    expect(screen.queryByRole("dialog", { name: "Settings" })).toBeNull();
   });
 
   it("switches to the spend view", async () => {
     renderCockpit();
 
-    fireEvent.click(screen.getByRole("button", { name: "Spend" }));
+    navigate("Spend");
 
     expect(await screen.findByRole("heading", { name: "Your spend" })).toBeTruthy();
   });
@@ -136,7 +188,7 @@ describe("App", () => {
   it("switches to the coaching view", async () => {
     renderCockpit();
 
-    fireEvent.click(screen.getByRole("button", { name: "Coaching" }));
+    navigate("Coaching");
 
     expect(await screen.findByRole("heading", { name: "Coaching" })).toBeTruthy();
   });
@@ -144,8 +196,21 @@ describe("App", () => {
   it("switches to the agents view", async () => {
     renderCockpit();
 
-    fireEvent.click(screen.getByRole("button", { name: "Agents" }));
+    navigate("Agents");
 
     expect(await screen.findByRole("heading", { name: "Agents" })).toBeTruthy();
+  });
+
+  it("orders the primary nav Hub → Repositories → Work", () => {
+    renderCockpit();
+    openHive();
+
+    // The honeycomb renders one menuitem per visible primary view, in array order (the mobileOnly
+    // Chat hex is dropped on the wide/test viewport).
+    const labels = screen.getAllByRole("menuitem").map((item) => item.textContent?.trim());
+    const hub = labels.indexOf("Hub");
+    expect(hub).toBeGreaterThanOrEqual(0);
+    expect(labels[hub + 1]).toBe("Repositories");
+    expect(labels[hub + 2]).toBe("Work");
   });
 });

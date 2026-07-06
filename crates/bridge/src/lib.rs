@@ -10,6 +10,7 @@ pub mod checks;
 pub mod clock;
 pub mod coaching;
 pub mod core;
+pub mod dispatch;
 pub mod environment;
 pub mod fsbrowse;
 pub mod git;
@@ -52,18 +53,25 @@ pub use checks::{
 };
 pub use coaching::{coach, CoachingSnapshot};
 pub use core::{BridgeRuntime, ManagedRun, ReplyOutcome};
+pub use dispatch::{
+    audit_dispatch, backend_id, child_cap_from_env, dispatch_backends_from_env, is_valid_model_id,
+    max_depth_from_env, parse_backend, summarize_task, DispatchAdmission, DispatchCaller,
+    DispatchDenial, DispatchDenialReason, DispatchGovernor, DEFAULT_CHILD_CAP,
+    DEFAULT_MAX_DISPATCH_DEPTH, DISPATCH_SERVER_NAME, KNOWN_EFFORT_LEVELS,
+};
 pub use environment::{detect_environment, BackendVersion, EnvironmentInfo};
 pub use fsbrowse::{
-    browse_dir, is_workspace_file, read_file, resolve_workspace_file, search_files, DirEntry,
-    DirEntryKind, DirListing, FileContents, SearchHit, SearchResults, WorkspaceFolders,
+    browse_dir, is_workspace_file, read_file, resolve_workspace_file, search_files, write_file,
+    DirEntry, DirEntryKind, DirListing, FileContents, FileWriteResult, SearchHit, SearchResults,
+    WorkspaceFolders,
 };
 pub use git::{
     branches as git_branches, checkout as git_checkout, commit as git_commit,
     delete_branch as git_delete_branch, diff as git_diff, discard as git_discard,
-    discard_all as git_discard_all, discover_repos as git_discover_repos, overview as git_overview,
-    pull as git_pull, push as git_push, stage as git_stage, status as git_status,
-    unstage as git_unstage, GitBranches, GitDiff, GitFileStatus, GitOpResult, GitOverview,
-    GitStatus,
+    discard_all as git_discard_all, discover_repos as git_discover_repos,
+    file_versions as git_file_versions, overview as git_overview, pull as git_pull,
+    push as git_push, stage as git_stage, status as git_status, unstage as git_unstage,
+    GitBranches, GitDiff, GitFileStatus, GitFileVersions, GitOpResult, GitOverview, GitStatus,
 };
 pub use grafana::{summary as grafana_summary, GrafanaDashboard, GrafanaSummary};
 pub use jobs::{

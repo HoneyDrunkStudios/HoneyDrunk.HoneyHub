@@ -24,5 +24,7 @@ a single codebase (ADR-0091 D2).
 The run screen depends only on the `wire/client` `WireClient` seam (the packet-04
 protocol). `wire/mockClient` scripts a realistic Claude Code exchange for tests and
 the offline demo; a real WebSocket client implementing the same seam — presenting the
-pairing token on connect — lands with the bridge transport bringup. It is **not an
-editor and not a terminal** (PDR-0011): a cockpit only.
+pairing token on connect — lands with the bridge transport bringup. Per **PRD-0011
+Amendment 2**, HoneyHub is now an **agent-first IDE**: it gains in-app code viewing and
+editing (the Repositories page, via the ADR-0097 `write_file` boundary), but it is still
+**not a terminal**.

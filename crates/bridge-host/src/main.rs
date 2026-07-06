@@ -17,17 +17,29 @@
 //!   user-global agents from `~/.claude/agents` / `~/.copilot/agents`. Off by default:
 //!   that reads outside the workspace allowlist (the user's own home config), so it is
 //!   only enabled when the operator explicitly asks for it.
+//! - `HONEYHUB_DISPATCH`: set to `0`/`false`/`off` to disable cross-backend subagents
+//!   (ADR-0098). On by default when the bridge is bound to a **loopback** address: the bridge
+//!   hosts a localhost `dispatch_agent` MCP endpoint at `/mcp` and injects it into Claude
+//!   launches. On a non-loopback bind (e.g. `0.0.0.0` for tailnet access) dispatch is off — the
+//!   `/mcp` endpoint is loopback-only (ADR-0098 B).
+//! - `HONEYHUB_DISPATCH_BACKENDS`: comma-separated backend ids a dispatch may target
+//!   (e.g. `codex`). Defaults to the configured backends; can only narrow, never widen.
+//! - `HONEYHUB_DISPATCH_CHILD_CAP`: max children one session may spawn (default 4).
+//! - `HONEYHUB_DISPATCH_MAX_DEPTH`: max depth of the dispatch tree — a run at this depth may
+//!   not dispatch a deeper child (default 3), bounding recursion beyond the per-session cap.
 //!
 //! On start it generates a pairing token, prints the URL (with the token), and —
 //! when serving the PWA — opens it in the default browser.
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use honeyhub_bridge::adapters::{default_event_clock, ClaudeLocalAdapter, CodexLocalAdapter};
 use honeyhub_bridge::{
-    user_home, AgentBackend, BackendAllowlist, BridgeIdentity, BridgeRuntime, LocalStore,
-    PairingRegistry, WorkspaceAllowlist,
+    child_cap_from_env, dispatch_backends_from_env, max_depth_from_env, user_home, AgentBackend,
+    BackendAllowlist, BridgeIdentity, BridgeRuntime, DispatchGovernor, LocalStore, PairingRegistry,
+    WorkspaceAllowlist,
 };
 use honeyhub_bridge_host::{bind, serve, DEFAULT_POLL_INTERVAL};
 
@@ -37,6 +49,19 @@ async fn main() -> std::io::Result<()> {
         .unwrap_or_else(|_| "127.0.0.1:8765".to_string())
         .parse()
         .expect("HONEYHUB_BRIDGE_ADDR must be a valid socket address");
+
+    // Bind first so the dispatch MCP endpoint (ADR-0098) can be built against the
+    // actually-bound address before the Claude adapter is constructed (the adapter
+    // injects that endpoint into launches).
+    let listener = bind(addr).await?;
+    let bound = listener.local_addr()?;
+    // A wildcard bind (0.0.0.0 / ::) is not a loadable host, so loopback is what we
+    // print/open and what the local CLIs reach the MCP endpoint on.
+    let display_addr = if bound.ip().is_unspecified() {
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), bound.port())
+    } else {
+        bound
+    };
 
     let roots: Vec<String> = std::env::var("HONEYHUB_WORKSPACE_ROOTS")
         .unwrap_or_default()
@@ -50,9 +75,46 @@ async fn main() -> std::io::Result<()> {
     let backend_allowlist =
         BackendAllowlist::new(vec![AgentBackend::ClaudeLocal, AgentBackend::CodexLocal]);
 
+    // Cross-backend subagents (ADR-0098): host a localhost dispatch MCP endpoint and
+    // let the Claude adapter inject it into launches so a chat can spawn parented
+    // subagents. The dispatch allowlist defaults to the configured backends and can
+    // only be narrowed (HONEYHUB_DISPATCH_BACKENDS); the per-session child cap comes
+    // from HONEYHUB_DISPATCH_CHILD_CAP (default 4). Set HONEYHUB_DISPATCH=0 to disable
+    // — the endpoint is then absent and launches carry no `dispatch_agent` tool.
+    let dispatch_disabled = matches!(
+        std::env::var("HONEYHUB_DISPATCH").as_deref(),
+        Ok("0") | Ok("false") | Ok("off")
+    );
+    // Loopback-only (`[Firm]`, ADR-0098 B): the `dispatch_agent` MCP endpoint is a local
+    // exec-initiation surface, so it is only stood up on a loopback bind. On a non-loopback
+    // bind (0.0.0.0 / a tailnet address) the whole app is reachable off-box, so dispatch is off
+    // entirely there — no endpoint mounted (see `serve`) and no token injected into launches.
+    let loopback = bound.ip().is_loopback();
+    let dispatch = if dispatch_disabled || !loopback {
+        if !dispatch_disabled && !loopback {
+            eprintln!(
+                "warning: cross-backend dispatch (ADR-0098) is off — the bridge is bound to a \
+                 non-loopback address ({bound}); its /mcp endpoint is loopback-only"
+            );
+        }
+        None
+    } else {
+        Some(Arc::new(
+            DispatchGovernor::new(
+                format!("http://{display_addr}/mcp"),
+                dispatch_backends_from_env(backend_allowlist.backends()),
+                child_cap_from_env(),
+            )
+            .with_max_depth(max_depth_from_env()),
+        ))
+    };
+
     let program = std::env::var("HONEYHUB_CLAUDE_PROGRAM").unwrap_or_else(|_| "claude".to_string());
     let model = std::env::var("HONEYHUB_CLAUDE_MODEL").ok();
-    let claude = ClaudeLocalAdapter::new(program, model, default_event_clock());
+    // Inject the dispatch endpoint into every Claude launch (Claude-only this slice;
+    // Codex/Copilot injection is a follow-up). Graceful when dispatch is None.
+    let claude = ClaudeLocalAdapter::new(program, model, default_event_clock())
+        .with_dispatch(dispatch.clone());
 
     let codex_program =
         std::env::var("HONEYHUB_CODEX_PROGRAM").unwrap_or_else(|_| "codex".to_string());
@@ -92,15 +154,8 @@ async fn main() -> std::io::Result<()> {
     // exists, so the whole cockpit runs from one command on one origin.
     let static_dir = resolve_static_dir();
 
-    let listener = bind(addr).await?;
-    let bound = listener.local_addr()?;
-    // A wildcard bind (0.0.0.0 / ::) is not a loadable browser host, so the URL we
-    // print/open uses loopback; a device on the tailnet uses the host's tailnet IP.
-    let display_addr = if bound.ip().is_unspecified() {
-        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), bound.port())
-    } else {
-        bound
-    };
+    // The listener was bound (and `display_addr` computed) up front so the dispatch
+    // endpoint could be built against it; announce it now.
     announce_endpoint(static_dir.is_some(), display_addr, bound, &token);
     if std::env::var("HONEYHUB_WORKSPACE_ROOTS")
         .unwrap_or_default()
@@ -117,6 +172,7 @@ async fn main() -> std::io::Result<()> {
         registry,
         DEFAULT_POLL_INTERVAL,
         static_dir,
+        dispatch,
     )
     .await
 }

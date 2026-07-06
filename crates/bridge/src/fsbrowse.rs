@@ -235,6 +235,44 @@ pub fn read_file(path: &str) -> Result<FileContents, BridgeError> {
     })
 }
 
+/// The outcome of a host-owned file write (the in-app editor's Save), surfaced to the
+/// UI as feedback. A failed write reports as `ok: false` with the io error in `message`
+/// rather than as a transport error, mirroring [`crate::git::GitOpResult`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FileWriteResult {
+    pub path: String,
+    pub ok: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+}
+
+/// Write `content` to `path` as the file's full new contents (overwrites if it exists,
+/// creates it if new). The caller (the host) gates `path` against the workspace
+/// allowlist before calling, so writes only ever land inside a root the user explicitly
+/// added. Reports the io outcome as a [`FileWriteResult`] — a failed write is `ok: false`
+/// with the io error string in `message`, never a fabricated success.
+pub fn write_file(path: &str, content: &str) -> FileWriteResult {
+    match std::fs::write(Path::new(path), content.as_bytes()) {
+        Ok(()) => {
+            let resolved = Path::new(path)
+                .canonicalize()
+                .map(|p| strip_unc(&p))
+                .unwrap_or_else(|_| path.to_string());
+            FileWriteResult {
+                path: resolved,
+                ok: true,
+                message: None,
+            }
+        }
+        Err(error) => FileWriteResult {
+            path: path.to_string(),
+            ok: false,
+            message: Some(error.to_string()),
+        },
+    }
+}
+
 /// The repo folders a VS Code `.code-workspace` file points at, resolved to absolute
 /// directory paths (the picker can add several repos from one file).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -569,6 +607,37 @@ mod tests {
     fn read_missing_file_errors() {
         let error = read_file("definitely-not-a-real-file-xyz.txt").expect_err("missing");
         assert_eq!(error.code, "file_not_found");
+    }
+
+    #[test]
+    fn write_file_creates_and_overwrites_reporting_the_resolved_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("out.txt");
+
+        // A new file: ok, no message, and the contents land on disk.
+        let created = write_file(file.to_str().unwrap(), "first\n");
+        assert!(created.ok);
+        assert!(created.message.is_none());
+        assert!(created.path.ends_with("out.txt"));
+        assert_eq!(fs::read_to_string(&file).unwrap(), "first\n");
+
+        // An existing file: overwritten with the full new contents (not appended).
+        let overwritten = write_file(file.to_str().unwrap(), "second\n");
+        assert!(overwritten.ok);
+        assert_eq!(fs::read_to_string(&file).unwrap(), "second\n");
+    }
+
+    #[test]
+    fn write_file_reports_io_failure_as_not_ok_with_a_message() {
+        // A path whose parent directory does not exist cannot be written.
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("no-such-dir").join("x.txt");
+
+        let result = write_file(missing.to_str().unwrap(), "data");
+        assert!(!result.ok);
+        assert!(result.message.is_some());
+        // The unresolved input path is echoed back (canonicalize is skipped on failure).
+        assert_eq!(result.path, missing.to_str().unwrap());
     }
 
     #[test]

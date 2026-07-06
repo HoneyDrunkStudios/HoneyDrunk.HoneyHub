@@ -1,15 +1,12 @@
 import {
   useCallback,
   useEffect,
-  useRef,
   useState,
   type CSSProperties,
   type ReactElement
 } from "react";
 import type { AgentBackend, BackendCapability } from "@honeydrunk/honeyhub-types";
-import { BridgeSettings } from "./BridgeSettings";
 import { NotificationList } from "./NotificationList";
-import { NotificationsSettings } from "./NotificationsSettings";
 import {
   loadNotificationFeed,
   loadNotificationPrefs,
@@ -21,14 +18,12 @@ import {
   type NotificationPrefs
 } from "./notifications";
 import { useNotifications } from "./useNotifications";
-import { ThemeSettings } from "./ThemeSettings";
 import { applyTheme, loadTheme, saveTheme, type ThemeId } from "./theme";
 import { RunScreen } from "./routes/run/RunScreen";
 import { SpendView } from "./routes/spend/SpendView";
 import { CoachingView } from "./routes/coaching/CoachingView";
 import { AgentsView } from "./routes/agents/AgentsView";
-import { BrowseView } from "./routes/browse/BrowseView";
-import { RunsView } from "./routes/runs/RunsView";
+import { RepositoriesView } from "./routes/repositories/RepositoriesView";
 import {
   applyRunEvent,
   orderRuns,
@@ -36,21 +31,27 @@ import {
   type RunsState
 } from "./routes/runs/runsModel";
 import { GroupsView } from "./routes/groups/GroupsView";
-import { GoalsView } from "./routes/goals/GoalsView";
-import { GoalOrchestrator } from "./routes/goals/goalOrchestrator";
-import { orderGoals, type GoalsState } from "./routes/goals/goalsModel";
 import { enabledIds, loadConnectorPrefs } from "./connectors";
+import {
+  isPageVisible,
+  loadPagePrefs,
+  savePagePrefs,
+  TOGGLEABLE_PAGES,
+  type PagePrefs
+} from "./pagePrefs";
+import { SettingsModal } from "./routes/settings/SettingsModal";
 import {
   KV_SUBSCRIPTIONS_CHANGED_EVENT,
   loadSelectedSubscriptions
 } from "./routes/observe/keyVaultModel";
 import { ChatSidebar, SIDEBAR_SESSION_ID } from "./routes/chat/ChatSidebar";
+import { HiveNav } from "./routes/nav/HiveNav";
+import { MatrixRain } from "./components/MatrixRain";
 import { HubView } from "./routes/hub/HubView";
 import { PlanView } from "./routes/plan/PlanView";
 import { WorkView } from "./routes/work/WorkView";
 import { ObserveView } from "./routes/observe/ObserveView";
 import { JobsView } from "./routes/jobs/JobsView";
-import { GitView } from "./routes/git/GitView";
 import { UpdatesView } from "./routes/updates/UpdatesView";
 import { Onboarding } from "./routes/onboarding/Onboarding";
 import {
@@ -66,7 +67,7 @@ import { bridgeWsUrl, WebSocketWireClient } from "./wire/webSocketClient";
 import type { WireClient } from "./wire/client";
 import "./styles.css";
 
-type View =
+export type View =
   | "hub"
   | "run"
   | "runs"
@@ -76,8 +77,7 @@ type View =
   | "work"
   | "jobs"
   | "observe"
-  | "git"
-  | "browse"
+  | "repositories"
   | "spend"
   | "coaching"
   | "agents"
@@ -99,25 +99,26 @@ interface NavItem {
 const PRIMARY_NAV: NavItem[] = [
   { view: "hub", label: "Hub", icon: <IconHome /> },
   // On desktop the right-hand dock IS the chat; the Chat page exists for phones,
-  // where the dock does not fit. The nav item is CSS-hidden on wide screens.
+  // where the dock does not fit. The nav item is CSS-hidden on wide screens, so on desktop
+  // Repositories is the first surface after the Hub.
   { view: "run", label: "Chat", icon: <IconChat />, mobileOnly: true },
-  { view: "runs", label: "Runs", icon: <IconRuns /> },
-  { view: "groups", label: "Groups", icon: <IconGroups /> },
-  { view: "goals", label: "Goals", icon: <IconTarget /> },
-  { view: "plan", label: "Plan", icon: <IconMap /> },
+  // Repositories (the IDE surface) and Work lead the agent-first nav, right after the Hub.
+  { view: "repositories", label: "Repositories", icon: <IconFiles /> },
   { view: "work", label: "Work", icon: <IconInbox /> },
+  { view: "groups", label: "Groups", icon: <IconGroups /> },
+  { view: "plan", label: "Plan", icon: <IconMap /> },
   { view: "jobs", label: "Jobs", icon: <IconPulse /> },
   { view: "observe", label: "Observe", icon: <IconGauge /> },
-  { view: "browse", label: "Browse", icon: <IconFiles /> },
-  { view: "git", label: "Git", icon: <IconBranch /> },
   { view: "spend", label: "Spend", icon: <IconCoins /> },
   { view: "coaching", label: "Coaching", icon: <IconSpark /> },
   { view: "agents", label: "Agents", icon: <IconGrid /> }
 ];
+// The config/trust surfaces. They render as small icon buttons in the bloom header (bell /
+// download / gear), opposite the wordmark — not honeycomb hexes. Order = left-to-right there.
 const SECONDARY_NAV: NavItem[] = [
-  { view: "settings", label: "Settings", icon: <IconGear /> },
+  { view: "notifications", label: "Alerts", icon: <IconBell /> },
   { view: "updates", label: "Updates", icon: <IconDownload /> },
-  { view: "notifications", label: "Alerts", icon: <IconBell /> }
+  { view: "settings", label: "Settings", icon: <IconGear /> }
 ];
 
 export interface AppProps {
@@ -177,6 +178,9 @@ export function App({ client }: AppProps = {}) {
   // The enabled connectors (work + observability), re-read when the view changes so editing
   // them in Settings → Connectors re-points the notification poll.
   const [connectorPrefs, setConnectorPrefs] = useState(loadConnectorPrefs);
+  // Which nav pages the operator keeps in the sidebar. Toggled in Settings → Pages; Runs and
+  // Goals default OFF (agent-first IDE reframe). Persisted like the other prefs.
+  const [pagePrefs, setPagePrefs] = useState<PagePrefs>(loadPagePrefs);
   // The Key Vault subscription selection (owned by the Observe panel, persisted locally). Held in
   // state and re-read on view change so the expiry-scan engine reliably consumes the current
   // selection rather than a value captured at one render.
@@ -187,35 +191,21 @@ export function App({ client }: AppProps = {}) {
   // stream — the active-runs dashboard. Runs are registered at launch (for task +
   // backend) and updated as their events arrive.
   const [runs, setRuns] = useState<RunsState>({});
-  // Active goals (bounded orchestration loops). Driven by the orchestrator below, which
-  // launches their runs over the same transport and feeds them onto the runs board.
-  const [goals, setGoals] = useState<GoalsState>({});
-  const orchestratorRef = useRef<GoalOrchestrator | undefined>(undefined);
+  // Settings is a true modal over the current page (decoupled from `view`, so the page behind
+  // stays mounted + visible). The honeycomb header gear opens it; Escape / backdrop / ✕ close it.
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  // A repo target lifted from the Hub's "Changes in progress" list: set when a row is clicked,
+  // handed to RepositoriesView as a one-shot `selectedRepo`, and cleared once that view honors it
+  // (so a later manual repo pick inside Repositories is not overridden on every render).
+  const [repoTarget, setRepoTarget] = useState<string | undefined>(undefined);
 
-  // Aggregate all run events into the runs dashboard, whatever transport is active.
+  // Aggregate all run events into the runs dashboard, whatever transport is active. The Groups
+  // view consumes this summary; there is no standalone Runs page anymore.
   useEffect(() => {
     const unsubscribe = wireClient.subscribe((event) => {
       setRuns((prev) => applyRunEvent(prev, event));
     });
     return unsubscribe;
-  }, [wireClient]);
-
-  // The goal orchestrator follows the active transport: re-created when the client swaps
-  // (mock → real), disposed on cleanup so it never leaks a subscription. Each goal's runs
-  // are registered onto the dashboard exactly like chat runs.
-  useEffect(() => {
-    const orchestrator = new GoalOrchestrator(wireClient, {
-      onChange: (next) => setGoals(next),
-      onRunStarted: (init) => setRuns((prev) => registerRun(prev, init)),
-      now: () => new Date().toISOString(),
-      newId: () => crypto.randomUUID()
-    });
-    orchestratorRef.current = orchestrator;
-    setGoals(orchestrator.list());
-    return () => {
-      orchestrator.dispose();
-      orchestratorRef.current = undefined;
-    };
   }, [wireClient]);
 
   // Ask the bridge which backends are installed (and their models) whenever the
@@ -273,6 +263,21 @@ export function App({ client }: AppProps = {}) {
     applyTheme(theme);
     saveTheme(theme);
   }, [theme]);
+
+  // Persist page-visibility prefs whenever they change, so a trimmed sidebar survives a relaunch.
+  useEffect(() => {
+    savePagePrefs(pagePrefs);
+  }, [pagePrefs]);
+
+  // If the currently-active page gets hidden (toggled off in Settings), fall back to the Hub so
+  // the operator is never stranded on a page whose nav button just vanished. Core pages
+  // (settings/updates/notifications, always-on) are exempt.
+  useEffect(() => {
+    const toggleable = TOGGLEABLE_PAGES.some((page) => page.view === view);
+    if (toggleable && !isPageVisible(pagePrefs, view)) {
+      setView("hub");
+    }
+  }, [view, pagePrefs]);
 
   // Opening the Alerts view marks everything read (so the unread badge clears when you look).
   // Idempotent — only rewrites when there's actually an unread item, so it can't loop.
@@ -376,41 +381,34 @@ export function App({ client }: AppProps = {}) {
     }
   };
 
+  // Route honeycomb + header selections. Settings opens the modal OVER the current page (the
+  // view stays put, so the page behind stays visible); every other surface is a full page.
+  const handleNav = (next: View): void => {
+    if (next === "settings") {
+      setSettingsOpen(true);
+      return;
+    }
+    setView(next);
+  };
+
   const unread = unreadCount(notifications);
-  const renderNav = (items: NavItem[]) =>
-    items.map((item) => (
-      <button
-        key={item.view}
-        type="button"
-        className={item.mobileOnly === true ? "nav-item nav-item-mobile" : "nav-item"}
-        aria-pressed={view === item.view}
-        onClick={() => setView(item.view)}
-      >
-        <span className="nav-icon" aria-hidden="true">
-          {item.icon}
-        </span>
-        <span className="nav-label">{item.label}</span>
-        {item.view === "notifications" && unread > 0 && (
-          <span className="nav-badge" aria-label={`${unread} unread`}>
-            {unread}
-          </span>
-        )}
-      </button>
-    ));
 
   // First launch (or after a reset): the provider-selection screen replaces the
   // cockpit until the user confirms which backends they have.
   if (!onboarded) {
     return (
-      <Onboarding
-        client={wireClient}
-        catalog={catalog}
-        detecting={detecting}
-        initialEnabled={settings.backends}
-        initialRoots={settings.workspaceRoots}
-        initialPlans={plans}
-        onComplete={completeOnboarding}
-      />
+      <>
+        <MatrixRain />
+        <Onboarding
+          client={wireClient}
+          catalog={catalog}
+          detecting={detecting}
+          initialEnabled={settings.backends}
+          initialRoots={settings.workspaceRoots}
+          initialPlans={plans}
+          onComplete={completeOnboarding}
+        />
+      </>
     );
   }
 
@@ -427,61 +425,28 @@ export function App({ client }: AppProps = {}) {
       className={shellClass}
       style={{ "--chat-dock-w": `${chatWidth}px` } as CSSProperties}
     >
-      <aside className="sidebar" aria-label="HoneyHub navigation">
-        <div className="sidebar-brand">
-          <span className="brand-mark" aria-hidden="true">
-            <img className="brand-logo" src={`${import.meta.env.BASE_URL}icons/icon-512.svg`} alt="" />
-          </span>
-          <span className="brand-text">
-            <h1 className="brand-name">HoneyHub</h1>
-          </span>
-        </div>
-
-        <nav className="sidebar-nav" aria-label="Primary views">
-          {renderNav(PRIMARY_NAV)}
-        </nav>
-
-        <div className="sidebar-spacer" />
-
-        <nav className="sidebar-nav secondary" aria-label="Configuration">
-          {renderNav(SECONDARY_NAV)}
-        </nav>
-
-        <div className="sidebar-footer">
-          <div className={`conn-state ${connected ? "is-connected" : "is-mock"}`}>
-            <span className="conn-dot" aria-hidden="true" />
-            <span>{connected ? "Connected" : "Demo (mock)"}</span>
-          </div>
-          {!connected && (
-            <div className="bridge-connect">
-              <input
-                aria-label="Bridge URL"
-                value={bridgeUrl}
-                onChange={(event) => setBridgeUrl(event.target.value)}
-                placeholder="ws://127.0.0.1:8765/ws?token=…"
-              />
-              <button type="button" onClick={onConnect}>
-                Connect
-              </button>
-              {connectError !== undefined && (
-                <span role="alert" className="settings-error">
-                  {connectError}
-                </span>
-              )}
-            </div>
-          )}
-        </div>
-      </aside>
-
+      <MatrixRain />
       <main className="content">
-        <div className="content-inner">
+        {/* Repositories is HoneyHub's IDE surface, so it drops the shared 1080px reading column
+            and fills the content area (window minus the left nav + chat dock). Every other view
+            keeps the capped, centred column. */}
+        <div className={view === "repositories" ? "content-inner content-inner--wide" : "content-inner"}>
           {/* Both panels stay mounted; visibility is toggled so in-progress state
               survives a tab switch. */}
           <div hidden={view !== "hub"}>
             <HubView
               client={wireClient}
               active={view === "hub"}
-              onNavigate={(next) => setView(next)}
+              workspaceRoots={settings.workspaceRoots}
+              {...(settings.defaultWorkspaceRoot === undefined
+                ? {}
+                : { defaultWorkspaceRoot: settings.defaultWorkspaceRoot })}
+              onNavigate={(next, repo) => {
+                if (repo !== undefined) {
+                  setRepoTarget(repo);
+                }
+                setView(next);
+              }}
             />
           </div>
 
@@ -516,27 +481,12 @@ export function App({ client }: AppProps = {}) {
             />
           </div>
 
-          <div hidden={view !== "runs"}>
-            <RunsView runs={orderRuns(runs)} />
-          </div>
-
           <div hidden={view !== "groups"}>
             <GroupsView
               client={wireClient}
               active={view === "groups"}
               workspaceRoots={settings.workspaceRoots}
               runs={orderRuns(runs)}
-            />
-          </div>
-
-          <div hidden={view !== "goals"}>
-            <GoalsView
-              goals={orderGoals(goals)}
-              backends={settings.backends.length > 0 ? settings.backends : ["claude.local"]}
-              onCreate={(input) => orchestratorRef.current?.start(input)}
-              onPause={(goalId) => orchestratorRef.current?.pause(goalId)}
-              onResume={(goalId) => orchestratorRef.current?.resume(goalId)}
-              onStop={(goalId) => orchestratorRef.current?.stop(goalId)}
             />
           </div>
 
@@ -556,25 +506,16 @@ export function App({ client }: AppProps = {}) {
             <JobsView client={wireClient} active={view === "jobs"} />
           </div>
 
-          <div hidden={view !== "browse"}>
-            <BrowseView
+          <div hidden={view !== "repositories"}>
+            <RepositoriesView
               client={wireClient}
-              workspaceRoots={settings.workspaceRoots}
-              active={view === "browse"}
-              {...(settings.defaultWorkspaceRoot === undefined
-                ? {}
-                : { defaultWorkspaceRoot: settings.defaultWorkspaceRoot })}
-            />
-          </div>
-
-          <div hidden={view !== "git"}>
-            <GitView
-              client={wireClient}
-              active={view === "git"}
+              active={view === "repositories"}
               workspaceRoots={settings.workspaceRoots}
               {...(settings.defaultWorkspaceRoot === undefined
                 ? {}
                 : { defaultWorkspaceRoot: settings.defaultWorkspaceRoot })}
+              {...(repoTarget === undefined ? {} : { selectedRepo: repoTarget })}
+              onSelectedRepoConsumed={() => setRepoTarget(undefined)}
             />
           </div>
 
@@ -594,20 +535,6 @@ export function App({ client }: AppProps = {}) {
             />
           </div>
 
-          <div hidden={view !== "settings"}>
-            <BridgeSettings
-              state={settings}
-              onChange={setSettings}
-              catalog={catalog}
-              client={wireClient}
-              active={view === "settings"}
-              plans={plans}
-              onPlansChange={setPlans}
-            />
-            <NotificationsSettings prefs={notificationPrefs} onChange={setNotificationPrefs} />
-            <ThemeSettings theme={theme} onChange={setTheme} />
-          </div>
-
           <div hidden={view !== "updates"}>
             <UpdatesView client={wireClient} active={view === "updates"} catalog={catalog} />
           </div>
@@ -624,6 +551,23 @@ export function App({ client }: AppProps = {}) {
           </div>
         </div>
       </main>
+
+      {/* The signature floating hive launcher: a collapsed hex that blooms into a honeycomb
+          of view-tiles (one hex per visible nav view). Replaces the old left activity-bar;
+          `position: fixed`, so its place in the tree is flexible. */}
+      <HiveNav
+        items={PRIMARY_NAV}
+        configItems={SECONDARY_NAV}
+        view={view}
+        onSelect={handleNav}
+        unread={unread}
+        pagePrefs={pagePrefs}
+        connected={connected}
+        bridgeUrl={bridgeUrl}
+        onBridgeUrl={setBridgeUrl}
+        onConnect={onConnect}
+        connectError={connectError}
+      />
 
       {/* Right-hand chat dock: THE chat surface (history, model picker, attachments)
           on every page. Always mounted, so the conversation survives a collapse or a
@@ -662,6 +606,27 @@ export function App({ client }: AppProps = {}) {
           onRunStarted: (init) => setRuns((prev) => registerRun(prev, init))
         }}
       />
+
+      {/* Settings is a true modal OVER the current page (a dim full-screen backdrop + a centered
+          card). Decoupled from `view`, so the page behind stays mounted + visible; closing returns
+          to exactly that page. Mounted only while open. */}
+      {settingsOpen && (
+        <SettingsModal
+          settings={settings}
+          onSettingsChange={setSettings}
+          catalog={catalog}
+          client={wireClient}
+          plans={plans}
+          onPlansChange={setPlans}
+          theme={theme}
+          onThemeChange={setTheme}
+          notificationPrefs={notificationPrefs}
+          onNotificationPrefsChange={setNotificationPrefs}
+          pagePrefs={pagePrefs}
+          onPagePrefsChange={setPagePrefs}
+          onClose={() => setSettingsOpen(false)}
+        />
+      )}
     </div>
   );
 }
@@ -676,17 +641,6 @@ function IconChat() {
   );
 }
 
-function IconRuns() {
-  return (
-    <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2">
-      <path d="M4 6h16M4 12h16M4 18h16" strokeLinecap="round" />
-      <circle cx="7" cy="6" r="1.4" fill="currentColor" stroke="none" />
-      <circle cx="11" cy="12" r="1.4" fill="currentColor" stroke="none" />
-      <circle cx="8" cy="18" r="1.4" fill="currentColor" stroke="none" />
-    </svg>
-  );
-}
-
 function IconGroups() {
   return (
     <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2">
@@ -694,16 +648,6 @@ function IconGroups() {
       <rect x="13" y="4" width="8" height="6" rx="1.5" />
       <rect x="8" y="14" width="8" height="6" rx="1.5" />
       <path d="M7 10v2h10v-2M12 12v2" strokeLinecap="round" strokeLinejoin="round" />
-    </svg>
-  );
-}
-
-function IconTarget() {
-  return (
-    <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2">
-      <circle cx="12" cy="12" r="9" />
-      <circle cx="12" cy="12" r="5" />
-      <circle cx="12" cy="12" r="1.4" fill="currentColor" stroke="none" />
     </svg>
   );
 }
@@ -732,17 +676,6 @@ function IconHome() {
     <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2">
       <path d="M4 11l8-6 8 6" strokeLinecap="round" strokeLinejoin="round" />
       <path d="M6 10v9h12v-9" strokeLinecap="round" strokeLinejoin="round" />
-    </svg>
-  );
-}
-
-function IconBranch() {
-  return (
-    <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2">
-      <circle cx="6" cy="6" r="2.5" />
-      <circle cx="6" cy="18" r="2.5" />
-      <circle cx="18" cy="8" r="2.5" />
-      <path d="M6 8.5v7M18 10.5c0 4-6 2.5-6 5.5" strokeLinecap="round" />
     </svg>
   );
 }

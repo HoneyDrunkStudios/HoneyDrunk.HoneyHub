@@ -94,6 +94,14 @@ pub struct DispatchRun {
     pub completed_at: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub failure_reason: Option<String>,
+    /// The run that dispatched this one, when an agent started it through the
+    /// `dispatch_agent` capability (ADR-0098 C). `None` for operator-started runs.
+    /// Additive + skip-if-none so existing persisted records stay byte-compatible.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_run_id: Option<String>,
+    /// The session of the dispatching parent (ADR-0098 C). `None` for operator runs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_session_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -346,7 +354,23 @@ impl DispatchRun {
             started_at: None,
             completed_at: None,
             failure_reason: None,
+            parent_run_id: None,
+            parent_session_id: None,
         }
+    }
+
+    /// Record the dispatching parent on a child run (ADR-0098 C). Chainable so the
+    /// runtime can stamp parent linkage right after `DispatchRun::new` when a start
+    /// request carries it. A `None`/`None` pair leaves the run parentless (an
+    /// operator-started run), so calling this unconditionally is safe.
+    pub fn with_parent(
+        mut self,
+        parent_run_id: Option<String>,
+        parent_session_id: Option<String>,
+    ) -> Self {
+        self.parent_run_id = parent_run_id;
+        self.parent_session_id = parent_session_id;
+        self
     }
 }
 

@@ -3,7 +3,7 @@
 //! Deterministic rules over a session's run/usage state that emit advisory
 //! [`PolicyHint`]s — the structured, wire-borne, persistable counterpart to the
 //! UI's inline per-session diagnostics. There is **no learned model** here: every
-//! hint is a pure function of the snapshot (PDR-0011 Amendment §2 keeps the learned
+//! hint is a pure function of the snapshot (PRD-0011 Amendment §2 keeps the learned
 //! per-user coach a separately gated v2 decision).
 //!
 //! Per ADR-0092 D2/D4 the local-v1 posture is **advisory only** — coaching never

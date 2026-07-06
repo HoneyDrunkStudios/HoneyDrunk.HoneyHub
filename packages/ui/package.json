@@ -12,9 +12,12 @@
   },
   "dependencies": {
     "@honeydrunk/honeyhub-types": "0.21.0",
+    "@monaco-editor/react": "4.7.0",
     "@vitejs/plugin-react": "6.0.2",
     "highlight.js": "11.11.1",
     "markdown-it": "14.2.0",
+    "monaco-editor": "0.55.1",
+    "monaco-yaml": "5.5.1",
     "qrcode-generator": "1.4.4",
     "react": "19.1.0",
     "react-dom": "19.1.0",

@@ -1,4 +1,4 @@
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import { MockWireClient } from "../../wire/mockClient";
 import { ChatSidebar, type ChatSidebarProps } from "./ChatSidebar";
@@ -57,6 +57,26 @@ describe("ChatSidebar", () => {
     expect(onToggle).toHaveBeenCalledTimes(1);
   });
 
+  it("starts a fresh thread from the dock header's New chat control", async () => {
+    renderSidebar();
+    // Launch a run so the embedded RunScreen is in its live transcript view.
+    fireEvent.change(screen.getByLabelText("Task"), { target: { value: "Wire the dock" } });
+    fireEvent.click(screen.getByRole("button", { name: "Start session" }));
+    await waitFor(() =>
+      expect(screen.getByLabelText("Run state").textContent).toBe("needs_input")
+    );
+    expect(screen.getByLabelText("Transcript")).toBeTruthy();
+
+    // The dock header's own "New chat" control (distinct from the active-run button inside
+    // the body) bumps the new-chat signal, which resets the embedded RunScreen.
+    const header = document.querySelector(".chat-sidebar-head") as HTMLElement;
+    fireEvent.click(within(header).getByRole("button", { name: "New chat" }));
+
+    // Back at the empty composer: the "Do anything" placeholder shows, transcript is gone.
+    expect(screen.getByPlaceholderText("Do anything")).toBeTruthy();
+    expect(screen.queryByLabelText("Transcript")).toBeNull();
+  });
+
   it("resizes with the arrow keys on the focused divider (clamped)", () => {
     const onResize = vi.fn();
     renderSidebar({ width: 400, onResize });
@@ -66,5 +86,33 @@ describe("ChatSidebar", () => {
     expect(onResize).toHaveBeenCalledWith(416);
     fireEvent.keyDown(divider, { key: "ArrowRight" });
     expect(onResize).toHaveBeenCalledWith(384);
+  });
+
+  it("toggles the session-history dropdown from the header sessions button", () => {
+    renderSidebar();
+    // The header no longer shows an inline "Threads" list — the button owns them now.
+    expect(screen.queryByRole("dialog", { name: "Sessions" })).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "Session history" }));
+    expect(screen.getByRole("dialog", { name: "Sessions" })).toBeTruthy();
+    // One unified list of sessions — no Local/Web source tabs.
+    expect(screen.queryByRole("tab")).toBeNull();
+
+    // Clicking the button again dismisses it.
+    fireEvent.click(screen.getByRole("button", { name: "Session history" }));
+    expect(screen.queryByRole("dialog", { name: "Sessions" })).toBeNull();
+  });
+
+  it("reopens a synced session from the merged session list and closes the panel", async () => {
+    renderSidebar();
+    fireEvent.click(screen.getByRole("button", { name: "Session history" }));
+
+    // The mock's one durable session shows directly in the single merged list (no Web
+    // tab); clicking it reopens the transcript read-only and dismisses the dropdown.
+    const list = await screen.findByRole("list", { name: "Sessions" });
+    fireEvent.click(await within(list).findByText("Wire the deploy triggers"));
+
+    expect(await screen.findByText("Done. Staged the workflow and opened a PR.")).toBeTruthy();
+    expect(screen.queryByRole("dialog", { name: "Sessions" })).toBeNull();
   });
 });

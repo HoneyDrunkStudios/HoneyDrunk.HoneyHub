@@ -234,6 +234,13 @@ export function GroupsView({
         </div>
       </header>
 
+      <p className="groups-intro">
+        A group is one change spread across several repos or worktrees, gathered by the branch
+        they share, so you can review a cross-repo change as a unit. Run checks are named
+        build or test commands the host runs per repo (never a shell), so you can confirm the
+        whole group is green before you open PRs.
+      </p>
+
       {error !== undefined && (
         <p role="alert" className="groups-error">
           {error}

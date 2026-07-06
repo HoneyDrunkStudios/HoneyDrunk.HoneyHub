@@ -145,6 +145,7 @@ async fn spawn_host(static_dir: Option<PathBuf>) -> (String, String) {
             registry,
             DEFAULT_POLL_INTERVAL,
             static_dir,
+            None,
         )
         .await;
     });
@@ -174,6 +175,8 @@ async fn streams_events_to_an_authenticated_client() {
                 transcript: Vec::new(),
                 launch_command: None,
                 attachments: Vec::new(),
+                parent_run_id: None,
+                parent_session_id: None,
             }),
         },
         "2026-06-07T12:00:00.000Z",

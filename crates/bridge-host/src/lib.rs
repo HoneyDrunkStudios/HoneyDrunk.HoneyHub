@@ -26,11 +26,17 @@ use axum::routing::get;
 use axum::Router;
 use futures_util::{SinkExt, StreamExt};
 use honeyhub_bridge::clock::now_rfc3339;
-use honeyhub_bridge::{BridgeError, BridgeEvent, ClientCommand, PairingRegistry, WireFrame};
+use honeyhub_bridge::{
+    BridgeError, BridgeEvent, ClientCommand, DispatchGovernor, PairingRegistry, WireFrame,
+};
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use tokio::net::TcpListener;
 use tokio::sync::{broadcast, mpsc, Mutex};
 use tower_http::services::ServeDir;
+
+/// The bridge-hosted MCP server exposing `dispatch_agent` (ADR-0098). Mounted at
+/// `/mcp` on the same router as the WS wire when dispatch is enabled.
+mod mcp;
 
 /// Debounce window for coalescing a burst of filesystem events into one notification.
 const FS_DEBOUNCE: Duration = Duration::from_millis(400);
@@ -57,6 +63,10 @@ struct Host {
     /// currently watching. Re-pointed whenever the workspace allowlist changes. `None` until
     /// the watcher is installed in `serve`, or if the platform watcher could not start.
     watcher: Mutex<Option<(RecommendedWatcher, Vec<String>)>>,
+    /// The cross-backend dispatch governor (ADR-0098), when dispatch is enabled. Held so the
+    /// poll loop can **revoke** a run's per-run capability token the moment the run reaches a
+    /// terminal state, so a token cannot outlive the parent run it was minted for.
+    dispatch: Option<Arc<DispatchGovernor>>,
 }
 
 struct AppState {
@@ -88,7 +98,11 @@ pub async fn serve(
     registry: PairingRegistry,
     poll_interval: Duration,
     static_dir: Option<PathBuf>,
+    dispatch: Option<Arc<DispatchGovernor>>,
 ) -> std::io::Result<()> {
+    // The address we actually bound. Whether it is loopback decides if the dispatch MCP
+    // endpoint may be served at all (ADR-0098 B — localhost only).
+    let bound = listener.local_addr()?;
     let (events_tx, _events_rx) = broadcast::channel::<BridgeEvent>(1024);
     let host = Arc::new(Host {
         runtime: Mutex::new(runtime),
@@ -97,6 +111,7 @@ pub async fn serve(
         active_probes: Mutex::new(std::collections::HashSet::new()),
         events: events_tx,
         watcher: Mutex::new(None),
+        dispatch: dispatch.clone(),
     });
 
     {
@@ -114,11 +129,32 @@ pub async fn serve(
     // (debounced) instead of polling.
     install_fs_watcher(&host).await;
 
+    let mut app = Router::new().route("/ws", get(ws_handler));
+    // Mount the cross-backend dispatch MCP endpoint (ADR-0098) alongside the WS wire
+    // on the same origin, when the host enabled it. `nest_service` at `/mcp` takes
+    // precedence over the static fallback below. When dispatch is disabled the
+    // endpoint is simply absent — launched CLIs then carry no `dispatch_agent` tool.
+    //
+    // Loopback-only (`[Firm]`, ADR-0098 B): the endpoint is served ONLY when the bridge is
+    // bound to a loopback address. On a non-loopback bind (0.0.0.0 / a LAN or tailnet address)
+    // the whole app is reachable off-box, so `/mcp` — a local exec-initiation surface — must
+    // NOT be exposed there; it is suppressed rather than served to non-loopback origins. The
+    // local child CLIs always reach the bridge over loopback, so a loopback bind keeps dispatch
+    // fully working; only the off-box (tailnet) transport gives it up, which is the safe default.
+    if let Some(governor) = dispatch {
+        if bound.ip().is_loopback() {
+            app = app.nest_service("/mcp", mcp::dispatch_service(Arc::clone(&host), governor));
+        } else {
+            eprintln!(
+                "bridge-host: dispatch MCP endpoint suppressed — bound to non-loopback {bound}; \
+                 /mcp is loopback-only (ADR-0098 B)"
+            );
+        }
+    }
     let state = AppState {
         host,
         registry: Arc::new(registry),
     };
-    let mut app = Router::new().route("/ws", get(ws_handler));
     if let Some(dir) = static_dir {
         app = app.fallback_service(ServeDir::new(dir).append_index_html_on_directories(true));
     }
@@ -272,6 +308,12 @@ async fn poll_active_runs(host: &Arc<Host>) {
         let mut active = host.active_runs.lock().await;
         for run_id in finished {
             active.remove(&run_id);
+            // Revoke the run's per-run dispatch capability token as it reaches a terminal state
+            // (ADR-0098 B): a token must not outlive the parent run it was minted for, so a
+            // dispatch attempted after the parent ended cannot authenticate.
+            if let Some(governor) = &host.dispatch {
+                governor.revoke_run(&run_id);
+            }
         }
     }
 }
@@ -413,6 +455,9 @@ async fn handle_command(
                 require(runtime.workspace_allows(&path), "file")
                     .and_then(|()| honeyhub_bridge::read_file(&path))
                     .map(|file| one(BridgeEvent::file_contents(new_id(), now_rfc3339(), file)))
+            }
+            ClientCommand::WriteFile { path, content } => {
+                write_file_command(&runtime, &path, &content)
             }
             ClientCommand::ResolveWorkspaceFile { path } => {
                 // Unscoped like browse: the user selects a .code-workspace to *add* its
@@ -661,6 +706,17 @@ async fn handle_command(
                 require(runtime.workspace_allows(&root), "git root")
                     .and_then(|()| honeyhub_bridge::git_diff(&root, path.as_deref()))
                     .map(|diff| one(BridgeEvent::git_diff(new_id(), now_rfc3339(), diff)))
+            }
+            ClientCommand::GitFileVersions { root, path } => {
+                require(runtime.workspace_allows(&root), "git root")
+                    .and_then(|()| honeyhub_bridge::git_file_versions(&root, &path))
+                    .map(|result| {
+                        one(BridgeEvent::git_file_versions(
+                            new_id(),
+                            now_rfc3339(),
+                            result,
+                        ))
+                    })
             }
             ClientCommand::GitOverview { root } => {
                 // Discover repos under the folder + status each (multi-repo dashboard). The
@@ -1037,6 +1093,79 @@ fn one(event: BridgeEvent) -> Option<Vec<BridgeEvent>> {
     Some(vec![event])
 }
 
+/// Handle a `WriteFile` command: gate the target to an allowlisted root, perform the write,
+/// and answer with a `file_written` result plus (on success) fresh `file_contents` so the
+/// viewer reflects the save. Extracted from `handle_command` so its nested gate/echo logic
+/// doesn't drive that dispatcher's cognitive complexity.
+///
+/// `workspace_allows` canonicalizes, and canonicalize requires the path to exist — so for a
+/// NEW file we gate the parent directory instead (which must exist and be allowlisted). The
+/// allowlist gate is a canonicalized starts_with check, so this also blocks `..` escapes out
+/// of an allowlisted root.
+fn write_file_command(
+    runtime: &honeyhub_bridge::BridgeRuntime,
+    path: &str,
+    content: &str,
+) -> Result<Option<Vec<BridgeEvent>>, BridgeError> {
+    let target = std::path::Path::new(path);
+    let gate = if target.exists() {
+        require(runtime.workspace_allows(path), "file")
+    } else {
+        match target.parent() {
+            Some(parent) if parent.exists() => {
+                require(runtime.workspace_allows(&parent.to_string_lossy()), "file")
+                    .and_then(|()| refuse_symlink_target(target))
+            }
+            _ => Err(BridgeError::new(
+                "workspace_not_allowed",
+                "file is outside an allowlisted workspace root",
+            )),
+        }
+    };
+    gate.map(|()| {
+        let result = honeyhub_bridge::write_file(path, content);
+        // Audit the write: path and byte count only, never the content.
+        eprintln!(
+            "bridge-host: write_file {path} ({} bytes, ok={})",
+            content.len(),
+            result.ok
+        );
+        let mut events = vec![BridgeEvent::file_written(
+            new_id(),
+            now_rfc3339(),
+            result.clone(),
+        )];
+        // On success, re-emit fresh contents so the viewer reflects the save.
+        if result.ok {
+            if let Ok(file) = honeyhub_bridge::read_file(path) {
+                events.push(BridgeEvent::file_contents(new_id(), now_rfc3339(), file));
+            }
+        }
+        events
+    })
+    .map(Some)
+}
+
+/// Refuse to create a NEW file whose final path component is itself a symlink.
+///
+/// `Path::exists()` (used by [`write_file_command`] to pick the new-file branch) FOLLOWS a
+/// symlink, so a **dangling** symlink planted inside an allowlisted root reports "does not
+/// exist" and lands in the new-file branch — where `std::fs::write` would then follow the link
+/// and write OUTSIDE the root, escaping the allowlist the parent gate just enforced.
+/// `symlink_metadata` does NOT follow the link, so it sees the symlink itself and lets us refuse
+/// it. A truly-absent path makes `symlink_metadata` error, which is the ordinary new-file case —
+/// allow it. (The existing-file branch is already safe: `workspace_allows` canonicalizes and so
+/// resolves any symlink, catching an out-of-root target.)
+fn refuse_symlink_target(target: &Path) -> Result<(), BridgeError> {
+    match std::fs::symlink_metadata(target) {
+        Ok(meta) if meta.file_type().is_symlink() => Err(BridgeError::new(
+            "workspace_not_allowed",
+            "refusing to create a file through a symlink",
+        )),
+        _ => Ok(()),
+    }
+}
+
 /// Build the events for a git write op: a `GitOp` result (success or failure) plus, on
 /// success, a fresh `GitStatus` so the cockpit reflects the change immediately. A failed op
 /// reports as `GitOp { ok: false }` rather than a transport error, so the UI can show it
@@ -1076,5 +1205,63 @@ fn git_write_events(root: &str, op: &str, result: Result<String, BridgeError>) -
                 message: Some(error.message),
             },
         )],
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Best-effort symlink creation. On Windows, creating a symlink needs a privilege (or
+    /// Developer Mode); when that is unavailable this returns `false` so the caller can skip the
+    /// symlink-specific assertion rather than fail on an environment limitation.
+    fn try_symlink(target: &Path, link: &Path) -> bool {
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(target, link).is_ok()
+        }
+        #[cfg(windows)]
+        {
+            std::os::windows::fs::symlink_file(target, link).is_ok()
+        }
+        #[cfg(not(any(unix, windows)))]
+        {
+            let _ = (target, link);
+            false
+        }
+    }
+
+    // Regression: a dangling symlink planted in an allowlisted root must not become a write path
+    // out of the root. `Path::exists()` follows the link, so a dangling one reaches the new-file
+    // branch; `refuse_symlink_target` uses `symlink_metadata` (which does NOT follow) to catch it.
+    #[test]
+    fn refuse_symlink_target_blocks_dangling_symlink_but_allows_absent_and_regular() {
+        let root = std::env::temp_dir().join(format!("honeyhub-wf-{}", new_id()));
+        std::fs::create_dir_all(&root).expect("temp allowlisted root is created");
+
+        // An ordinary absent path is the normal new-file case — allowed.
+        let absent = root.join("brand-new.txt");
+        assert!(refuse_symlink_target(&absent).is_ok());
+
+        // A regular existing file (created directly, not through a link) — allowed.
+        let regular = root.join("regular.txt");
+        std::fs::write(&regular, b"hi").expect("regular file is written");
+        assert!(refuse_symlink_target(&regular).is_ok());
+
+        // A DANGLING symlink inside the root whose target is OUTSIDE the root: `exists()` follows
+        // the link and reports false, but writing through it would escape the root — refuse it.
+        let outside = std::env::temp_dir().join(format!("honeyhub-escape-{}.txt", new_id()));
+        let link = root.join("looks-new.txt");
+        if try_symlink(&outside, &link) {
+            assert!(
+                !link.exists(),
+                "the planted symlink is dangling (its target does not exist)"
+            );
+            let refused =
+                refuse_symlink_target(&link).expect_err("a dangling symlink target is refused");
+            assert_eq!(refused.code, "workspace_not_allowed");
+        }
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

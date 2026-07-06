@@ -169,12 +169,17 @@ fn start_bridge() -> Result<(String, SocketAddr), Box<dyn std::error::Error>> {
     let bound = listener.local_addr()?;
 
     tauri::async_runtime::spawn(async move {
+        // Cross-backend dispatch (ADR-0098) is not wired into the Tauri shell yet
+        // (follow-up): it needs the same bind-first reorder the bridge-host binary
+        // uses so the MCP endpoint can be built against the bound address. `None`
+        // here keeps the shell's launches dispatch-free (graceful) until then.
         if let Err(error) = serve(
             listener,
             runtime,
             registry,
             DEFAULT_POLL_INTERVAL,
             static_dir,
+            None,
         )
         .await
         {

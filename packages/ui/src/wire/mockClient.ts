@@ -429,6 +429,18 @@ export class MockWireClient implements WireClient {
     this.emitDevice({ kind: "file_contents", file });
   }
 
+  async writeFile(path: string, content: string): Promise<void> {
+    this.emitDevice({ kind: "file_written", result: { path, ok: true } });
+    // Re-emit fresh contents so a subsequent read shows the saved text.
+    const file: FileContents = {
+      path,
+      content,
+      truncated: false,
+      byteSize: new TextEncoder().encode(content).length
+    };
+    this.emitDevice({ kind: "file_contents", file });
+  }
+
   async searchFiles(root: string, query: string): Promise<void> {
     const all = [
       "/demo/HoneyHub/README.md",
@@ -503,6 +515,19 @@ export class MockWireClient implements WireClient {
     this.emitDevice({
       kind: "git_diff",
       diff: { root, ...(path === undefined ? {} : { path }), patch, truncated: false }
+    });
+  }
+
+  async gitFileVersions(root: string, path: string): Promise<void> {
+    // A scripted before/after for the offline diff demo — a one-line change to App.tsx so
+    // the side-by-side DiffEditor shows a real diff.
+    const original =
+      'const view = "run";\n' + "// unchanged line\n" + "export const app = view;\n";
+    const modified =
+      'const view = "chat";\n' + "// unchanged line\n" + "export const app = view;\n";
+    this.emitDevice({
+      kind: "git_file_versions",
+      result: { root, path, original, modified, existedInHead: true, existedInWork: true }
     });
   }
 

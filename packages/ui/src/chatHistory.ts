@@ -28,8 +28,13 @@ export interface ChatRecord {
   updatedAt: string;
 }
 
-/** A lightweight summary for the history list (no transcript). */
-export type ChatSummary = Omit<ChatRecord, "messages">;
+/** A lightweight summary for the history list (no transcript). Carries a `messageCount`
+    so the list can show a per-thread status light ("done with answers" vs "active")
+    without hauling the whole transcript around. */
+export type ChatSummary = Omit<ChatRecord, "messages"> & {
+  /** How many transcript messages the thread has (0 for an empty draft placeholder). */
+  messageCount: number;
+};
 
 export function loadChats(): ChatRecord[] {
   try {
@@ -51,8 +56,12 @@ export function loadChats(): ChatRecord[] {
 }
 
 /** Pinned first (each bucket newest-first) — the display AND cap-eviction order, so
-    pinning both floats a chat to the top and protects it from the history cap. */
-function byPinThenRecency(a: ChatSummary, b: ChatSummary): number {
+    pinning both floats a chat to the top and protects it from the history cap. Typed on
+    the minimal fields it reads so it sorts both full records and summaries. */
+function byPinThenRecency(
+  a: Pick<ChatRecord, "pinned" | "updatedAt">,
+  b: Pick<ChatRecord, "pinned" | "updatedAt">
+): number {
   const pinA = a.pinned === true ? 1 : 0;
   const pinB = b.pinned === true ? 1 : 0;
   if (pinA !== pinB) {
@@ -61,10 +70,11 @@ function byPinThenRecency(a: ChatSummary, b: ChatSummary): number {
   return a.updatedAt < b.updatedAt ? 1 : -1;
 }
 
-/** Summaries for the history list: pinned first, then newest-first. */
+/** Summaries for the history list: pinned first, then newest-first. Drops the transcript
+    but keeps its length as `messageCount` for the status-light logic. */
 export function loadChatSummaries(): ChatSummary[] {
   return loadChats()
-    .map(({ messages: _messages, ...summary }) => summary)
+    .map(({ messages, ...summary }) => ({ ...summary, messageCount: messages.length }))
     .sort(byPinThenRecency);
 }
 
