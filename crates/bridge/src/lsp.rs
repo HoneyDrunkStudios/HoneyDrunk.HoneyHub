@@ -27,12 +27,13 @@
 //!   (`rootUri`, `workspaceFolders`, `textDocument.uri`, ...) must resolve inside an
 //!   allowlisted workspace root or the frame is refused, not forwarded.
 //! - **Server to client** ([`filter_server_message`]): location results and file-watch
-//!   registrations are filtered to allowlisted roots; an `applyEdit` naming any
-//!   out-of-root target is rejected whole (`applied: false`); out-of-root or non-file
-//!   `window/showDocument` requests are refused; `workspace/configuration` requests are
-//!   answered by the host itself (never an opaque client payload); server-defined
-//!   command payloads on code actions / code lenses are stripped (their execution path,
-//!   `workspace/executeCommand`, is refused anyway).
+//!   registrations are filtered to allowlisted roots; server-initiated
+//!   `workspace/applyEdit` is denied outright (`applied: false`; operator-initiated
+//!   WorkspaceEdit responses still flow as buffer-edit proposals persisted only via
+//!   `write_file`); out-of-root or non-file `window/showDocument` requests are refused;
+//!   `workspace/configuration` requests are answered by the host itself (never an opaque
+//!   client payload); server-defined command payloads on code actions / code lenses are
+//!   stripped (their execution path, `workspace/executeCommand`, is refused anyway).
 //!
 //! Beyond that boundary the payload is not interpreted: the framing layer stays
 //! protocol-shaped and the bridge owns *which* server may run, *where* it runs, and
@@ -438,9 +439,10 @@ pub enum ServerFrameAction {
 ///
 /// - out-of-root array entries (locations, watch registrations, code actions whose edit
 ///   names an out-of-root file) are removed and command payloads stripped;
-/// - `workspace/applyEdit` is **atomic**: a request whose edit names ANY out-of-root
-///   target is rejected whole with a synthesized `applied: false` reply to the server,
-///   never partially applied;
+/// - server-initiated `workspace/applyEdit` is **denied by default**: every such request
+///   gets a synthesized `applied: false` reply (mutation carries operator intent only via
+///   the write_file save path; operator-initiated WorkspaceEdit RESPONSES still flow, as
+///   buffer-edit proposals);
 /// - a denied `window/showDocument` gets a `success: false` reply (non-file and
 ///   out-of-root targets are never auto-opened);
 /// - a response left naming an out-of-root target gets a null `result` (dropping a
@@ -497,19 +499,19 @@ pub fn filter_server_message(
         };
     }
 
-    // workspace/applyEdit is an all-or-nothing protocol contract: reject the whole
-    // request when any target is out-of-root (ADR-0102 D-G), never apply a subset.
-    if method.as_deref() == Some("workspace/applyEdit")
-        && message
-            .get("params")
-            .is_some_and(|params| first_denied_uri(params, allowlist).is_some())
-    {
+    // Server-initiated workspace/applyEdit is denied by default (ADR-0102 D-G): a
+    // subprocess-initiated file-mutation trigger carries no operator intent, and mutation
+    // is ADR-0097's domain. Operator-initiated WorkspaceEdits (rename / code-action
+    // RESPONSES) still reach the editor as buffer-edit proposals and persist only through
+    // the write_file save path.
+    if method.as_deref() == Some("workspace/applyEdit") {
         return match id {
             Some(id) => ServerFrameAction::Reply(serde_json::json!({
                 "jsonrpc": "2.0", "id": id, "result": {
                     "applied": false,
-                    "failureReason": "HoneyHub rejected the edit: a target lies outside \
-                                      every allowlisted workspace root (ADR-0102 D-G)"
+                    "failureReason": "HoneyHub denies server-initiated edits (ADR-0102 \
+                                      D-G): edits flow as responses to operator-initiated \
+                                      requests and persist only through write_file"
                 }
             })),
             None => ServerFrameAction::Drop,
@@ -1113,15 +1115,16 @@ mod tests {
     }
 
     #[test]
-    fn apply_edit_is_atomic_rejected_whole_when_any_target_is_out_of_root() {
-        let (allowlist, inside, outside) = boundary_fixture();
-        // A WorkspaceEdit is all-or-nothing: one out-of-root target rejects the WHOLE
-        // request with applied: false back to the server, never a partial application.
+    fn server_initiated_apply_edit_is_denied_by_default() {
+        let (allowlist, inside, _) = boundary_fixture();
+        // Even a fully in-root edit is denied: a subprocess-initiated mutation trigger
+        // carries no operator intent (ADR-0102 D-G); the server gets applied: false and
+        // the editor sees nothing. Operator-initiated WorkspaceEdit RESPONSES (rename /
+        // code action) still flow, covered by the code-action tests below.
         let request = serde_json::json!({
             "jsonrpc": "2.0", "id": 5, "method": "workspace/applyEdit",
             "params": { "edit": { "changes": {
-                (inside.clone()): [ { "newText": "x", "range": {} } ],
-                (outside.clone()): [ { "newText": "y", "range": {} } ]
+                (inside.clone()): [ { "newText": "x", "range": {} } ]
             } } }
         });
         let ServerFrameAction::Reply(reply) = filter_server_message(request, &allowlist) else {
@@ -1130,22 +1133,34 @@ mod tests {
         assert_eq!(reply.pointer("/result/applied"), Some(&Value::Bool(false)));
         assert!(reply.pointer("/result/failureReason").is_some());
         assert_eq!(reply.get("id"), Some(&serde_json::json!(5)));
+    }
 
-        // An edit naming only in-root targets forwards intact.
+    #[test]
+    fn an_operator_initiated_rename_response_flows_as_a_buffer_proposal() {
+        let (allowlist, inside, outside) = boundary_fixture();
+        // A rename RESPONSE (operator-initiated) carries a WorkspaceEdit; it forwards
+        // when in-root (a buffer-edit proposal, persisted only via write_file)...
         let clean = serde_json::json!({
-            "jsonrpc": "2.0", "id": 6, "method": "workspace/applyEdit",
-            "params": { "edit": { "changes": {
-                (inside.clone()): [ { "newText": "x", "range": {} } ]
-            } } }
+            "jsonrpc": "2.0", "id": 6,
+            "result": { "changes": { (inside.clone()): [ { "newText": "x", "range": {} } ] } }
         });
-        let ServerFrameAction::Forward(forwarded) = filter_server_message(clean, &allowlist) else {
+        assert!(matches!(
+            filter_server_message(clean, &allowlist),
+            ServerFrameAction::Forward(_)
+        ));
+        // ...and a response whose edit reaches out-of-root gets a null result (atomic:
+        // never a partially filtered edit set).
+        let dirty = serde_json::json!({
+            "jsonrpc": "2.0", "id": 7,
+            "result": { "changes": {
+                (inside.clone()): [ { "newText": "x", "range": {} } ],
+                (outside.clone()): [ { "newText": "y", "range": {} } ]
+            } }
+        });
+        let ServerFrameAction::Forward(filtered) = filter_server_message(dirty, &allowlist) else {
             panic!("expected Forward");
         };
-        let changes = forwarded
-            .pointer("/params/edit/changes")
-            .and_then(Value::as_object)
-            .expect("changes map");
-        assert!(changes.contains_key(&inside));
+        assert!(filtered.get("result").expect("result").is_null());
     }
 
     #[test]
