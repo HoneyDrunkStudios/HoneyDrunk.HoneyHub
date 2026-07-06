@@ -12,7 +12,8 @@ import type {
   GitFileVersions,
   GitOpResult,
   GitOverview,
-  GitStatus
+  GitStatus,
+  SearchResults
 } from "@honeydrunk/honeyhub-types";
 import type { WireClient } from "../../wire/client";
 import { basename, isWithin } from "../../paths";
@@ -276,6 +277,7 @@ interface RepoEventContext {
   folderRef: RefObject<string>;
   activeRef: RefObject<boolean>;
   searchQueryRef: RefObject<string>;
+  searchFlagsRef: RefObject<{ caseSensitive: boolean; wholeWord: boolean; isRegex: boolean }>;
   pendingDiff: RefObject<{ root: string; path?: string } | undefined>;
   savingPaths: RefObject<Set<string>>;
   refreshOverviewRef: RefObject<() => void>;
@@ -290,6 +292,7 @@ interface RepoEventContext {
   setBusy: Dispatch<SetStateAction<boolean>>;
   setCommitMessage: Dispatch<SetStateAction<string>>;
   setSearchResults: Dispatch<SetStateAction<ContentSearchResults | undefined>>;
+  setFileHits: Dispatch<SetStateAction<SearchResults | undefined>>;
   setSearching: Dispatch<SetStateAction<boolean>>;
 }
 
@@ -360,12 +363,28 @@ function applyFileWritten(result: FileWrittenResult, ctx: RepoEventContext): voi
 }
 
 /** Fold a content-search result set into state, but only when it answers the CURRENT scope +
-    query (the event bus is shared, and a superseded query's late result must not clobber a newer
-    one). Clears the in-flight indicator once a correlated result lands. */
+    query + flags (the event bus is shared, and a superseded query's late result must not clobber
+    a newer one; the same query with different case/word/regex flags is a different search).
+    Clears the in-flight indicator once a correlated result lands. */
 function applyContentSearchResults(results: ContentSearchResults, ctx: RepoEventContext): void {
-  if (results.root === ctx.folderRef.current && results.query.trim() === ctx.searchQueryRef.current.trim()) {
+  const flags = ctx.searchFlagsRef.current;
+  if (
+    results.root === ctx.folderRef.current &&
+    results.query.trim() === ctx.searchQueryRef.current.trim() &&
+    results.caseSensitive === flags.caseSensitive &&
+    results.wholeWord === flags.wholeWord &&
+    results.isRegex === flags.isRegex
+  ) {
     ctx.setSearchResults(results);
     ctx.setSearching(false);
+  }
+}
+
+/** Fold a filename-search result set into state when it answers the CURRENT scope + query (the
+    filename search has no flags, so root + query is its full identity). */
+function applyFileSearchResults(results: SearchResults, ctx: RepoEventContext): void {
+  if (results.root === ctx.folderRef.current && results.query.trim() === ctx.searchQueryRef.current.trim()) {
+    ctx.setFileHits(results);
   }
 }
 
@@ -419,6 +438,9 @@ function applyRepoEvent(event: BridgeEvent, ctx: RepoEventContext): void {
       break;
     case "content_search_results":
       applyContentSearchResults(payload.results, ctx);
+      break;
+    case "search_results":
+      applyFileSearchResults(payload.results, ctx);
       break;
     case "fs_changed":
       applyFsChanged(payload.paths, ctx);
@@ -893,6 +915,8 @@ function highlightSegments(
 interface SearchPanelProps {
   /** The folder the search is scoped to (shown in the input placeholder). */
   scopeLabel: string;
+  /** The scope's absolute root, used to render file hits with a repo-relative dir. */
+  scopeRoot: string;
   query: string;
   caseSensitive: boolean;
   wholeWord: boolean;
@@ -900,11 +924,14 @@ interface SearchPanelProps {
   searching: boolean;
   error: string | undefined;
   results: ContentSearchResults | undefined;
+  /** Filename hits for the same query (files whose NAME contains the query). */
+  fileHits: SearchResults | undefined;
   onQuery: (value: string) => void;
   onToggleCase: () => void;
   onToggleWord: () => void;
   onToggleRegex: () => void;
   onOpenMatch: (match: ContentMatch) => void;
+  onOpenFile: (path: string) => void;
 }
 
 /** The repo-wide search panel (VS Code's "Find in Files"): a debounced query input, the
@@ -912,6 +939,7 @@ interface SearchPanelProps {
     Clicking a match asks the parent to open the file at that line. */
 function SearchPanel({
   scopeLabel,
+  scopeRoot,
   query,
   caseSensitive,
   wholeWord,
@@ -919,11 +947,13 @@ function SearchPanel({
   searching,
   error,
   results,
+  fileHits,
   onQuery,
   onToggleCase,
   onToggleWord,
   onToggleRegex,
-  onOpenMatch
+  onOpenMatch,
+  onOpenFile
 }: Readonly<SearchPanelProps>): ReactElement {
   const [collapsed, setCollapsed] = useState<Set<string>>(() => new Set());
   const toggleCollapsed = (path: string) => togglePathInSet(setCollapsed, path);
@@ -974,6 +1004,7 @@ function SearchPanel({
           </button>
         </div>
       </div>
+      <FileHitsSection query={query} scopeRoot={scopeRoot} fileHits={fileHits} onOpenFile={onOpenFile} />
       <SearchResultsBody
         query={query}
         searching={searching}
@@ -983,11 +1014,74 @@ function SearchPanel({
         collapsed={collapsed}
         caseSensitive={caseSensitive}
         regex={regex}
+        hasFileHits={fileHits !== undefined && fileHits.hits.length > 0}
         onToggleCollapsed={toggleCollapsed}
         onOpenMatch={onOpenMatch}
       />
     </div>
   );
+}
+
+/** Cap on filename hits rendered in the panel (the bridge caps the walk separately). */
+const MAX_FILE_HITS_SHOWN = 25;
+
+interface FileHitsSectionProps {
+  query: string;
+  scopeRoot: string;
+  fileHits: SearchResults | undefined;
+  onOpenFile: (path: string) => void;
+}
+
+/** Files whose NAME contains the query (the "open the file called 0043" case), listed above the
+    content matches. Each hit shows the filename plus its scope-relative folder; clicking opens
+    the file in the editor. */
+function FileHitsSection({
+  query,
+  scopeRoot,
+  fileHits,
+  onOpenFile
+}: Readonly<FileHitsSectionProps>): ReactElement | null {
+  if (query.trim() === "" || fileHits === undefined || fileHits.hits.length === 0) {
+    return null;
+  }
+  const shown = fileHits.hits.slice(0, MAX_FILE_HITS_SHOWN);
+  const hidden = fileHits.hits.length - shown.length;
+  const fileWord = fileHits.hits.length === 1 ? "file" : "files";
+  return (
+    <div className="repos-search-filehits">
+      <p className="repos-search-summary">
+        {fileHits.hits.length} matching {fileWord}
+        {(hidden > 0 || fileHits.truncated) && (
+          <span className="repos-search-truncated"> · showing the first {shown.length}</span>
+        )}
+      </p>
+      <ul className="repos-search-groups">
+        {shown.map((hit) => (
+          <li key={hit.path} className="repos-search-group">
+            <button
+              type="button"
+              className="repos-search-file-head"
+              title={hit.path}
+              onClick={() => onOpenFile(hit.path)}
+            >
+              <span aria-hidden="true">{fileIcon(hit.name)}</span>
+              <span className="repos-search-filename">{hit.name}</span>
+              <span className="repos-search-filedir">{relativeDirLabel(hit.path, hit.name, scopeRoot)}</span>
+            </button>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+/** The scope-relative folder a hit lives in ("src/routes"), or "." at the scope root. */
+function relativeDirLabel(path: string, name: string, scopeRoot: string): string {
+  let dir = path.slice(0, Math.max(0, path.length - name.length)).replace(/[\\/]+$/, "");
+  if (scopeRoot !== "" && dir.toLowerCase().startsWith(scopeRoot.toLowerCase())) {
+    dir = dir.slice(scopeRoot.length).replace(/^[\\/]+/, "");
+  }
+  return dir === "" ? "." : dir.replaceAll("\\", "/");
 }
 
 interface SearchResultsBodyProps {
@@ -999,6 +1093,9 @@ interface SearchResultsBodyProps {
   collapsed: Set<string>;
   caseSensitive: boolean;
   regex: boolean;
+  /** True when the filename section above already lists hits, so an empty content result reads
+      "no content matches" instead of a flat (and then wrong-looking) "no results". */
+  hasFileHits: boolean;
   onToggleCollapsed: (path: string) => void;
   onOpenMatch: (match: ContentMatch) => void;
 }
@@ -1014,6 +1111,7 @@ function SearchResultsBody({
   collapsed,
   caseSensitive,
   regex,
+  hasFileHits,
   onToggleCollapsed,
   onOpenMatch
 }: Readonly<SearchResultsBodyProps>): ReactElement | null {
@@ -1032,7 +1130,7 @@ function SearchResultsBody({
     return <p className="repos-hint">{searching ? "Searching…" : ""}</p>;
   }
   if (results.matches.length === 0) {
-    return <p className="repos-hint">No results.</p>;
+    return <p className="repos-hint">{hasFileHits ? "No content matches." : "No results."}</p>;
   }
   const fileWord = results.fileCount === 1 ? "file" : "files";
   const matchWord = results.matches.length === 1 ? "result" : "results";
@@ -1146,6 +1244,9 @@ export function RepositoriesView({
   const [searching, setSearching] = useState(false);
   const [searchError, setSearchError] = useState<string | undefined>(undefined);
   const [searchResults, setSearchResults] = useState<ContentSearchResults | undefined>(undefined);
+  // Filename hits for the same query (the "find the file named 0043" case): the panel runs the
+  // bridge's filename search alongside the content search and lists matching files first.
+  const [fileHits, setFileHits] = useState<SearchResults | undefined>(undefined);
   // Where a clicked search match wants the editor to scroll (path + 1-based line + a re-reveal nonce).
   const [revealTarget, setRevealTarget] = useState<RevealTarget | undefined>(undefined);
 
@@ -1190,10 +1291,20 @@ export function RepositoriesView({
   openFilesRef.current = openFiles;
   const activeFilePathRef = useRef(activeFilePath);
   activeFilePathRef.current = activeFilePath;
-  // Latest search query, read synchronously by the event fold so a stale (superseded) result set
-  // for an earlier query is ignored.
+  // Latest search query + flags, read synchronously by the event fold so a stale (superseded)
+  // result set for an earlier query or an earlier flag combination is ignored.
   const searchQueryRef = useRef(searchQuery);
   searchQueryRef.current = searchQuery;
+  const searchFlagsRef = useRef({
+    caseSensitive: searchCaseSensitive,
+    wholeWord: searchWholeWord,
+    isRegex: searchRegex
+  });
+  searchFlagsRef.current = {
+    caseSensitive: searchCaseSensitive,
+    wholeWord: searchWholeWord,
+    isRegex: searchRegex
+  };
 
   const loadDir = useCallback(
     (path: string) => {
@@ -1226,6 +1337,7 @@ export function RepositoriesView({
       folderRef,
       activeRef,
       searchQueryRef,
+      searchFlagsRef,
       pendingDiff,
       savingPaths,
       refreshOverviewRef,
@@ -1240,6 +1352,7 @@ export function RepositoriesView({
       setBusy,
       setCommitMessage,
       setSearchResults,
+      setFileHits,
       setSearching
     };
     return client.subscribe((event) => applyRepoEvent(event, ctx));
@@ -1303,6 +1416,7 @@ export function RepositoriesView({
     const trimmed = searchQuery.trim();
     if (trimmed === "" || folder === "") {
       setSearchResults(undefined);
+      setFileHits(undefined);
       setSearching(false);
       setSearchError(undefined);
       return;
@@ -1320,6 +1434,9 @@ export function RepositoriesView({
           setSearching(false);
           setSearchError(errorMessage(cause, "search failed"));
         });
+      // The filename search rides the same query (its own result event, correlated
+      // independently); a failure here never blocks the content results.
+      void client.searchFiles(folder, trimmed).catch(() => undefined);
     }, 250);
     return () => clearTimeout(handle);
   }, [
@@ -1565,6 +1682,7 @@ export function RepositoriesView({
           <aside className="repos-sidebar" aria-label="Search panel">
             <SearchPanel
               scopeLabel={basename(folder)}
+              scopeRoot={folder}
               query={searchQuery}
               caseSensitive={searchCaseSensitive}
               wholeWord={searchWholeWord}
@@ -1572,11 +1690,13 @@ export function RepositoriesView({
               searching={searching}
               error={searchError}
               results={searchResults}
+              fileHits={fileHits}
               onQuery={setSearchQuery}
               onToggleCase={() => setSearchCaseSensitive((prev) => !prev)}
               onToggleWord={() => setSearchWholeWord((prev) => !prev)}
               onToggleRegex={() => setSearchRegex((prev) => !prev)}
               onOpenMatch={onOpenMatch}
+              onOpenFile={openFile}
             />
           </aside>
         )}

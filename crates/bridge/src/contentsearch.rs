@@ -19,7 +19,7 @@ use crate::adapter::BridgeError;
 use crate::backend_catalog::resolve_program;
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Read};
 use std::path::Path;
 use std::process::{Command, Stdio};
 
@@ -200,7 +200,7 @@ fn search_with_ripgrep(
     let mut child = Command::new(program)
         .args(&args)
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
         .stdin(Stdio::null())
         .spawn()
         .map_err(|error| BridgeError::new("search_spawn_failed", error.to_string()))?;
@@ -208,21 +208,69 @@ fn search_with_ripgrep(
     let stdout = child.stdout.take().ok_or_else(|| {
         BridgeError::new("search_spawn_failed", "ripgrep produced no stdout pipe")
     })?;
+    // Drain stderr on its own thread (capped) so an error message is available for an
+    // explicit failure report instead of vanishing into an empty result set.
+    let stderr_reader = child.stderr.take().map(|stderr| {
+        std::thread::spawn(move || {
+            let mut buffer = String::new();
+            let _ = BufReader::new(stderr)
+                .take(4096)
+                .read_to_string(&mut buffer);
+            buffer
+        })
+    });
 
     let mut acc = MatchAccumulator::new();
+    let mut capped = false;
     for line in BufReader::new(stdout).lines() {
         let Ok(line) = line else { break };
         if let Some(m) = parse_ripgrep_match(&line) {
             if acc.push(m) {
-                break; // a cap was hit
+                capped = true;
+                break;
             }
         }
     }
-    // The reader may have stopped early (cap hit); make sure the child is not left running.
-    let _ = child.kill();
-    let _ = child.wait();
+    if capped {
+        // We stopped rg mid-stream, so its exit status is not meaningful; make sure the
+        // child is not left running and return what was accumulated (flagged truncated).
+        let _ = child.kill();
+        let _ = child.wait();
+        if let Some(reader) = stderr_reader {
+            let _ = reader.join();
+        }
+        return Ok(acc.finish(root, query, options, ContentSearchEngine::Ripgrep));
+    }
 
-    Ok(acc.finish(root, query, options, ContentSearchEngine::Ripgrep))
+    // The stream ended on rg's own terms, so its exit status is meaningful: 0 = matches,
+    // 1 = no matches, anything else (e.g. 2: invalid regex, unreadable root) is a real
+    // failure that must surface as an explicit error, never as silently-empty results.
+    let status = child.wait();
+    let stderr_text = stderr_reader
+        .and_then(|reader| reader.join().ok())
+        .unwrap_or_default();
+    match status {
+        Ok(status) if status.success() || status.code() == Some(1) => {
+            Ok(acc.finish(root, query, options, ContentSearchEngine::Ripgrep))
+        }
+        Ok(status) => Err(BridgeError::new(
+            "search_failed",
+            format!(
+                "ripgrep exited with {status}: {}",
+                summarize_stderr(&stderr_text)
+            ),
+        )),
+        Err(error) => Err(BridgeError::new("search_failed", error.to_string())),
+    }
+}
+
+/// First non-empty stderr line (ripgrep's error message), or a placeholder.
+fn summarize_stderr(stderr: &str) -> &str {
+    stderr
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or("(no error output)")
 }
 
 /// Parse one ripgrep `--json` line into a [`ContentMatch`], or `None` for non-match records
@@ -620,6 +668,28 @@ mod tests {
         assert!(matches!(
             results.engine,
             ContentSearchEngine::Ripgrep | ContentSearchEngine::Fallback
+        ));
+    }
+
+    #[test]
+    fn an_invalid_regex_is_an_explicit_error_on_either_engine() {
+        // With rg present, an unbalanced paren makes rg exit 2 and must surface as
+        // `search_failed` (with rg's stderr message), never as silently-empty results;
+        // without rg, regex is `regex_unavailable`. Either way: an error, not `Ok(empty)`.
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("f.txt"), b"abc\n").unwrap();
+        let error = search_content(
+            dir.path().to_str().unwrap(),
+            "(",
+            ContentSearchOptions {
+                is_regex: true,
+                ..opts()
+            },
+        )
+        .expect_err("invalid regex must error");
+        assert!(matches!(
+            error.code.as_str(),
+            "search_failed" | "regex_unavailable"
         ));
     }
 

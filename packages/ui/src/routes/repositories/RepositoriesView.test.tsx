@@ -908,8 +908,9 @@ describe("RepositoriesView", () => {
   });
 });
 
-/** Records the read + content-search calls, turns `searchContent` into a no-op (so only the events
-    a test pushes drive the panel), and exposes a `pushSearch` hook for crafted result events. */
+/** Records the read + search calls, turns `searchContent`/`searchFiles` into no-ops (so only the
+    events a test pushes drive the panel), and exposes a `pushSearch` hook for crafted result
+    events. */
 class SearchClient extends CapturingClient {
   readFileCalls: string[] = [];
   searchContentCalls: Array<{
@@ -917,6 +918,7 @@ class SearchClient extends CapturingClient {
     query: string;
     options?: { caseSensitive?: boolean; wholeWord?: boolean; isRegex?: boolean } | undefined;
   }> = [];
+  searchFilesCalls: Array<{ root: string; query: string }> = [];
 
   override readFile(path: string): Promise<void> {
     this.readFileCalls.push(path);
@@ -929,6 +931,11 @@ class SearchClient extends CapturingClient {
     options?: { caseSensitive?: boolean; wholeWord?: boolean; isRegex?: boolean }
   ): Promise<void> {
     this.searchContentCalls.push({ root, query, options });
+    return Promise.resolve();
+  }
+
+  override searchFiles(root: string, query: string): Promise<void> {
+    this.searchFilesCalls.push({ root, query });
     return Promise.resolve();
   }
 
@@ -1068,6 +1075,67 @@ describe("RepositoriesView search panel", () => {
       const host = document.querySelector(".repos-editor-host");
       expect(host?.getAttribute("data-reveal-line")).toBe("2");
     });
+  });
+
+  it("lists filename hits for the query above the content results and opens one on click", async () => {
+    const client = new SearchClient();
+    renderRepos(client);
+
+    openSearch("find-by-name");
+    client.pushSearch({
+      kind: "search_results",
+      results: {
+        root: "/demo",
+        query: "find-by-name",
+        hits: [
+          { path: "/demo/HoneyHub/src/refinement-0043-find-by-name.md", name: "refinement-0043-find-by-name.md" },
+          { path: "/demo/HoneyHub/docs/find-by-name.txt", name: "find-by-name.txt" }
+        ],
+        truncated: false
+      }
+    });
+
+    // The filename section summarizes and lists the hits (name + scope-relative folder).
+    await waitFor(() => expect(screen.getByText("2 matching files")).toBeTruthy());
+    expect(screen.getByText("refinement-0043-find-by-name.md")).toBeTruthy();
+    expect(screen.getByText("HoneyHub/src")).toBeTruthy();
+
+    // Clicking a hit opens the file through the same open-in-tab read path.
+    fireEvent.click(screen.getByTitle("/demo/HoneyHub/docs/find-by-name.txt"));
+    await waitFor(() =>
+      expect(client.readFileCalls).toContain("/demo/HoneyHub/docs/find-by-name.txt")
+    );
+  });
+
+  it("ignores filename hits answering a superseded query or another scope", async () => {
+    const client = new SearchClient();
+    renderRepos(client);
+
+    openSearch("current");
+    // A late result for an EARLIER query must not populate the panel...
+    client.pushSearch({
+      kind: "search_results",
+      results: {
+        root: "/demo",
+        query: "stale-earlier-query",
+        hits: [{ path: "/demo/HoneyHub/stale.txt", name: "stale.txt" }],
+        truncated: false
+      }
+    });
+    // ...and neither must a result for a different scope root.
+    client.pushSearch({
+      kind: "search_results",
+      results: {
+        root: "/elsewhere",
+        query: "current",
+        hits: [{ path: "/elsewhere/other.txt", name: "other.txt" }],
+        truncated: false
+      }
+    });
+
+    await waitFor(() => expect(screen.queryByText(/matching file/)).toBeNull());
+    expect(screen.queryByText("stale.txt")).toBeNull();
+    expect(screen.queryByText("other.txt")).toBeNull();
   });
 
   it("keeps the panel empty for an empty query and debounces a real scoped search", async () => {

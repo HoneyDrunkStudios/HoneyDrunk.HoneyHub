@@ -8236,6 +8236,23 @@ button:focus-visible,
   color: var(--honey-bright);
 }
 
+/* Filename hits for the current query (files whose name matches), listed above the
+   content matches with a dim scope-relative folder after the name. */
+.repos-search-filehits {
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 6px;
+  margin-bottom: 6px;
+}
+
+.repos-search-filedir {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-muted);
+  font-size: 0.72rem;
+  margin-left: auto;
+}
+
 .repos-search-groups,
 .repos-search-matches {
   list-style: none;

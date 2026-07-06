@@ -42,7 +42,7 @@ use serde_json::Value;
 use std::ffi::OsString;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use std::process::{Child, ChildStdout, Command, Stdio};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::thread::JoinHandle;
 
@@ -161,15 +161,24 @@ pub struct LspStatus {
     pub reason: String,
 }
 
-/// A live language server: its piped stdin (Content-Length framed writes), the reader
-/// thread draining framed messages off stdout into a channel, and the bookkeeping to kill
-/// the tree exactly once. Owned by the host inside a `Mutex<HashMap<..>>`, one per
-/// (language, root).
+/// Bound on queued-but-unwritten outbound frames per server. Writes happen on a dedicated
+/// writer thread so a slow or wedged server can never block the caller (the host would
+/// otherwise stall every LSP operation while holding its server map lock); the bound keeps
+/// a wedged server from accumulating frames without limit. didChange bursts sit far below
+/// this.
+const MAX_QUEUED_OUTBOUND_FRAMES: usize = 256;
+
+/// A live language server: a writer thread owning its piped stdin (Content-Length framed
+/// writes, fed by a bounded queue), the reader thread draining framed messages off stdout
+/// into a channel, and the bookkeeping to kill the tree exactly once. Owned by the host
+/// inside a `Mutex<HashMap<..>>`, one per (language, root).
 pub struct LspServer {
     server_id: String,
     child: Child,
     process_id: u32,
-    stdin: Option<ChildStdin>,
+    /// Sender feeding the writer thread; dropping it closes stdin (EOF to the server).
+    writer_tx: Option<std::sync::mpsc::SyncSender<Value>>,
+    writer: Option<JoinHandle<()>>,
     reader: Option<JoinHandle<()>>,
     /// Set once the process tree has been signalled, so it is signalled exactly once
     /// across `close_and_kill` + `Drop`.
@@ -178,11 +187,15 @@ pub struct LspServer {
 
 impl Drop for LspServer {
     fn drop(&mut self) {
-        // Close stdin (EOF to the server), kill the whole tree once, and join the reader —
-        // so dropping the handle (stop / session-end / disconnect / root-removal) tears the
-        // process down deterministically.
-        self.stdin.take();
+        // Disconnect the writer (which closes stdin, EOF to the server), kill the whole
+        // tree once, and join both pump threads, so dropping the handle (stop /
+        // session-end / disconnect / root-removal) tears the process down
+        // deterministically.
+        self.writer_tx.take();
         self.kill_tree_once();
+        if let Some(writer) = self.writer.take() {
+            let _ = writer.join();
+        }
         if let Some(reader) = self.reader.take() {
             let _ = reader.join();
         }
@@ -247,12 +260,33 @@ impl LspServer {
         let (sender, receiver) = channel();
         let reader = std::thread::spawn(move || read_frames(BufReader::new(stdout), &sender));
 
+        // The writer thread owns stdin: callers enqueue frames (bounded, non-blocking)
+        // and this thread does the blocking framed writes, so a slow server never blocks
+        // the host. It exits when the queue disconnects (handle dropped) or a write
+        // fails (server gone); dropping stdin on exit is the EOF the server sees.
+        let (writer_tx, writer_rx) =
+            std::sync::mpsc::sync_channel::<Value>(MAX_QUEUED_OUTBOUND_FRAMES);
+        let mut stdin = stdin;
+        let writer = std::thread::spawn(move || {
+            while let Ok(message) = writer_rx.recv() {
+                let framed = frame_message(&message);
+                if stdin
+                    .write_all(&framed)
+                    .and_then(|()| stdin.flush())
+                    .is_err()
+                {
+                    return;
+                }
+            }
+        });
+
         Ok((
             Self {
                 server_id,
                 child,
                 process_id,
-                stdin: Some(stdin),
+                writer_tx: Some(writer_tx),
+                writer: Some(writer),
                 reader: Some(reader),
                 killed: false,
             },
@@ -270,22 +304,26 @@ impl LspServer {
         self.process_id
     }
 
-    /// Frame `message` (Content-Length) and write it to the server's stdin. Errors with
-    /// `lsp_not_running` if stdin has been closed, or `lsp_write_failed` on an I/O error.
+    /// Enqueue `message` for the writer thread, which frames (Content-Length) and writes
+    /// it to the server's stdin. Never blocks: errors with `lsp_not_running` when the
+    /// writer is gone (stdin closed / server exited), or `lsp_backpressure` when the
+    /// bounded queue is full (a wedged server), so a slow server can never stall the
+    /// caller.
     pub fn write_message(&mut self, message: &Value) -> Result<(), BridgeError> {
-        let stdin = self.stdin.as_mut().ok_or_else(|| {
+        let sender = self.writer_tx.as_ref().ok_or_else(|| {
             BridgeError::new("lsp_not_running", "language server stdin is closed")
         })?;
-        let framed = frame_message(message);
-        stdin
-            .write_all(&framed)
-            .and_then(|()| stdin.flush())
-            .map_err(|error| {
-                BridgeError::new(
-                    "lsp_write_failed",
-                    format!("failed to write to language server: {error}"),
-                )
-            })
+        match sender.try_send(message.clone()) {
+            Ok(()) => Ok(()),
+            Err(std::sync::mpsc::TrySendError::Full(_)) => Err(BridgeError::new(
+                "lsp_backpressure",
+                "language server is not draining its input; frame dropped",
+            )),
+            Err(std::sync::mpsc::TrySendError::Disconnected(_)) => Err(BridgeError::new(
+                "lsp_not_running",
+                "language server stdin is closed",
+            )),
+        }
     }
 
     /// Observe process exit: `Some(success)` once the child has exited, `None` while it is
@@ -297,9 +335,10 @@ impl LspServer {
         }
     }
 
-    /// Close stdin and kill the whole process tree (once). Idempotent with `Drop`.
+    /// Close stdin (via the writer) and kill the whole process tree (once). Idempotent
+    /// with `Drop`.
     pub fn close_and_kill(&mut self) {
-        self.stdin.take();
+        self.writer_tx.take();
         self.kill_tree_once();
     }
 

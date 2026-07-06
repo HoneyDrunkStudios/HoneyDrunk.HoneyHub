@@ -7,6 +7,11 @@ user-centered Jobs page.
 
 - **Repo-wide search**: a Search panel on the activity rail greps every allowlisted workspace
   root from the bridge (read-posture, ADR-0090 D8), with per-file grouping and click-to-open.
+  The same query also matches **file names**: files whose name contains the query (search for a
+  ticket or refinement number and jump straight to its file) are listed above the content
+  matches, click-to-open. A ripgrep failure (for example an invalid regex) now surfaces as an
+  explicit error instead of silently-empty results, and a stale result for a superseded query,
+  scope, or flag combination can no longer overwrite the current panel.
 - **LSP code intelligence** (ADR-0102): the bridge runs allowlisted, operator-installed
   language servers (rust-analyzer, typescript-language-server, csharp-ls) as supervised
   long-lived subprocesses and proxies their LSP JSON-RPC to the editor for project-aware

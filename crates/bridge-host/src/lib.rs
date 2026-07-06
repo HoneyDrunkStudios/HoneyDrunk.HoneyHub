@@ -446,6 +446,10 @@ async fn handle_command(
     // out under the lock and dropped off-lock below (a supervised server must never outlive
     // its authorization; the reader-thread join is kept off the async worker).
     let mut lsp_orphans: Vec<honeyhub_bridge::LspServer> = Vec::new();
+    // A content search validated under the runtime lock but executed after it is released
+    // (grepping a big tree is slow filesystem work; holding the runtime lock through it
+    // would stall every other client command).
+    let mut search_job: Option<(String, String, honeyhub_bridge::ContentSearchOptions)> = None;
     let result: Result<Option<Vec<BridgeEvent>>, BridgeError> = {
         let mut runtime = host.runtime.lock().await;
         match command {
@@ -551,25 +555,20 @@ async fn handle_command(
                 // Content search (Find in Files) is gated to an allowlisted root exactly like the
                 // filename search — it greps the files under that scope. `workspace_allows`
                 // canonicalizes, so a `..`/symlink escape resolves out of the root and is denied.
-                require(runtime.workspace_allows(&root), "search root")
-                    .and_then(|()| {
-                        honeyhub_bridge::search_content(
-                            &root,
-                            &query,
-                            honeyhub_bridge::ContentSearchOptions {
-                                case_sensitive,
-                                whole_word,
-                                is_regex,
-                            },
-                        )
-                    })
-                    .map(|results| {
-                        one(BridgeEvent::content_search_results(
-                            new_id(),
-                            now_rfc3339(),
-                            results,
-                        ))
-                    })
+                // Only the *gate* runs under the runtime lock; the grep itself is deferred to
+                // blocking work after the lock is released (see `search_job` below).
+                require(runtime.workspace_allows(&root), "search root").map(|()| {
+                    search_job = Some((
+                        root,
+                        query,
+                        honeyhub_bridge::ContentSearchOptions {
+                            case_sensitive,
+                            whole_word,
+                            is_regex,
+                        },
+                    ));
+                    None
+                })
             }
             ClientCommand::WriteAgent {
                 name,
@@ -1033,6 +1032,28 @@ async fn handle_command(
     for server in lsp_orphans {
         tokio::task::spawn_blocking(move || drop(server));
     }
+    // Run a gated content search off the runtime lock, on blocking work: only this client's
+    // task waits for it, never every other command.
+    let result = match search_job {
+        Some((root, query, options)) if result.is_ok() => tokio::task::spawn_blocking(move || {
+            honeyhub_bridge::search_content(&root, &query, options)
+        })
+        .await
+        .unwrap_or_else(|_| {
+            Err(BridgeError::new(
+                "search_failed",
+                "content search task failed unexpectedly",
+            ))
+        })
+        .map(|results| {
+            one(BridgeEvent::content_search_results(
+                new_id(),
+                now_rfc3339(),
+                results,
+            ))
+        }),
+        _ => result,
+    };
 
     respond(outbound_tx, frame_id, result).await;
 }
@@ -1205,9 +1226,30 @@ fn spawn_lsp(host: &Arc<Host>, root: String, language_id: String) {
             };
 
         // 5. Register (reconciling a start race: if a concurrent start won, drop ours).
+        // Authorization is RE-CHECKED here, under the runtime lock, because the LspStart
+        // gate ran before the async locate/spawn work and a concurrent SetWorkspaceRoots
+        // may have removed the root since. Holding the runtime lock across the insert
+        // serializes registration with the SetWorkspaceRoots orphan sweep (same lock
+        // order: runtime, then active_lsp), so a server can never be registered for a
+        // deauthorized root and then missed by the sweep.
         {
+            let runtime = host.runtime.lock().await;
             let mut servers = host.active_lsp.lock().await;
+            if !runtime.workspace_allows(&root) {
+                drop(servers);
+                drop(runtime);
+                tokio::task::spawn_blocking(move || drop(server));
+                let _ = host.events.send(status(
+                    true,
+                    false,
+                    spec.server_id,
+                    "workspace root was removed before the language server registered",
+                ));
+                return;
+            }
             if servers.contains_key(&key) {
+                drop(servers);
+                drop(runtime);
                 tokio::task::spawn_blocking(move || drop(server));
                 let _ = host.events.send(status(
                     true,
