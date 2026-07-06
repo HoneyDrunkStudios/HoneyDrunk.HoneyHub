@@ -216,7 +216,10 @@ async fn client_shutdown_is_intercepted_not_forwarded() {
 
     let outcome = read_until(&mut ws1, |frame| {
         if frame.ack_frame_id.as_deref() == Some("frame-shutdown") {
-            Some((frame.kind.clone(), frame.error.as_ref().map(|e| e.code.clone())))
+            Some((
+                frame.kind.clone(),
+                frame.error.as_ref().map(|e| e.code.clone()),
+            ))
         } else {
             None
         }

@@ -646,26 +646,30 @@ fn is_command_only_actionable(value: &Value) -> bool {
         && (map.contains_key("title") || map.contains_key("range"))
 }
 
-/// Whether a URI may cross the wire, SERVER to client: a `file:` URI must resolve inside an
-/// allowlisted root; a non-`file:` URI (e.g. an `https:` DocumentLink target the operator
-/// may click, or a `vscode-*:` internal scheme) carries no filesystem authority and passes.
+/// Whether a URI may cross the wire, SERVER to client: a local `file:` URI must resolve
+/// inside an allowlisted root; a `file:` URI with a non-local authority (`file://host/...`)
+/// is refused (never probed); a non-`file:` URI (e.g. an `https:` DocumentLink target the
+/// operator may click, or a `vscode-*:` internal scheme) carries no filesystem authority
+/// and passes.
 fn uri_allowed(uri: &str, allowlist: &WorkspaceAllowlist) -> bool {
-    match file_uri_to_path(uri) {
-        None => true,
-        Some(path) => path_allowed(&path, allowlist),
+    match classify_file_uri(uri) {
+        FileUriClass::NotFile => true,
+        FileUriClass::NonLocalAuthority => false,
+        FileUriClass::Local(path) => path_allowed(&path, allowlist),
     }
 }
 
 /// Whether a URI may cross the wire, CLIENT to server, in a workspace/document field
 /// (`rootUri`, `workspaceFolders`, `textDocument.uri`, edit targets). Stricter than
-/// [`uri_allowed`]: a `file:` URI must be in-root, an `untitled:` unsaved-buffer URI is
-/// permitted (a legitimate editor shape with no filesystem authority), and every other
-/// scheme (`http:` / `https:` / ...) is refused, since a workspace or document field has no
-/// business naming a remote resource for the server to reach.
+/// [`uri_allowed`]: a local `file:` URI must be in-root, an `untitled:` unsaved-buffer URI
+/// is permitted (a legitimate editor shape with no filesystem authority), and every other
+/// scheme (`http:` / `https:` / a non-local `file:` authority / ...) is refused, since a
+/// workspace or document field has no business naming a remote resource for the server.
 fn client_uri_allowed(uri: &str, allowlist: &WorkspaceAllowlist) -> bool {
-    match file_uri_to_path(uri) {
-        Some(path) => path_allowed(&path, allowlist),
-        None => uri.starts_with("untitled:"),
+    match classify_file_uri(uri) {
+        FileUriClass::Local(path) => path_allowed(&path, allowlist),
+        FileUriClass::NonLocalAuthority => false,
+        FileUriClass::NotFile => uri.starts_with("untitled:"),
     }
 }
 
@@ -685,14 +689,28 @@ fn path_allowed(path: &Path, allowlist: &WorkspaceAllowlist) -> bool {
     }
 }
 
-/// Convert a `file:` URI to a filesystem path (percent-decoded, Windows-drive and UNC
-/// aware). `None` = not a `file:` URI.
-fn file_uri_to_path(uri: &str) -> Option<PathBuf> {
+/// The classification of a URI for boundary purposes.
+enum FileUriClass {
+    /// Not a `file:` URI (a non-file scheme with no filesystem authority).
+    NotFile,
+    /// A `file:` URI with a non-local authority (`file://host/share/...`). It is DENIED
+    /// outright and never converted to a UNC path or filesystem-probed, because probing
+    /// `\\host\...` on Windows triggers SMB network access and can leak NTLM credentials to
+    /// a hostile, server-controlled host during validation (ADR-0102 D-G).
+    NonLocalAuthority,
+    /// A local `file:` URI resolved to a filesystem path.
+    Local(PathBuf),
+}
+
+/// Classify a URI: not-a-file, a denied non-local `file:` authority, or a local file path.
+/// A non-local authority is detected and rejected BEFORE any percent-decoding of the path
+/// or filesystem probe, so a hostile `file://host/...` can never induce a network access.
+fn classify_file_uri(uri: &str) -> FileUriClass {
     // Byte-prefix check: a multibyte first char must never panic a str slice. "file://"
     // is 7 ASCII bytes, so index 7 is a guaranteed char boundary once the prefix matches.
     let bytes = uri.as_bytes();
     if bytes.len() < 7 || !bytes[..7].eq_ignore_ascii_case(b"file://") {
-        return None;
+        return FileUriClass::NotFile;
     }
     let rest = &uri[7..];
     let (authority, encoded_path) = match rest.find('/') {
@@ -700,21 +718,33 @@ fn file_uri_to_path(uri: &str) -> Option<PathBuf> {
         Some(slash) => (&rest[..slash], &rest[slash..]),
         None => (rest, ""),
     };
+    // A non-empty, non-localhost authority is a UNC / remote host: deny it here, before
+    // building `\\host\...` or probing it.
+    if !authority.is_empty() && !authority.eq_ignore_ascii_case("localhost") {
+        return FileUriClass::NonLocalAuthority;
+    }
     let decoded = percent_decode(encoded_path);
-    if authority.is_empty() || authority.eq_ignore_ascii_case("localhost") {
+    let decoded_bytes = decoded.as_bytes();
+    if decoded_bytes.len() >= 3
+        && decoded_bytes[0] == b'/'
+        && decoded_bytes[1].is_ascii_alphabetic()
+        && decoded_bytes[2] == b':'
+    {
         // "/c:/dir" (or "/c%3A/dir") spells a Windows drive path behind a leading slash.
-        let bytes = decoded.as_bytes();
-        if bytes.len() >= 3
-            && bytes[0] == b'/'
-            && bytes[1].is_ascii_alphabetic()
-            && bytes[2] == b':'
-        {
-            return Some(PathBuf::from(&decoded[1..]));
-        }
-        Some(PathBuf::from(decoded))
-    } else {
-        // "file://server/share/..." names a UNC path.
-        Some(PathBuf::from(format!("\\\\{authority}{decoded}")))
+        return FileUriClass::Local(PathBuf::from(&decoded[1..]));
+    }
+    FileUriClass::Local(PathBuf::from(decoded))
+}
+
+/// The local filesystem path a `file:` URI names, or `None` for a non-file URI OR a denied
+/// non-local (`file://host/...`) authority. Test-only convenience over [`classify_file_uri`];
+/// production boundary checks use `classify_file_uri` directly so they can distinguish "not
+/// a file" from "denied file authority".
+#[cfg(test)]
+fn file_uri_to_path(uri: &str) -> Option<PathBuf> {
+    match classify_file_uri(uri) {
+        FileUriClass::Local(path) => Some(path),
+        _ => None,
     }
 }
 
@@ -995,6 +1025,31 @@ mod tests {
         assert_eq!(percent_decode("%41%42"), "AB".to_string());
         // A percent escape decoding to bytes that form a multibyte char round-trips.
         assert_eq!(percent_decode("%C3%A9"), "\u{00e9}".to_string());
+    }
+
+    #[test]
+    fn non_local_file_authorities_are_denied_without_probing() {
+        let (allowlist, _, _) = boundary_fixture();
+        // A `file://host/share/...` (UNC / remote authority) is refused in BOTH directions
+        // and never converted to `\\host\...` or filesystem-probed, which on Windows would
+        // trigger SMB access and leak NTLM credentials to the server-controlled host.
+        let unc = "file://evil-host/share/secret";
+        assert!(matches!(
+            classify_file_uri(unc),
+            FileUriClass::NonLocalAuthority
+        ));
+        assert!(!uri_allowed(unc, &allowlist)); // server -> client: refused
+        assert!(!client_uri_allowed(unc, &allowlist)); // client -> server: refused
+        assert_eq!(file_uri_to_path(unc), None); // yields no local path (never probed)
+                                                 // Empty and localhost authorities remain local.
+        assert!(matches!(
+            classify_file_uri("file:///home/x"),
+            FileUriClass::Local(_)
+        ));
+        assert!(matches!(
+            classify_file_uri("file://localhost/home/x"),
+            FileUriClass::Local(_)
+        ));
     }
 
     #[test]
