@@ -19,8 +19,10 @@ user-centered Jobs page.
   degrades silently to the built-in in-file IntelliSense. The proxy is a URI-validating
   gateway, never a dumb pipe (ADR-0102 D-G): every file URI in every frame, both directions,
   must resolve inside an allowlisted workspace root (out-of-root client frames are refused;
-  out-of-root locations, edits, watch registrations, and showDocument targets from the
-  server are filtered or dropped), and command-bearing LSP methods are denied by default
+  out-of-root locations and watch registrations from the server are filtered out; an
+  `applyEdit` naming any out-of-root target is rejected whole with `applied: false`, never
+  partially applied; an out-of-root or non-file showDocument is refused), and
+  command-bearing LSP methods are denied by default
   (`workspace/executeCommand` refused, command payloads stripped from code actions and
   code lenses). Every server spawn and denial is audit-logged on the host console.
 

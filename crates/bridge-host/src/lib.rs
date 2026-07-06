@@ -1285,25 +1285,37 @@ fn pump_lsp(
     let host = Arc::clone(host);
     tokio::task::spawn_blocking(move || {
         while let Ok(message) = inbound.recv() {
-            // ADR-0102 D-G, server-to-client direction: locations / applyEdit targets /
-            // watch registrations are filtered to allowlisted roots, command payloads are
-            // stripped, and an out-of-root showDocument or notification is dropped. The
+            // ADR-0102 D-G, server-to-client direction: locations / watch registrations
+            // are filtered to allowlisted roots, command payloads are stripped, an
+            // out-of-root notification is dropped, and a denied server request (an
+            // out-of-root applyEdit or showDocument) is answered back to the server
+            // (applied/success: false) rather than forwarded or left hanging. The
             // allowlist is re-read per frame so a root removal takes effect immediately.
             let allowlist = honeyhub_bridge::WorkspaceAllowlist::new(
                 host.runtime.blocking_lock().workspace_roots(),
             );
-            let Some(message) = honeyhub_bridge::lsp::filter_server_message(message, &allowlist)
-            else {
-                eprintln!("[lsp] dropped out-of-root server frame ({language_id} in {root})");
-                continue;
-            };
-            let _ = host.events.send(BridgeEvent::lsp_message(
-                new_id(),
-                now_rfc3339(),
-                root.clone(),
-                language_id.clone(),
-                message,
-            ));
+            match honeyhub_bridge::lsp::filter_server_message(message, &allowlist) {
+                honeyhub_bridge::lsp::ServerFrameAction::Forward(message) => {
+                    let _ = host.events.send(BridgeEvent::lsp_message(
+                        new_id(),
+                        now_rfc3339(),
+                        root.clone(),
+                        language_id.clone(),
+                        message,
+                    ));
+                }
+                honeyhub_bridge::lsp::ServerFrameAction::Drop => {
+                    eprintln!("[lsp] dropped out-of-root server frame ({language_id} in {root})");
+                }
+                honeyhub_bridge::lsp::ServerFrameAction::Reply(reply) => {
+                    eprintln!(
+                        "[lsp] denied server request, replying refusal ({language_id} in {root})"
+                    );
+                    if let Some(server) = host.active_lsp.blocking_lock().get_mut(&key) {
+                        let _ = server.write_message(&reply);
+                    }
+                }
+            }
         }
         // The channel disconnected => the server's stdout hit EOF => it exited. Retire it (a
         // no-op if `LspStop`/root-removal already removed it) and signal the fallback.

@@ -397,16 +397,44 @@ pub fn validate_client_message(
     }
 }
 
-/// Filter a server-to-client LSP frame to the workspace allowlist (ADR-0102 D-G). Returns
-/// the (possibly scrubbed) frame to forward, or `None` when the frame must be dropped:
-/// out-of-root array entries (locations, document edits, watch registrations) are removed;
-/// command payloads are stripped; a response left naming an out-of-root target gets a null
-/// `result` (dropping a response outright would hang the client's request); a request or
-/// notification left naming one is dropped whole.
-pub fn filter_server_message(mut message: Value, allowlist: &WorkspaceAllowlist) -> Option<Value> {
+/// What the host does with one server-to-client frame after boundary filtering.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ServerFrameAction {
+    /// Forward the (possibly scrubbed) frame to the cockpit.
+    Forward(Value),
+    /// Drop the frame entirely (an out-of-root notification).
+    Drop,
+    /// Do not forward; write this synthesized response back to the **server** instead. A
+    /// denied server-initiated request must still be answered or the server hangs on it.
+    Reply(Value),
+}
+
+/// Filter a server-to-client LSP frame to the workspace allowlist (ADR-0102 D-G):
+///
+/// - out-of-root array entries (locations, watch registrations, code actions whose edit
+///   names an out-of-root file) are removed and command payloads stripped;
+/// - `workspace/applyEdit` is **atomic**: a request whose edit names ANY out-of-root
+///   target is rejected whole with a synthesized `applied: false` reply to the server,
+///   never partially applied;
+/// - a denied `window/showDocument` gets a `success: false` reply (non-file and
+///   out-of-root targets are never auto-opened);
+/// - a response left naming an out-of-root target gets a null `result` (dropping a
+///   response outright would hang the client's request);
+/// - any other denied request is answered with a JSON-RPC error; a denied notification
+///   is dropped.
+pub fn filter_server_message(
+    mut message: Value,
+    allowlist: &WorkspaceAllowlist,
+) -> ServerFrameAction {
+    let method = message
+        .get("method")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let id = message.get("id").cloned();
+
     // window/showDocument can steer the editor (or a browser) anywhere; only an in-root
     // file target may pass. External (http/https) targets are never auto-opened.
-    if message.get("method").and_then(Value::as_str) == Some("window/showDocument") {
+    if method.as_deref() == Some("window/showDocument") {
         let target = message
             .get("params")
             .and_then(|params| params.get("uri"))
@@ -415,20 +443,55 @@ pub fn filter_server_message(mut message: Value, allowlist: &WorkspaceAllowlist)
             file_uri_to_path(uri).is_some_and(|path| path_allowed(&path, allowlist))
         });
         if !allowed {
-            return None;
+            return match id {
+                Some(id) => ServerFrameAction::Reply(serde_json::json!({
+                    "jsonrpc": "2.0", "id": id, "result": { "success": false }
+                })),
+                None => ServerFrameAction::Drop,
+            };
         }
     }
-    if scrub(&mut message, allowlist) {
-        return Some(message);
+
+    // workspace/applyEdit is an all-or-nothing protocol contract: reject the whole
+    // request when any target is out-of-root (ADR-0102 D-G), never apply a subset.
+    if method.as_deref() == Some("workspace/applyEdit")
+        && message
+            .get("params")
+            .is_some_and(|params| first_denied_uri(params, allowlist).is_some())
+    {
+        return match id {
+            Some(id) => ServerFrameAction::Reply(serde_json::json!({
+                "jsonrpc": "2.0", "id": id, "result": {
+                    "applied": false,
+                    "failureReason": "HoneyHub rejected the edit: a target lies outside \
+                                      every allowlisted workspace root (ADR-0102 D-G)"
+                }
+            })),
+            None => ServerFrameAction::Drop,
+        };
     }
-    let is_response = message.get("id").is_some() && message.get("method").is_none();
+
+    if scrub(&mut message, allowlist) {
+        return ServerFrameAction::Forward(message);
+    }
+    let is_response = id.is_some() && method.is_none();
     if is_response {
         if let Value::Object(map) = &mut message {
             map.insert("result".to_string(), Value::Null);
         }
-        return Some(message);
+        return ServerFrameAction::Forward(message);
     }
-    None
+    match id {
+        // A denied server request other than the shapes above still gets an answer so the
+        // server never hangs on it.
+        Some(id) => ServerFrameAction::Reply(serde_json::json!({
+            "jsonrpc": "2.0", "id": id, "error": {
+                "code": -32600,
+                "message": "denied by the HoneyHub LSP URI boundary (ADR-0102 D-G)"
+            }
+        })),
+        None => ServerFrameAction::Drop,
+    }
 }
 
 /// Depth-first search for the first URI (or `rootPath`) that resolves outside every
@@ -438,6 +501,16 @@ fn first_denied_uri<'a>(value: &'a Value, allowlist: &WorkspaceAllowlist) -> Opt
     match value {
         Value::Object(map) => {
             for (key, child) in map {
+                // WorkspaceEdit.changes is a map KEYED by document URI.
+                if key == "changes" {
+                    if let Value::Object(changes) = child {
+                        for uri in changes.keys() {
+                            if !uri_allowed(uri, allowlist) {
+                                return Some(uri);
+                            }
+                        }
+                    }
+                }
                 if let Some(text) = child.as_str() {
                     if URI_KEYS.contains(&key.as_str()) && !uri_allowed(text, allowlist) {
                         return Some(text);
@@ -484,11 +557,24 @@ fn scrub(value: &mut Value, allowlist: &WorkspaceAllowlist) -> bool {
             }
             let mut clean = true;
             for (key, child) in map.iter_mut() {
-                // WorkspaceEdit.changes is a map keyed by document URI; its values are
-                // TextEdit lists (no URIs), so filtering the keys settles the entry.
+                // A WorkspaceEdit (under an `edit` key, e.g. inside a code action) is an
+                // all-or-nothing protocol contract: it is never internally filtered. Any
+                // out-of-root target marks the WHOLE containing object dirty, so a bad
+                // code action drops from its array whole and a bad applyEdit rejects
+                // whole (see filter_server_message), never applies a subset.
+                if key == "edit" {
+                    if first_denied_uri(child, allowlist).is_some() {
+                        clean = false;
+                    }
+                    continue;
+                }
+                // WorkspaceEdit.changes at this level (a map keyed by document URI): the
+                // same atomicity rule, an out-of-root key dirties the container.
                 if key == "changes" {
                     if let Value::Object(changes) = child {
-                        changes.retain(|uri, _| uri_allowed(uri, allowlist));
+                        if changes.keys().any(|uri| !uri_allowed(uri, allowlist)) {
+                            clean = false;
+                        }
                         continue;
                     }
                 }
@@ -879,7 +965,10 @@ mod tests {
                 { "uri": outside, "range": {} }
             ]
         });
-        let filtered = filter_server_message(response, &allowlist).expect("forwarded");
+        let ServerFrameAction::Forward(filtered) = filter_server_message(response, &allowlist)
+        else {
+            panic!("expected Forward");
+        };
         let result = filtered
             .get("result")
             .and_then(Value::as_array)
@@ -900,7 +989,10 @@ mod tests {
             "jsonrpc": "2.0", "id": 4,
             "result": { "uri": outside, "range": {} }
         });
-        let filtered = filter_server_message(response, &allowlist).expect("forwarded");
+        let ServerFrameAction::Forward(filtered) = filter_server_message(response, &allowlist)
+        else {
+            panic!("expected Forward");
+        };
         assert!(filtered.get("result").expect("result").is_null());
     }
 
@@ -911,24 +1003,37 @@ mod tests {
             "jsonrpc": "2.0", "method": "textDocument/publishDiagnostics",
             "params": { "uri": outside, "diagnostics": [] }
         });
-        assert!(filter_server_message(diagnostics, &allowlist).is_none());
+        assert_eq!(
+            filter_server_message(diagnostics, &allowlist),
+            ServerFrameAction::Drop
+        );
 
-        // showDocument: out-of-root and non-file (external) targets never auto-open.
+        // showDocument: out-of-root and non-file (external) targets never auto-open; the
+        // server request is answered success: false rather than left hanging.
         let external = serde_json::json!({
             "jsonrpc": "2.0", "id": 9, "method": "window/showDocument",
             "params": { "uri": "https://example.com/docs" }
         });
-        assert!(filter_server_message(external, &allowlist).is_none());
+        let ServerFrameAction::Reply(reply) = filter_server_message(external, &allowlist) else {
+            panic!("expected Reply");
+        };
+        assert_eq!(reply.pointer("/result/success"), Some(&Value::Bool(false)));
+        assert_eq!(reply.get("id"), Some(&serde_json::json!(9)));
         let in_root = serde_json::json!({
             "jsonrpc": "2.0", "id": 10, "method": "window/showDocument",
             "params": { "uri": inside }
         });
-        assert!(filter_server_message(in_root, &allowlist).is_some());
+        assert!(matches!(
+            filter_server_message(in_root, &allowlist),
+            ServerFrameAction::Forward(_)
+        ));
     }
 
     #[test]
-    fn apply_edit_changes_maps_are_filtered_by_document_uri() {
+    fn apply_edit_is_atomic_rejected_whole_when_any_target_is_out_of_root() {
         let (allowlist, inside, outside) = boundary_fixture();
+        // A WorkspaceEdit is all-or-nothing: one out-of-root target rejects the WHOLE
+        // request with applied: false back to the server, never a partial application.
         let request = serde_json::json!({
             "jsonrpc": "2.0", "id": 5, "method": "workspace/applyEdit",
             "params": { "edit": { "changes": {
@@ -936,13 +1041,53 @@ mod tests {
                 (outside.clone()): [ { "newText": "y", "range": {} } ]
             } } }
         });
-        let filtered = filter_server_message(request, &allowlist).expect("forwarded");
-        let changes = filtered
+        let ServerFrameAction::Reply(reply) = filter_server_message(request, &allowlist) else {
+            panic!("expected Reply");
+        };
+        assert_eq!(reply.pointer("/result/applied"), Some(&Value::Bool(false)));
+        assert!(reply.pointer("/result/failureReason").is_some());
+        assert_eq!(reply.get("id"), Some(&serde_json::json!(5)));
+
+        // An edit naming only in-root targets forwards intact.
+        let clean = serde_json::json!({
+            "jsonrpc": "2.0", "id": 6, "method": "workspace/applyEdit",
+            "params": { "edit": { "changes": {
+                (inside.clone()): [ { "newText": "x", "range": {} } ]
+            } } }
+        });
+        let ServerFrameAction::Forward(forwarded) = filter_server_message(clean, &allowlist) else {
+            panic!("expected Forward");
+        };
+        let changes = forwarded
             .pointer("/params/edit/changes")
             .and_then(Value::as_object)
             .expect("changes map");
         assert!(changes.contains_key(&inside));
-        assert!(!changes.contains_key(&outside));
+    }
+
+    #[test]
+    fn a_code_action_with_an_out_of_root_edit_drops_whole_from_its_array() {
+        let (allowlist, inside, outside) = boundary_fixture();
+        // Each code action edit is atomic too: an action whose edit reaches out-of-root
+        // drops WHOLE from the result list (never internally filtered), while its
+        // in-root siblings survive.
+        let response = serde_json::json!({
+            "jsonrpc": "2.0", "id": 11,
+            "result": [
+                { "title": "safe", "edit": { "changes": { (inside.clone()): [] } } },
+                { "title": "unsafe", "edit": { "changes": { (outside.clone()): [] } } }
+            ]
+        });
+        let ServerFrameAction::Forward(filtered) = filter_server_message(response, &allowlist)
+        else {
+            panic!("expected Forward");
+        };
+        let result = filtered
+            .get("result")
+            .and_then(Value::as_array)
+            .expect("array");
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].get("title").and_then(Value::as_str), Some("safe"));
     }
 
     #[test]
@@ -971,7 +1116,10 @@ mod tests {
                 { "title": "run it", "command": "server.run" }
             ]
         });
-        let filtered = filter_server_message(response, &allowlist).expect("forwarded");
+        let ServerFrameAction::Forward(filtered) = filter_server_message(response, &allowlist)
+        else {
+            panic!("expected Forward");
+        };
         let result = filtered
             .get("result")
             .and_then(Value::as_array)
