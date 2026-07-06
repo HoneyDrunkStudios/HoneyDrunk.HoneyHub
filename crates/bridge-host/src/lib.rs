@@ -92,11 +92,29 @@ struct LspState {
     /// cockpit's initialize is forwarded and cleared when its result returns. LSP allows
     /// exactly one `initialize` per server, so a shared server must be initialized once.
     pending_init: HashMap<LspKey, serde_json::Value>,
-    /// The cached `InitializeResult` for a running server. A second cockpit's `initialize`
+    /// Request ids of later cockpits whose `initialize` arrived while the first was still
+    /// in flight (not yet cached). They are NOT forwarded (that would double-initialize the
+    /// shared server); instead they are coalesced here and answered the moment the first
+    /// initialize result caches.
+    init_waiters: HashMap<LspKey, Vec<serde_json::Value>>,
+    /// The cached `InitializeResult` for a running server. A later cockpit's `initialize`
     /// is answered from this (host-owned initialization) rather than forwarded, so the
-    /// shared server never sees a duplicate initialize and the second cockpit still gets
+    /// shared server never sees a duplicate initialize and the later cockpit still gets
     /// the real capabilities.
     init_results: HashMap<LspKey, serde_json::Value>,
+}
+
+/// What the host does with a client `initialize` (host-owned initialization: exactly one
+/// initialize reaches a shared server).
+#[derive(Debug, PartialEq, Eq)]
+enum InitDecision {
+    /// The first initialize: forward it to the server (its id is now recorded as pending).
+    Forward,
+    /// Answer this caller from the cached `InitializeResult` (carried), do not forward.
+    ReplyCached(serde_json::Value),
+    /// A first initialize is still in flight: this caller is coalesced (queued if it had an
+    /// id) and will be answered when the result caches; do not forward.
+    Coalesced,
 }
 
 impl LspState {
@@ -104,8 +122,33 @@ impl LspState {
     /// a later restart re-initializes cleanly).
     fn take_server(&mut self, key: &LspKey) -> Option<honeyhub_bridge::LspServer> {
         self.pending_init.remove(key);
+        self.init_waiters.remove(key);
         self.init_results.remove(key);
         self.servers.remove(key)
+    }
+
+    /// Decide what to do with a client `initialize` for `key`, recording pending/waiter
+    /// state as a side effect. Guarantees exactly one initialize is forwarded to a shared
+    /// server: the first forwards; one arriving while that is in flight is coalesced; one
+    /// arriving after the result caches is answered from the cache.
+    fn on_initialize(
+        &mut self,
+        key: &LspKey,
+        request_id: Option<serde_json::Value>,
+    ) -> InitDecision {
+        if let Some(cached) = self.init_results.get(key) {
+            return InitDecision::ReplyCached(cached.clone());
+        }
+        if self.pending_init.contains_key(key) {
+            if let Some(id) = request_id {
+                self.init_waiters.entry(key.clone()).or_default().push(id);
+            }
+            return InitDecision::Coalesced;
+        }
+        if let Some(id) = request_id {
+            self.pending_init.insert(key.clone(), id);
+        }
+        InitDecision::Forward
     }
 }
 
@@ -477,6 +520,7 @@ async fn handle_socket(socket: WebSocket, host: Arc<Host>) {
         let orphans: Vec<honeyhub_bridge::LspServer> = {
             let mut state = host.active_lsp.lock().await;
             state.pending_init.clear();
+            state.init_waiters.clear();
             state.init_results.clear();
             state.servers.drain().map(|(_, server)| server).collect()
         };
@@ -1244,31 +1288,24 @@ async fn handle_lsp_command(
                 );
                 return Err(error);
             }
-            // Host-owned initialization (LSP allows exactly one initialize per server):
-            // the FIRST cockpit's initialize is forwarded and its id remembered; a later
-            // cockpit's initialize is answered from the cached InitializeResult and NOT
-            // forwarded, so the shared server never sees a duplicate initialize.
+            // Host-owned initialization (LSP allows exactly one initialize per server): the
+            // first forwards, one arriving while it is in flight is coalesced, one after the
+            // result caches is answered from the cache. Never a duplicate to the server.
             if message.get("method").and_then(|m| m.as_str()) == Some("initialize") {
                 let request_id = message.get("id").filter(|id| !id.is_null()).cloned();
-                if let Some(cached) = state.init_results.get(&key).cloned() {
-                    if let Some(id) = request_id {
-                        let response =
-                            serde_json::json!({ "jsonrpc": "2.0", "id": id, "result": cached });
-                        return Ok(Some(vec![BridgeEvent::lsp_message(
-                            new_id(),
-                            now_rfc3339(),
-                            root.clone(),
-                            language_id.clone(),
-                            response,
-                        )]));
-                    }
-                    return Ok(None);
-                }
-                // First initialize (none cached, none in flight): remember its id so the
-                // pump can cache the result when it returns, then forward it below.
-                if !state.pending_init.contains_key(&key) {
-                    if let Some(id) = request_id {
-                        state.pending_init.insert(key.clone(), id);
+                match state.on_initialize(&key, request_id.clone()) {
+                    InitDecision::Forward => {} // fall through to write it to the server
+                    InitDecision::Coalesced => return Ok(None),
+                    InitDecision::ReplyCached(cached) => {
+                        return Ok(request_id.map(|id| {
+                            vec![BridgeEvent::lsp_message(
+                                new_id(),
+                                now_rfc3339(),
+                                root.clone(),
+                                language_id.clone(),
+                                serde_json::json!({ "jsonrpc": "2.0", "id": id, "result": cached }),
+                            )]
+                        }));
                     }
                 }
             }
@@ -1491,12 +1528,25 @@ fn pump_lsp(
                 continue;
             }
             // Cache the InitializeResult when the FIRST cockpit's initialize response
-            // returns (host-owned initialization), so a later cockpit's initialize is
-            // answered from it instead of forwarding a duplicate to the shared server.
+            // returns (host-owned initialization), then answer every cockpit coalesced
+            // while it was in flight, so none forwarded a duplicate and all get the real
+            // capabilities.
             let is_response = message.get("id").is_some() && message.get("method").is_none();
             if is_response && state.pending_init.get(&key) == message.get("id") {
-                if let Some(result) = message.get("result") {
+                if let Some(result) = message.get("result").cloned() {
                     state.init_results.insert(key.clone(), result.clone());
+                    for waiter_id in state.init_waiters.remove(&key).unwrap_or_default() {
+                        let response = serde_json::json!({
+                            "jsonrpc": "2.0", "id": waiter_id, "result": result
+                        });
+                        let _ = host.events.send(BridgeEvent::lsp_message(
+                            new_id(),
+                            now_rfc3339(),
+                            root.clone(),
+                            language_id.clone(),
+                            response,
+                        ));
+                    }
                 }
                 state.pending_init.remove(&key);
             }
@@ -1817,6 +1867,55 @@ fn git_write_events(root: &str, op: &str, result: Result<String, BridgeError>) -
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn initialize_coalescing_forwards_once_and_answers_the_rest() {
+        // LSP allows exactly one initialize per server. With a server shared across
+        // cockpits: the first initialize forwards; a second arriving WHILE the first is
+        // in flight is coalesced (queued, not forwarded); once the result caches, a later
+        // initialize is answered from the cache.
+        let mut state = LspState::default();
+        let key = LspKey::new(&std::env::temp_dir().to_string_lossy(), "typescript");
+        let id_a = serde_json::json!("a-0");
+        let id_b = serde_json::json!("b-0");
+        let id_c = serde_json::json!("c-0");
+
+        // First cockpit: forwarded, its id recorded as the pending initialize.
+        assert_eq!(
+            state.on_initialize(&key, Some(id_a.clone())),
+            InitDecision::Forward
+        );
+        assert_eq!(state.pending_init.get(&key), Some(&id_a));
+
+        // Second cockpit while the first is still in flight: coalesced, queued as a waiter,
+        // NOT forwarded.
+        assert_eq!(
+            state.on_initialize(&key, Some(id_b.clone())),
+            InitDecision::Coalesced
+        );
+        assert_eq!(
+            state.init_waiters.get(&key).map(Vec::as_slice),
+            Some(&[id_b][..])
+        );
+
+        // The first result caches (as the pump does on the initialize response).
+        let result = serde_json::json!({ "capabilities": { "hoverProvider": true } });
+        state.init_results.insert(key.clone(), result.clone());
+
+        // A later cockpit is now answered from the cache, not forwarded.
+        assert_eq!(
+            state.on_initialize(&key, Some(id_c)),
+            InitDecision::ReplyCached(result)
+        );
+
+        // Retiring the server clears all initialize tracking, so a restart re-initializes.
+        state.servers.clear();
+        state.take_server(&key);
+        assert!(state.pending_init.is_empty());
+        assert!(state.init_waiters.is_empty());
+        assert!(state.init_results.is_empty());
+        assert_eq!(state.on_initialize(&key, Some(id_a)), InitDecision::Forward);
+    }
 
     /// Best-effort symlink creation. On Windows, creating a symlink needs a privilege (or
     /// Developer Mode); when that is unavailable this returns `false` so the caller can skip the
