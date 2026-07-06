@@ -87,4 +87,27 @@ describe("createBridgeLspConnection", () => {
     await expect(pending).rejects.toThrow("disposed");
     await expect(connection.sendRequest("hover")).rejects.toThrow("disposed");
   });
+
+  it("fails a request fast when the transport refuses the send", async () => {
+    // A bridge denial (lsp_uri_denied / lsp_method_denied / backpressure / not running)
+    // rejects the lspSend promise; the pending request must reject instead of hanging on
+    // a response that will never come.
+    let handler: ((message: unknown) => void) | undefined;
+    const refusing: LspTransport = {
+      send: () => Promise.reject(new Error("lsp_backpressure: frame dropped")),
+      onMessage: (h) => {
+        handler = h;
+        return () => {
+          handler = undefined;
+        };
+      }
+    };
+    const connection = createBridgeLspConnection(refusing);
+    await expect(connection.sendRequest("textDocument/hover")).rejects.toThrow("lsp_backpressure");
+    // A late response for that id (there will never be one, but defensively) is ignored.
+    handler?.({ jsonrpc: "2.0", id: 1, result: {} });
+
+    // Notifications stay fire-and-forget: a refused send must not throw or reject.
+    expect(() => connection.sendNotification("textDocument/didChange", {})).not.toThrow();
+  });
 });

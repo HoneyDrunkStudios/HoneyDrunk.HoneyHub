@@ -1281,6 +1281,26 @@ fn spawn_lsp(host: &Arc<Host>, root: String, language_id: String) {
                 ));
                 return;
             }
+            // Re-check the client count under the SAME active_lsp lock the disconnect
+            // teardown drains under: if the last cockpit vanished during the async
+            // locate/spawn, registering now would let the server outlive every client
+            // (the teardown that already ran would never see it).
+            if host
+                .connected_clients
+                .load(std::sync::atomic::Ordering::SeqCst)
+                == 0
+            {
+                drop(servers);
+                drop(runtime);
+                tokio::task::spawn_blocking(move || drop(server));
+                let _ = host.events.send(status(
+                    true,
+                    false,
+                    spec.server_id,
+                    "cockpit disconnected before the language server registered",
+                ));
+                return;
+            }
             if servers.contains_key(&key) {
                 drop(servers);
                 drop(runtime);

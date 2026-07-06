@@ -130,7 +130,10 @@ const CLIENT_CAPABILITIES = {
 function wireLspTransport(client: WireClient, root: string, languageId: string): LspTransport {
   return {
     send(message) {
-      void client.lspSend(root, languageId, message).catch(() => undefined);
+      // Propagate failure: the connection fails a pending request fast when the bridge
+      // refuses a frame (URI/method denial, backpressure, no running server) instead of
+      // leaving it hanging on a response that will never come.
+      return client.lspSend(root, languageId, message);
     },
     onMessage(handler) {
       return client.subscribe((event: BridgeEvent) => {

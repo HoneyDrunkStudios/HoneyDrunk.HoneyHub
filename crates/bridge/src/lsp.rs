@@ -604,19 +604,22 @@ fn scrub(value: &mut Value, allowlist: &WorkspaceAllowlist) -> bool {
             }
             let mut clean = true;
             for (key, child) in map.iter_mut() {
-                // A WorkspaceEdit (under an `edit` key, e.g. inside a code action) is an
-                // all-or-nothing protocol contract: it is never internally filtered. Any
-                // out-of-root target marks the WHOLE containing object dirty, so a bad
-                // code action drops from its array whole and a bad applyEdit rejects
-                // whole (see filter_server_message), never applies a subset.
-                if key == "edit" {
+                // A WorkspaceEdit is an all-or-nothing protocol contract, so its three
+                // spellings are never internally filtered: any out-of-root target marks
+                // the WHOLE containing object dirty. A bad code action then drops from
+                // its array whole, and a bad rename response nulls whole (see
+                // filter_server_message), never applying a subset that would leave the
+                // editor and the server disagreeing about the workspace.
+                //   - `edit`: a WorkspaceEdit nested in a code action;
+                //   - `changes`: the map-keyed-by-URI spelling;
+                //   - `documentChanges`: the ordered array spelling (TextDocumentEdits
+                //     plus create/rename/delete file operations).
+                if key == "edit" || key == "documentChanges" {
                     if first_denied_uri(child, allowlist).is_some() {
                         clean = false;
                     }
                     continue;
                 }
-                // WorkspaceEdit.changes at this level (a map keyed by document URI): the
-                // same atomicity rule, an out-of-root key dirties the container.
                 if key == "changes" {
                     if let Value::Object(changes) = child {
                         if changes.keys().any(|uri| !uri_allowed(uri, allowlist)) {
@@ -1161,6 +1164,47 @@ mod tests {
             panic!("expected Forward");
         };
         assert!(filtered.get("result").expect("result").is_null());
+    }
+
+    #[test]
+    fn a_document_changes_edit_is_atomic_never_partially_filtered() {
+        let (allowlist, inside, outside) = boundary_fixture();
+        // The documentChanges spelling of a WorkspaceEdit (ordered TextDocumentEdits) is
+        // the same all-or-nothing contract: one out-of-root target nulls the WHOLE rename
+        // response; the in-root subset must never survive on its own (a partial edit set
+        // would leave the editor and the server disagreeing about the workspace).
+        let dirty = serde_json::json!({
+            "jsonrpc": "2.0", "id": 8,
+            "result": { "documentChanges": [
+                { "textDocument": { "uri": inside, "version": 3 },
+                  "edits": [ { "newText": "x", "range": {} } ] },
+                { "textDocument": { "uri": outside, "version": 1 },
+                  "edits": [ { "newText": "y", "range": {} } ] }
+            ] }
+        });
+        let ServerFrameAction::Forward(filtered) = filter_server_message(dirty, &allowlist) else {
+            panic!("expected Forward");
+        };
+        assert!(filtered.get("result").expect("result").is_null());
+
+        // A fully in-root documentChanges edit forwards intact, both entries preserved.
+        let clean = serde_json::json!({
+            "jsonrpc": "2.0", "id": 9,
+            "result": { "documentChanges": [
+                { "textDocument": { "uri": inside.clone(), "version": 3 },
+                  "edits": [ { "newText": "x", "range": {} } ] },
+                { "textDocument": { "uri": inside, "version": 3 },
+                  "edits": [ { "newText": "z", "range": {} } ] }
+            ] }
+        });
+        let ServerFrameAction::Forward(forwarded) = filter_server_message(clean, &allowlist) else {
+            panic!("expected Forward");
+        };
+        let entries = forwarded
+            .pointer("/result/documentChanges")
+            .and_then(Value::as_array)
+            .expect("documentChanges");
+        assert_eq!(entries.len(), 2);
     }
 
     #[test]

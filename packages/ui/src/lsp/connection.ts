@@ -10,9 +10,12 @@
 
 /** The message pipe the connection rides on. `send` frames one JSON-RPC message toward the
     server (the bridge writes it to stdin); `onMessage` delivers the server's messages back.
-    Abstracted so the connection is testable without a real bridge WebSocket. */
+    Abstracted so the connection is testable without a real bridge WebSocket. `send` may
+    return a promise: a rejection means the bridge REFUSED the frame (URI/method denial,
+    backpressure, no running server), and a pending request must fail fast instead of
+    hanging on a response that will never come. */
 export interface LspTransport {
-  send(message: unknown): void;
+  send(message: unknown): void | Promise<void>;
   /** Register an inbound-message handler; returns an unsubscribe function. */
   onMessage(handler: (message: unknown) => void): () => void;
 }
@@ -91,11 +94,14 @@ export function createBridgeLspConnection(transport: LspTransport): BridgeLspCon
       const id = message.id as JsonRpcId;
       const method = message.method as string;
       const respond = (result: unknown, error?: JsonRpcError): void => {
-        transport.send(
-          error === undefined
-            ? { jsonrpc: "2.0", id, result: result ?? null }
-            : { jsonrpc: "2.0", id, error }
-        );
+        // A refused response is unrecoverable from here; the bridge audit-logs it.
+        void Promise.resolve(
+          transport.send(
+            error === undefined
+              ? { jsonrpc: "2.0", id, result: result ?? null }
+              : { jsonrpc: "2.0", id, error }
+          )
+        ).catch(() => undefined);
       };
       const handler = requestHandlers.get(method);
       if (handler === undefined) {
@@ -128,22 +134,33 @@ export function createBridgeLspConnection(transport: LspTransport): BridgeLspCon
       nextRequestId += 1;
       return new Promise<R>((resolve, reject) => {
         pending.set(id, { resolve: resolve as (value: unknown) => void, reject });
-        transport.send(
-          params === undefined
-            ? { jsonrpc: "2.0", id, method }
-            : { jsonrpc: "2.0", id, method, params }
-        );
+        // A refused send (bridge denial, backpressure, dead socket) means no response
+        // will ever arrive: fail the request now instead of leaving it pending forever.
+        void Promise.resolve(
+          transport.send(
+            params === undefined
+              ? { jsonrpc: "2.0", id, method }
+              : { jsonrpc: "2.0", id, method, params }
+          )
+        ).catch((cause: unknown) => {
+          if (pending.delete(id)) {
+            reject(cause instanceof Error ? cause : new Error(String(cause)));
+          }
+        });
       });
     },
     sendNotification(method: string, params?: unknown): void {
       if (disposed) {
         return;
       }
-      transport.send(
-        params === undefined
-          ? { jsonrpc: "2.0", method }
-          : { jsonrpc: "2.0", method, params }
-      );
+      // Notifications are fire-and-forget by protocol; a refusal is logged bridge-side.
+      void Promise.resolve(
+        transport.send(
+          params === undefined
+            ? { jsonrpc: "2.0", method }
+            : { jsonrpc: "2.0", method, params }
+        )
+      ).catch(() => undefined);
     },
     onNotification(method: string, handler: (params: unknown) => void): void {
       notificationHandlers.set(method, handler);
