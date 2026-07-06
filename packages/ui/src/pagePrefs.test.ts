@@ -1,6 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
-  DEFAULT_HIDDEN_PAGES,
   isPageVisible,
   loadPagePrefs,
   savePagePrefs,
@@ -18,7 +17,6 @@ describe("pagePrefs", () => {
   });
 
   it("has no default-hidden pages (every toggleable page defaults visible)", () => {
-    expect(DEFAULT_HIDDEN_PAGES).toEqual([]);
     for (const page of TOGGLEABLE_PAGES) {
       expect(isPageVisible({}, page.view)).toBe(true);
     }

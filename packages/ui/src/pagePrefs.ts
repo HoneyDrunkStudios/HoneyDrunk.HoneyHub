@@ -5,7 +5,8 @@
 // Alerts) are always on and never listed here. Pure helpers, kept out of components so they're
 // unit-testable. Mirrors the connectors.ts idiom.
 
-/** view-id → visible. Absent id = the default for that page (see DEFAULT_HIDDEN_PAGES). */
+/** view-id → visible. An absent id means the page uses its default, which is visible for
+    every toggleable page (there are no default-hidden pages). */
 export type PagePrefs = Record<string, boolean>;
 
 /** The pages the user may toggle on/off. Order mirrors the primary nav. Excludes core pages
@@ -22,20 +23,12 @@ export const TOGGLEABLE_PAGES: { view: string; label: string }[] = [
   { view: "agents", label: "Agents" }
 ];
 
-/** Pages hidden by default until the operator explicitly re-enables them. None currently — every
-    toggleable page defaults visible. */
-export const DEFAULT_HIDDEN_PAGES: readonly string[] = [];
-
 const STORAGE_KEY = "honeyhub.pagePrefs.v1";
 
-/** A page is visible unless explicitly set false — except default-hidden pages, which are hidden
-    unless explicitly set true. An explicit stored boolean always wins over the default. */
+/** A page is visible unless explicitly set false: every toggleable page defaults visible (there
+    are no default-hidden pages), and an explicit stored boolean always wins over that default. */
 export function isPageVisible(prefs: PagePrefs, view: string): boolean {
-  const explicit = prefs[view];
-  if (explicit !== undefined) {
-    return explicit;
-  }
-  return !DEFAULT_HIDDEN_PAGES.includes(view);
+  return prefs[view] ?? true;
 }
 
 export function loadPagePrefs(): PagePrefs {

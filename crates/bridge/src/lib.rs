@@ -54,9 +54,10 @@ pub use checks::{
 pub use coaching::{coach, CoachingSnapshot};
 pub use core::{BridgeRuntime, ManagedRun, ReplyOutcome};
 pub use dispatch::{
-    audit_dispatch, backend_id, child_cap_from_env, dispatch_backends_from_env, parse_backend,
-    summarize_task, DispatchAdmission, DispatchCaller, DispatchDenial, DispatchDenialReason,
-    DispatchGovernor, DEFAULT_CHILD_CAP, DISPATCH_SERVER_NAME,
+    audit_dispatch, backend_id, child_cap_from_env, dispatch_backends_from_env, is_valid_model_id,
+    max_depth_from_env, parse_backend, summarize_task, DispatchAdmission, DispatchCaller,
+    DispatchDenial, DispatchDenialReason, DispatchGovernor, DEFAULT_CHILD_CAP,
+    DEFAULT_MAX_DISPATCH_DEPTH, DISPATCH_SERVER_NAME, KNOWN_EFFORT_LEVELS,
 };
 pub use environment::{detect_environment, BackendVersion, EnvironmentInfo};
 pub use fsbrowse::{

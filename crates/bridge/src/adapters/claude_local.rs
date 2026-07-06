@@ -88,6 +88,7 @@ impl ClaudeLocalAdapter {
             run_id: run_id.to_string(),
             backend: AgentBackend::ClaudeLocal,
             workspace_root: request.workspace_root.clone(),
+            depth: child_depth(governor, request),
         });
         Some(vec![
             "--mcp-config".to_string(),
@@ -173,6 +174,21 @@ impl ClaudeLocalAdapter {
             }
         }
         command
+    }
+}
+
+/// Derive this run's depth in the dispatch tree from the governor's record of its parent: a
+/// dispatched child sits one below the run that dispatched it (`parent_run_id`), so its depth is
+/// the parent's + 1 (or 1 when the parent minted no token). An operator-started run has no parent
+/// and is depth 0; a follow-up continues its run at that run's depth. Threaded so the governor can
+/// bound recursion (ADR-0098 D2 hardening: a dispatched child can itself dispatch).
+fn child_depth(governor: &DispatchGovernor, request: &StartRunRequest) -> usize {
+    if let Some(parent) = request.parent_run_id.as_deref() {
+        governor.depth_of_run(parent).map_or(1, |depth| depth + 1)
+    } else if let Some(prev) = request.follow_up_to_run_id.as_deref() {
+        governor.depth_of_run(prev).unwrap_or(0)
+    } else {
+        0
     }
 }
 
@@ -945,5 +961,40 @@ mod tests {
         assert_eq!(caller.session_id, "parent-session");
         assert_eq!(caller.backend, AgentBackend::ClaudeLocal);
         assert_eq!(caller.workspace_root, "/work");
+        // An operator-started run (no parent) is depth 0.
+        assert_eq!(caller.depth, 0);
+    }
+
+    #[test]
+    fn dispatched_child_token_carries_parent_depth_plus_one() {
+        let governor = Arc::new(DispatchGovernor::new(
+            "http://127.0.0.1:8765/mcp",
+            vec![AgentBackend::ClaudeLocal],
+            4,
+        ));
+        let adapter = ClaudeLocalAdapter::new("claude", None, test_clock())
+            .with_dispatch(Some(governor.clone()));
+
+        // Mint the parent run's token first: it registers the parent at depth 0.
+        adapter
+            .dispatch_mcp_args("parent-run", &dispatch_request())
+            .expect("the parent run mints a token");
+
+        // A child dispatched by that parent inherits depth = parent + 1 (here, 1).
+        let mut child = dispatch_request();
+        child.parent_run_id = Some("parent-run".to_string());
+        child.session.id = "child-session".to_string();
+        let args = adapter
+            .dispatch_mcp_args("child-run", &child)
+            .expect("the child run mints a token");
+        let config: Value = serde_json::from_str(&args[1]).expect("mcp config is valid json");
+        let token = config["mcpServers"][DISPATCH_SERVER_NAME]["headers"]["Authorization"]
+            .as_str()
+            .and_then(|auth| auth.strip_prefix("Bearer "))
+            .expect("the child bearer token is present");
+        let caller = governor.resolve(token).expect("the child token resolves");
+        assert_eq!(caller.run_id, "child-run");
+        assert_eq!(caller.depth, 1);
+        assert_eq!(governor.depth_of_run("child-run"), Some(1));
     }
 }

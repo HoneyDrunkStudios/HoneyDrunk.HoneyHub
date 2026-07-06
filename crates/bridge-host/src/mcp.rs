@@ -87,7 +87,25 @@ child run id."
     ) -> Result<CallToolResult, ErrorData> {
         // The per-run capability token rides the HTTP Authorization header the bridge
         // injected into this CLI's MCP config; it is how the host attributes the call.
-        let Some(token) = bearer_token(&context) else {
+        // The governance core is extracted so it is unit-testable without a live MCP
+        // request context (see the tests at the foot of this module).
+        self.dispatch_core(bearer_token(&context).as_deref(), request)
+            .await
+    }
+}
+
+impl DispatchAgentServer {
+    /// The host-owned governance + spawn core, independent of the MCP transport so it can be
+    /// driven directly in tests. `token` is the per-run capability token read from the request's
+    /// `Authorization: Bearer` header (`None` when absent). All governance denials come back as
+    /// caller-visible tool results (never a silent drop — ADR-0098 D2); only a missing token is a
+    /// protocol-level error, since it means the endpoint was reached without the injected config.
+    async fn dispatch_core(
+        &self,
+        token: Option<&str>,
+        request: DispatchAgentRequest,
+    ) -> Result<CallToolResult, ErrorData> {
+        let Some(token) = token else {
             return Err(ErrorData::invalid_request(
                 "dispatch_agent requires the bridge per-run capability token in an \
                  Authorization: Bearer header; none was presented",
@@ -95,10 +113,20 @@ child run id."
             ));
         };
 
-        // Host-owned governance: resolve the caller, the backend, the allowlist, and
-        // the per-session cap. A denial is returned to the parent as a tool result
+        // Govern the optional model/effort overrides before reserving anything: an unknown
+        // effort level or a non-model-id-shaped model is refused rather than passed through to
+        // the launched CLI's config overrides (ADR-0098 A — the host governs what a dispatch is).
+        if let Err(denial) = self
+            .governor
+            .validate_overrides(request.model.as_deref(), request.effort.as_deref())
+        {
+            return Ok(denied(&denial));
+        }
+
+        // Host-owned governance: resolve the caller, the backend, the allowlist, the depth cap,
+        // and the per-session cap. A denial is returned to the parent as a tool result
         // (never a silent drop — ADR-0098 D2).
-        let admission = match self.governor.authorize(&token, &request.backend) {
+        let admission = match self.governor.authorize(token, &request.backend) {
             Ok(admission) => admission,
             Err(denial) => return Ok(denied(&denial)),
         };
@@ -231,4 +259,249 @@ pub fn dispatch_service(
         LocalSessionManager::default().into(),
         StreamableHttpServerConfig::default(),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{DispatchAgentRequest, DispatchAgentServer};
+    use crate::Host;
+    use honeyhub_bridge::{
+        AgentBackend, AgentBackendAdapter, BackendAllowlist, BridgeError, BridgeEvent,
+        BridgeRuntime, CapabilityFlags, DispatchCaller, DispatchGovernor, RunHandle,
+        StartRunRequest, WorkspaceAllowlist,
+    };
+    use rmcp::model::CallToolResult;
+    use std::collections::HashSet;
+    use std::sync::{Arc, Mutex as StdMutex};
+    use tokio::sync::{broadcast, Mutex};
+
+    /// A backend adapter that records the runs it is asked to start and hands back a stable
+    /// run id, so the dispatch handler can be exercised end-to-end WITHOUT a real CLI process
+    /// (`claude`/`codex` need not be installed).
+    struct RecordingAdapter {
+        started: Arc<StdMutex<Vec<StartRunRequest>>>,
+    }
+
+    impl AgentBackendAdapter for RecordingAdapter {
+        fn backend(&self) -> AgentBackend {
+            AgentBackend::ClaudeLocal
+        }
+        fn capabilities(&self) -> CapabilityFlags {
+            CapabilityFlags::claude_local()
+        }
+        fn start(&self, request: StartRunRequest) -> Result<RunHandle, BridgeError> {
+            self.started.lock().unwrap().push(request);
+            Ok(RunHandle {
+                run_id: "child-run".to_string(),
+                process_id: Some(4321),
+            })
+        }
+        fn stream(&self, _run_id: &str) -> Result<Vec<BridgeEvent>, BridgeError> {
+            Ok(Vec::new())
+        }
+        fn reply(&self, _run_id: &str, _text: &str) -> Result<(), BridgeError> {
+            Ok(())
+        }
+        fn stop(&self, _run_id: &str) -> Result<(), BridgeError> {
+            Ok(())
+        }
+        fn resume(&self, _session_id_or_transcript: &str) -> Result<RunHandle, BridgeError> {
+            Ok(RunHandle {
+                run_id: "resumed".to_string(),
+                process_id: None,
+            })
+        }
+    }
+
+    /// A governor whose only allowed dispatch backend is Claude, with the given child cap and
+    /// max depth (defaults when omitted via the helpers below).
+    fn governor_with(cap: usize, max_depth: usize) -> Arc<DispatchGovernor> {
+        Arc::new(
+            DispatchGovernor::new(
+                "http://127.0.0.1:8765/mcp",
+                vec![AgentBackend::ClaudeLocal],
+                cap,
+            )
+            .with_max_depth(max_depth),
+        )
+    }
+
+    fn governor() -> Arc<DispatchGovernor> {
+        governor_with(4, 3)
+    }
+
+    /// A capability token for a depth-`depth` parent run in session `parent-session`. The
+    /// workspace root is empty so the child launches in the home dir and skips the allowlist.
+    fn token_at_depth(gov: &DispatchGovernor, depth: usize) -> String {
+        gov.issue_token(DispatchCaller {
+            session_id: "parent-session".to_string(),
+            run_id: "parent-run".to_string(),
+            backend: AgentBackend::ClaudeLocal,
+            workspace_root: String::new(),
+            depth,
+        })
+    }
+
+    /// Build a server over a runtime backed by the recording adapter, returning the server, the
+    /// captured start requests, and the host (for asserting run registration).
+    fn harness(
+        governor: Arc<DispatchGovernor>,
+    ) -> (
+        DispatchAgentServer,
+        Arc<StdMutex<Vec<StartRunRequest>>>,
+        Arc<Host>,
+    ) {
+        let started = Arc::new(StdMutex::new(Vec::new()));
+        let adapter = RecordingAdapter {
+            started: started.clone(),
+        };
+        let runtime = BridgeRuntime::new(
+            adapter,
+            WorkspaceAllowlist::new(Vec::new()),
+            BackendAllowlist::new(vec![AgentBackend::ClaudeLocal, AgentBackend::CodexLocal]),
+        );
+        let (events_tx, _rx) = broadcast::channel(16);
+        let host = Arc::new(Host {
+            runtime: Mutex::new(runtime),
+            active_runs: Mutex::new(HashSet::new()),
+            active_checks: Mutex::new(HashSet::new()),
+            active_probes: Mutex::new(HashSet::new()),
+            events: events_tx,
+            watcher: Mutex::new(None),
+            dispatch: Some(governor.clone()),
+        });
+        let server = DispatchAgentServer::new(host.clone(), governor);
+        (server, started, host)
+    }
+
+    fn request(backend: &str) -> DispatchAgentRequest {
+        DispatchAgentRequest {
+            backend: backend.to_string(),
+            task: "do the thing".to_string(),
+            model: None,
+            effort: None,
+        }
+    }
+
+    fn as_json(result: &CallToolResult) -> String {
+        serde_json::to_string(result).expect("a tool result serializes")
+    }
+
+    #[tokio::test]
+    async fn missing_token_is_a_protocol_error() {
+        let (server, started, _host) = harness(governor());
+        let result = server.dispatch_core(None, request("claude")).await;
+        assert!(result.is_err(), "a call with no bearer token is rejected");
+        assert!(started.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn unknown_token_is_denied_as_a_tool_result() {
+        let (server, started, _host) = harness(governor());
+        let result = server
+            .dispatch_core(Some("not-a-real-token"), request("claude"))
+            .await
+            .expect("a governance denial is a tool result, not a protocol error");
+        assert!(as_json(&result).contains("unknown_token"));
+        assert!(started.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn disallowed_backend_is_denied() {
+        let gov = governor(); // only claude is on the dispatch allowlist
+        let token = token_at_depth(&gov, 0);
+        let (server, started, _host) = harness(gov);
+        let result = server
+            .dispatch_core(Some(&token), request("codex"))
+            .await
+            .expect("a denial is a tool result");
+        assert!(as_json(&result).contains("backend_not_allowed"));
+        assert!(started.lock().unwrap().is_empty(), "no child was started");
+    }
+
+    #[tokio::test]
+    async fn invalid_override_is_denied_before_any_child_starts() {
+        let gov = governor();
+        let token = token_at_depth(&gov, 0);
+        let (server, started, _host) = harness(gov);
+        let mut req = request("claude");
+        req.effort = Some("turbo".to_string());
+        let result = server
+            .dispatch_core(Some(&token), req)
+            .await
+            .expect("a denial is a tool result");
+        assert!(as_json(&result).contains("invalid_override"));
+        assert!(started.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn depth_cap_is_enforced() {
+        let gov = governor_with(4, 1); // max depth 1
+        let token = token_at_depth(&gov, 1); // parent already at the max depth
+        let (server, started, _host) = harness(gov);
+        let result = server
+            .dispatch_core(Some(&token), request("claude"))
+            .await
+            .expect("a denial is a tool result");
+        assert!(as_json(&result).contains("depth_cap_reached"));
+        assert!(started.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn child_cap_is_enforced_across_calls() {
+        let gov = governor_with(1, 3); // one child per session
+        let token = token_at_depth(&gov, 0);
+        let (server, started, _host) = harness(gov);
+
+        let first = server
+            .dispatch_core(Some(&token), request("claude"))
+            .await
+            .expect("the first dispatch succeeds");
+        assert!(!as_json(&first).contains("refused"));
+
+        let second = server
+            .dispatch_core(Some(&token), request("claude"))
+            .await
+            .expect("a denial is a tool result");
+        assert!(as_json(&second).contains("child_cap_reached"));
+        assert_eq!(
+            started.lock().unwrap().len(),
+            1,
+            "only the first child actually started"
+        );
+    }
+
+    #[tokio::test]
+    async fn happy_path_starts_a_parented_child_and_registers_it() {
+        let gov = governor();
+        let token = token_at_depth(&gov, 0);
+        let (server, started, host) = harness(gov);
+
+        let result = server
+            .dispatch_core(Some(&token), request("claude"))
+            .await
+            .expect("the dispatch succeeds");
+        let json = as_json(&result);
+        assert!(json.contains("Dispatched"), "success text is returned");
+        assert!(!json.contains("refused"));
+
+        // Copy out what we need and drop the std guard before the async lock below, so no
+        // non-async guard is held across an await point.
+        let (parent_run, parent_session, backend) = {
+            let starts = started.lock().unwrap();
+            assert_eq!(starts.len(), 1);
+            let child = &starts[0];
+            (
+                child.parent_run_id.clone(),
+                child.parent_session_id.clone(),
+                child.session.backend,
+            )
+        };
+        assert_eq!(parent_run.as_deref(), Some("parent-run"));
+        assert_eq!(parent_session.as_deref(), Some("parent-session"));
+        assert_eq!(backend, AgentBackend::ClaudeLocal);
+
+        // The child run id is registered so the host poll loop drains + broadcasts its events.
+        assert!(host.active_runs.lock().await.contains("child-run"));
+    }
 }
