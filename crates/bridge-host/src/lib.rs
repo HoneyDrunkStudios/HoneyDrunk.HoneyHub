@@ -1082,6 +1082,22 @@ async fn handle_lsp_command(
             language_id,
             message,
         } => {
+            // ADR-0102 D-G: the proxy is a URI-validating gateway, not a dumb pipe.
+            // Command-bearing methods are denied and every file URI in the frame must
+            // resolve inside an allowlisted root, or the frame is refused, not forwarded.
+            let allowlist = {
+                let runtime = host.runtime.lock().await;
+                honeyhub_bridge::WorkspaceAllowlist::new(runtime.workspace_roots())
+            };
+            if let Err(error) = honeyhub_bridge::lsp::validate_client_message(&message, &allowlist)
+            {
+                // Denial audit line, so a refused frame is diagnosable from the console.
+                eprintln!(
+                    "[lsp] denied client frame ({language_id} in {root}): {}",
+                    error.message
+                );
+                return Err(error);
+            }
             let key = LspKey::new(&root, &language_id);
             let mut servers = host.active_lsp.lock().await;
             match servers.get_mut(&key) {
@@ -1227,6 +1243,18 @@ fn pump_lsp(
     let host = Arc::clone(host);
     tokio::task::spawn_blocking(move || {
         while let Ok(message) = inbound.recv() {
+            // ADR-0102 D-G, server-to-client direction: locations / applyEdit targets /
+            // watch registrations are filtered to allowlisted roots, command payloads are
+            // stripped, and an out-of-root showDocument or notification is dropped. The
+            // allowlist is re-read per frame so a root removal takes effect immediately.
+            let allowlist = honeyhub_bridge::WorkspaceAllowlist::new(
+                host.runtime.blocking_lock().workspace_roots(),
+            );
+            let Some(message) = honeyhub_bridge::lsp::filter_server_message(message, &allowlist)
+            else {
+                eprintln!("[lsp] dropped out-of-root server frame ({language_id} in {root})");
+                continue;
+            };
             let _ = host.events.send(BridgeEvent::lsp_message(
                 new_id(),
                 now_rfc3339(),

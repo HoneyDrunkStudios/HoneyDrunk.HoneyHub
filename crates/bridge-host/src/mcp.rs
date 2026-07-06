@@ -366,6 +366,7 @@ mod tests {
             active_runs: Mutex::new(HashSet::new()),
             active_checks: Mutex::new(HashSet::new()),
             active_probes: Mutex::new(HashSet::new()),
+            active_lsp: Mutex::new(std::collections::HashMap::new()),
             events: events_tx,
             watcher: Mutex::new(None),
             dispatch: Some(governor.clone()),

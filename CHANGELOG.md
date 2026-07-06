@@ -5,6 +5,20 @@
 Dogfooding round: smarter cost signals, hardened group checks, a resizable chat dock, and a
 user-centered Jobs page.
 
+- **Repo-wide search**: a Search panel on the activity rail greps every allowlisted workspace
+  root from the bridge (read-posture, ADR-0090 D8), with per-file grouping and click-to-open.
+- **LSP code intelligence** (ADR-0102): the bridge runs allowlisted, operator-installed
+  language servers (rust-analyzer, typescript-language-server, csharp-ls) as supervised
+  long-lived subprocesses and proxies their LSP JSON-RPC to the editor for project-aware
+  completions, hover, go-to-definition, references, and diagnostics. An absent server
+  degrades silently to the built-in in-file IntelliSense. The proxy is a URI-validating
+  gateway, never a dumb pipe (ADR-0102 D-G): every file URI in every frame, both directions,
+  must resolve inside an allowlisted workspace root (out-of-root client frames are refused;
+  out-of-root locations, edits, watch registrations, and showDocument targets from the
+  server are filtered or dropped), and command-bearing LSP methods are denied by default
+  (`workspace/executeCommand` refused, command payloads stripped from code actions and
+  code lenses). Every server spawn and denial is audit-logged on the host console.
+
 - **Cost before and after**: the run screen now shows a cost hint before you send (flat-plan
   models show "included"; metered/API models show a floor estimate plus your recent typical/high
   spend for that model), and every reply keeps reporting what it actually cost with the existing

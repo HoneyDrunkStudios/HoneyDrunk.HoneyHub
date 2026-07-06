@@ -15,13 +15,28 @@
 //! allowlisted or no installed server degrades gracefully: the cockpit keeps its in-file
 //! Monaco IntelliSense (ADR-0090 D4), signalled by an honest [`LspStatus`].
 //!
-//! The module is deliberately a **dumb pipe** — it frames/unframes and supervises, but
-//! never interprets the LSP payload. The bytes it carries are whatever the client and
-//! server exchange; the bridge only owns *which* server may run and *where*.
+//! The proxy is a **URI-validating gateway, not a dumb pipe** (ADR-0102 D-G). LSP frames
+//! carry file URIs in both directions that can name paths beyond the spawn root, so the
+//! host enforces the same allowlist boundary on the frames it proxies:
+//!
+//! - **Client to server** ([`validate_client_message`]): command-bearing methods
+//!   (`workspace/executeCommand`) are denied by default, and every file URI in the frame
+//!   (`rootUri`, `workspaceFolders`, `textDocument.uri`, ...) must resolve inside an
+//!   allowlisted workspace root or the frame is refused, not forwarded.
+//! - **Server to client** ([`filter_server_message`]): location results, `applyEdit`
+//!   targets, and file-watch registrations are filtered to allowlisted roots; out-of-root
+//!   or non-file `window/showDocument` requests are dropped; server-defined command
+//!   payloads on code actions / code lenses are stripped (their execution path,
+//!   `workspace/executeCommand`, is refused anyway).
+//!
+//! Beyond that boundary the payload is not interpreted: the framing layer stays
+//! protocol-shaped and the bridge owns *which* server may run, *where* it runs, and
+//! *what the wire may name* — never the semantics of a completion or a hover.
 
 use crate::adapter::BridgeError;
 use crate::adapters::child_run::{kill_process_tree, put_in_own_process_group};
 use crate::backend_catalog::resolve_program;
+use crate::pairing::WorkspaceAllowlist;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::ffi::OsString;
@@ -196,7 +211,15 @@ impl LspServer {
         // where `taskkill /T` walks the tree by pid.
         put_in_own_process_group(&mut command);
 
+        let server_id = server_id.into();
         let display = program.to_string_lossy().into_owned();
+        // Audit line (ADR-0102 D-C): every language-server spawn is host-logged with the
+        // root, server id, and resolved program, so running servers are traceable from
+        // the bridge console.
+        eprintln!(
+            "[lsp] running '{server_id}' in {root}: {display} {}",
+            args.join(" ")
+        );
         let mut child = command.spawn().map_err(|error| {
             BridgeError::new(
                 "lsp_spawn_failed",
@@ -226,7 +249,7 @@ impl LspServer {
 
         Ok((
             Self {
-                server_id: server_id.into(),
+                server_id,
                 child,
                 process_id,
                 stdin: Some(stdin),
@@ -286,6 +309,252 @@ impl LspServer {
             self.killed = true;
         }
     }
+}
+
+/// Client-to-server LSP methods denied by default (ADR-0102 D-G): command identifiers and
+/// arguments are server-defined and opaque, so they cannot be URI-validated into safety.
+/// Enabling a specific command is a host-owned allowlisted action, recorded by an ADR
+/// amendment — never a pass-through.
+const DENIED_CLIENT_METHODS: &[&str] = &["workspace/executeCommand"];
+
+/// JSON keys whose string values name documents or locations in LSP frames. Keyed matching
+/// (rather than scanning every string) keeps document *content* — which may legitimately
+/// contain the text `file:///...` — out of the boundary check.
+const URI_KEYS: &[&str] = &[
+    "uri",
+    "rootUri",
+    "targetUri",
+    "scopeUri",
+    "baseUri",
+    "newUri",
+    "oldUri",
+];
+
+/// Validate a client-to-server LSP frame against the workspace allowlist (ADR-0102 D-G).
+/// A denied method or an out-of-root file URI refuses the whole frame — it is rejected,
+/// not forwarded, and the caller surfaces the denial to the client.
+pub fn validate_client_message(
+    message: &Value,
+    allowlist: &WorkspaceAllowlist,
+) -> Result<(), BridgeError> {
+    if let Some(method) = message.get("method").and_then(Value::as_str) {
+        if DENIED_CLIENT_METHODS.contains(&method) {
+            return Err(BridgeError::new(
+                "lsp_method_denied",
+                format!(
+                    "LSP method '{method}' is denied by default (ADR-0102 D-G): commands \
+                     are opaque server-defined actions; enabling one requires a host-owned \
+                     named action"
+                ),
+            ));
+        }
+    }
+    match first_denied_uri(message, allowlist) {
+        None => Ok(()),
+        Some(uri) => Err(BridgeError::new(
+            "lsp_uri_denied",
+            format!("LSP frame names a file outside every allowlisted workspace root: {uri}"),
+        )),
+    }
+}
+
+/// Filter a server-to-client LSP frame to the workspace allowlist (ADR-0102 D-G). Returns
+/// the (possibly scrubbed) frame to forward, or `None` when the frame must be dropped:
+/// out-of-root array entries (locations, document edits, watch registrations) are removed;
+/// command payloads are stripped; a response left naming an out-of-root target gets a null
+/// `result` (dropping a response outright would hang the client's request); a request or
+/// notification left naming one is dropped whole.
+pub fn filter_server_message(mut message: Value, allowlist: &WorkspaceAllowlist) -> Option<Value> {
+    // window/showDocument can steer the editor (or a browser) anywhere; only an in-root
+    // file target may pass. External (http/https) targets are never auto-opened.
+    if message.get("method").and_then(Value::as_str) == Some("window/showDocument") {
+        let target = message
+            .get("params")
+            .and_then(|params| params.get("uri"))
+            .and_then(Value::as_str);
+        let allowed = target.is_some_and(|uri| {
+            file_uri_to_path(uri).is_some_and(|path| path_allowed(&path, allowlist))
+        });
+        if !allowed {
+            return None;
+        }
+    }
+    if scrub(&mut message, allowlist) {
+        return Some(message);
+    }
+    let is_response = message.get("id").is_some() && message.get("method").is_none();
+    if is_response {
+        if let Value::Object(map) = &mut message {
+            map.insert("result".to_string(), Value::Null);
+        }
+        return Some(message);
+    }
+    None
+}
+
+/// Depth-first search for the first URI (or `rootPath`) that resolves outside every
+/// allowlisted root. Only URI-keyed strings are checked, so document content never
+/// trips the boundary.
+fn first_denied_uri<'a>(value: &'a Value, allowlist: &WorkspaceAllowlist) -> Option<&'a str> {
+    match value {
+        Value::Object(map) => {
+            for (key, child) in map {
+                if let Some(text) = child.as_str() {
+                    if URI_KEYS.contains(&key.as_str()) && !uri_allowed(text, allowlist) {
+                        return Some(text);
+                    }
+                    // The deprecated `rootPath` initialize field carries a plain path.
+                    if key == "rootPath"
+                        && Path::new(text).is_absolute()
+                        && !path_allowed(Path::new(text), allowlist)
+                    {
+                        return Some(text);
+                    }
+                }
+                if let Some(found) = first_denied_uri(child, allowlist) {
+                    return Some(found);
+                }
+            }
+            None
+        }
+        Value::Array(items) => items
+            .iter()
+            .find_map(|item| first_denied_uri(item, allowlist)),
+        _ => None,
+    }
+}
+
+/// Scrub a server-to-client value in place: drop out-of-root entries from arrays and from
+/// URI-keyed `changes` maps, and strip server-defined command payloads. Returns whether the
+/// value is clean; dirty means a violation remains that could not be removed locally (the
+/// caller drops or nulls the enclosing message).
+fn scrub(value: &mut Value, allowlist: &WorkspaceAllowlist) -> bool {
+    match value {
+        Value::Array(items) => {
+            // A bare `Command` element (legacy code-action shape) is meaningless once its
+            // execution path is refused — drop it with the out-of-root entries.
+            items.retain_mut(|item| !is_bare_command(item) && scrub(item, allowlist));
+            true
+        }
+        Value::Object(map) => {
+            // A `Command` attached to a code action / code lens / completion item is a
+            // server-defined side effect; its execution path (executeCommand) is refused,
+            // so strip the payload rather than surface a dead affordance.
+            if map.get("command").is_some_and(is_command_payload) {
+                map.remove("command");
+            }
+            let mut clean = true;
+            for (key, child) in map.iter_mut() {
+                // WorkspaceEdit.changes is a map keyed by document URI; its values are
+                // TextEdit lists (no URIs), so filtering the keys settles the entry.
+                if key == "changes" {
+                    if let Value::Object(changes) = child {
+                        changes.retain(|uri, _| uri_allowed(uri, allowlist));
+                        continue;
+                    }
+                }
+                if URI_KEYS.contains(&key.as_str()) {
+                    if let Some(text) = child.as_str() {
+                        if !uri_allowed(text, allowlist) {
+                            clean = false;
+                        }
+                        continue;
+                    }
+                }
+                if !scrub(child, allowlist) {
+                    clean = false;
+                }
+            }
+            clean
+        }
+        _ => true,
+    }
+}
+
+/// A bare `Command` literal (`{"title": ..., "command": "server.cmd"}`) surfaced as an
+/// array element — the legacy code-action shape.
+fn is_bare_command(value: &Value) -> bool {
+    value.get("title").is_some() && value.get("command").is_some_and(Value::is_string)
+}
+
+/// A command payload under a `command` key: either a `Command` object or a plain
+/// command-identifier string.
+fn is_command_payload(value: &Value) -> bool {
+    value.is_string() || (value.is_object() && value.get("command").is_some_and(Value::is_string))
+}
+
+/// Whether a URI may cross the wire: non-`file:` schemes carry no filesystem authority and
+/// pass; a `file:` URI must resolve inside an allowlisted root.
+fn uri_allowed(uri: &str, allowlist: &WorkspaceAllowlist) -> bool {
+    match file_uri_to_path(uri) {
+        None => true,
+        Some(path) => path_allowed(&path, allowlist),
+    }
+}
+
+/// Whether a filesystem path canonicalizes inside an allowlisted root. A not-yet-existing
+/// target (a create/rename edit) is judged by its nearest existing ancestor — the same
+/// parent-dir posture `write_file` uses (ADR-0097).
+fn path_allowed(path: &Path, allowlist: &WorkspaceAllowlist) -> bool {
+    let mut current = path;
+    loop {
+        if current.exists() {
+            return allowlist.allows(&current.to_string_lossy());
+        }
+        match current.parent() {
+            Some(parent) if parent != current => current = parent,
+            _ => return false,
+        }
+    }
+}
+
+/// Convert a `file:` URI to a filesystem path (percent-decoded, Windows-drive and UNC
+/// aware). `None` = not a `file:` URI.
+fn file_uri_to_path(uri: &str) -> Option<PathBuf> {
+    if uri.len() < 7 || !uri[..7].eq_ignore_ascii_case("file://") {
+        return None;
+    }
+    let rest = &uri[7..];
+    let (authority, encoded_path) = match rest.find('/') {
+        Some(0) => ("", rest),
+        Some(slash) => (&rest[..slash], &rest[slash..]),
+        None => (rest, ""),
+    };
+    let decoded = percent_decode(encoded_path);
+    if authority.is_empty() || authority.eq_ignore_ascii_case("localhost") {
+        // "/c:/dir" (or "/c%3A/dir") spells a Windows drive path behind a leading slash.
+        let bytes = decoded.as_bytes();
+        if bytes.len() >= 3
+            && bytes[0] == b'/'
+            && bytes[1].is_ascii_alphabetic()
+            && bytes[2] == b':'
+        {
+            return Some(PathBuf::from(&decoded[1..]));
+        }
+        Some(PathBuf::from(decoded))
+    } else {
+        // "file://server/share/..." names a UNC path.
+        Some(PathBuf::from(format!("\\\\{authority}{decoded}")))
+    }
+}
+
+/// Percent-decode a URI path component (bytes, then lossy UTF-8).
+fn percent_decode(input: &str) -> String {
+    let bytes = input.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%' && index + 2 < bytes.len() {
+            if let Ok(byte) = u8::from_str_radix(&input[index + 1..index + 3], 16) {
+                out.push(byte);
+                index += 3;
+                continue;
+            }
+        }
+        out.push(bytes[index]);
+        index += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 /// Prefix `message` with an LSP `Content-Length` header framing its UTF-8 JSON body.
@@ -466,5 +735,210 @@ mod tests {
         server.close_and_kill();
         server.close_and_kill();
         // Dropping at end of scope is the third potential kill — must be a no-op.
+    }
+
+    // ---- ADR-0102 D-G URI boundary + command-surface deny ----
+
+    /// An allowlist containing exactly the temp dir, plus a file URI inside it and one
+    /// outside it. The in-root file is created so the exists()/canonicalize path runs.
+    fn boundary_fixture() -> (WorkspaceAllowlist, String, String) {
+        let root = std::env::temp_dir();
+        let inside = root.join("hh-lsp-boundary-test.rs");
+        std::fs::write(&inside, b"fn main() {}").expect("write fixture file");
+        let allowlist = WorkspaceAllowlist::new(vec![root.to_string_lossy().into_owned()]);
+        (
+            allowlist,
+            to_file_uri(&inside),
+            "file:///etc/passwd".to_string(),
+        )
+    }
+
+    fn to_file_uri(path: &Path) -> String {
+        let slashed = path.to_string_lossy().replace('\\', "/");
+        // A Unix absolute path already starts with '/'; a Windows drive path needs one.
+        let separator = if slashed.starts_with('/') { "" } else { "/" };
+        format!("file://{separator}{slashed}")
+    }
+
+    #[test]
+    fn file_uri_parsing_handles_drives_encoding_and_schemes() {
+        assert_eq!(
+            file_uri_to_path("file:///c:/work/repo/src/main.rs"),
+            Some(PathBuf::from("c:/work/repo/src/main.rs"))
+        );
+        // Percent-encoded drive colon and spaces decode before the path is judged.
+        assert_eq!(
+            file_uri_to_path("file:///c%3A/work/my%20repo/a.rs"),
+            Some(PathBuf::from("c:/work/my repo/a.rs"))
+        );
+        assert_eq!(
+            file_uri_to_path("file:///home/oleg/repo/lib.rs"),
+            Some(PathBuf::from("/home/oleg/repo/lib.rs"))
+        );
+        // Non-file schemes carry no filesystem authority.
+        assert_eq!(file_uri_to_path("untitled:Untitled-1"), None);
+        assert_eq!(file_uri_to_path("https://example.com/x"), None);
+    }
+
+    #[test]
+    fn client_frames_with_out_of_root_uris_are_refused() {
+        let (allowlist, inside, outside) = boundary_fixture();
+        let ok = serde_json::json!({
+            "jsonrpc": "2.0", "method": "textDocument/hover",
+            "params": { "textDocument": { "uri": inside } }
+        });
+        assert!(validate_client_message(&ok, &allowlist).is_ok());
+
+        let bad = serde_json::json!({
+            "jsonrpc": "2.0", "method": "textDocument/didOpen",
+            "params": { "textDocument": { "uri": outside, "text": "x" } }
+        });
+        let error = validate_client_message(&bad, &allowlist).expect_err("must refuse");
+        assert_eq!(error.code, "lsp_uri_denied");
+
+        // Runtime workspace-folder additions are gated the same way (nested arrays).
+        let folders = serde_json::json!({
+            "jsonrpc": "2.0", "method": "workspace/didChangeWorkspaceFolders",
+            "params": { "event": { "added": [ { "uri": outside, "name": "x" } ], "removed": [] } }
+        });
+        assert!(validate_client_message(&folders, &allowlist).is_err());
+    }
+
+    #[test]
+    fn document_content_containing_a_file_uri_does_not_trip_the_boundary() {
+        let (allowlist, inside, _) = boundary_fixture();
+        // The *content* of a didChange legitimately can contain the text "file:///etc/..." —
+        // only URI-keyed fields are judged.
+        let message = serde_json::json!({
+            "jsonrpc": "2.0", "method": "textDocument/didChange",
+            "params": {
+                "textDocument": { "uri": inside, "version": 2 },
+                "contentChanges": [ { "text": "let s = \"file:///etc/passwd\";" } ]
+            }
+        });
+        assert!(validate_client_message(&message, &allowlist).is_ok());
+    }
+
+    #[test]
+    fn execute_command_is_denied_by_default() {
+        let (allowlist, _, _) = boundary_fixture();
+        let message = serde_json::json!({
+            "jsonrpc": "2.0", "id": 7, "method": "workspace/executeCommand",
+            "params": { "command": "rust-analyzer.runSingle", "arguments": [] }
+        });
+        let error = validate_client_message(&message, &allowlist).expect_err("must deny");
+        assert_eq!(error.code, "lsp_method_denied");
+    }
+
+    #[test]
+    fn server_location_arrays_are_filtered_to_allowlisted_roots() {
+        let (allowlist, inside, outside) = boundary_fixture();
+        let response = serde_json::json!({
+            "jsonrpc": "2.0", "id": 3,
+            "result": [
+                { "uri": inside, "range": {} },
+                { "uri": outside, "range": {} }
+            ]
+        });
+        let filtered = filter_server_message(response, &allowlist).expect("forwarded");
+        let result = filtered
+            .get("result")
+            .and_then(Value::as_array)
+            .expect("array");
+        assert_eq!(result.len(), 1);
+        assert_eq!(
+            result[0].get("uri").and_then(Value::as_str),
+            Some(inside.as_str())
+        );
+    }
+
+    #[test]
+    fn a_response_left_naming_an_out_of_root_target_gets_a_null_result() {
+        let (allowlist, _, outside) = boundary_fixture();
+        // A single-Location definition result cannot be array-filtered; dropping the
+        // response would hang the client's request, so the result nulls instead.
+        let response = serde_json::json!({
+            "jsonrpc": "2.0", "id": 4,
+            "result": { "uri": outside, "range": {} }
+        });
+        let filtered = filter_server_message(response, &allowlist).expect("forwarded");
+        assert!(filtered.get("result").expect("result").is_null());
+    }
+
+    #[test]
+    fn out_of_root_notifications_and_show_document_are_dropped() {
+        let (allowlist, inside, outside) = boundary_fixture();
+        let diagnostics = serde_json::json!({
+            "jsonrpc": "2.0", "method": "textDocument/publishDiagnostics",
+            "params": { "uri": outside, "diagnostics": [] }
+        });
+        assert!(filter_server_message(diagnostics, &allowlist).is_none());
+
+        // showDocument: out-of-root and non-file (external) targets never auto-open.
+        let external = serde_json::json!({
+            "jsonrpc": "2.0", "id": 9, "method": "window/showDocument",
+            "params": { "uri": "https://example.com/docs" }
+        });
+        assert!(filter_server_message(external, &allowlist).is_none());
+        let in_root = serde_json::json!({
+            "jsonrpc": "2.0", "id": 10, "method": "window/showDocument",
+            "params": { "uri": inside }
+        });
+        assert!(filter_server_message(in_root, &allowlist).is_some());
+    }
+
+    #[test]
+    fn apply_edit_changes_maps_are_filtered_by_document_uri() {
+        let (allowlist, inside, outside) = boundary_fixture();
+        let request = serde_json::json!({
+            "jsonrpc": "2.0", "id": 5, "method": "workspace/applyEdit",
+            "params": { "edit": { "changes": {
+                (inside.clone()): [ { "newText": "x", "range": {} } ],
+                (outside.clone()): [ { "newText": "y", "range": {} } ]
+            } } }
+        });
+        let filtered = filter_server_message(request, &allowlist).expect("forwarded");
+        let changes = filtered
+            .pointer("/params/edit/changes")
+            .and_then(Value::as_object)
+            .expect("changes map");
+        assert!(changes.contains_key(&inside));
+        assert!(!changes.contains_key(&outside));
+    }
+
+    #[test]
+    fn a_new_file_edit_under_an_allowlisted_root_is_judged_by_its_ancestor() {
+        let (allowlist, _, _) = boundary_fixture();
+        let new_file = std::env::temp_dir()
+            .join("hh-lsp-not-yet-created")
+            .join("new.rs");
+        assert!(path_allowed(&new_file, &allowlist));
+        assert!(!path_allowed(
+            Path::new("/definitely/not/allowlisted/new.rs"),
+            &allowlist
+        ));
+    }
+
+    #[test]
+    fn command_payloads_are_stripped_and_bare_commands_dropped() {
+        let (allowlist, inside, _) = boundary_fixture();
+        let response = serde_json::json!({
+            "jsonrpc": "2.0", "id": 6,
+            "result": [
+                // A code action carrying an edit keeps the edit, loses the command.
+                { "title": "fix", "edit": { "changes": { (inside.clone()): [] } },
+                  "command": { "title": "fix", "command": "server.fix" } },
+                // A bare Command element (legacy shape) is dropped whole.
+                { "title": "run it", "command": "server.run" }
+            ]
+        });
+        let filtered = filter_server_message(response, &allowlist).expect("forwarded");
+        let result = filtered
+            .get("result")
+            .and_then(Value::as_array)
+            .expect("array");
+        assert_eq!(result.len(), 1);
+        assert!(result[0].get("edit").is_some());
+        assert!(result[0].get("command").is_none());
     }
 }
