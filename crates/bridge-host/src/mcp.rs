@@ -371,6 +371,8 @@ mod tests {
             events: events_tx,
             watcher: Mutex::new(None),
             dispatch: Some(governor.clone()),
+            active_launches: Mutex::new(crate::LaunchState::default()),
+            next_conn_id: std::sync::atomic::AtomicU64::new(0),
         });
         let server = DispatchAgentServer::new(host.clone(), governor);
         (server, started, host)

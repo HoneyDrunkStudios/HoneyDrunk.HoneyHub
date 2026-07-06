@@ -86,6 +86,9 @@ class FakeClient implements WireClient {
   async lspStart(): Promise<void> {}
   async lspSend(): Promise<void> {}
   async lspStop(): Promise<void> {}
+  async detectLaunchTargets(): Promise<void> {}
+  async startLaunch(): Promise<void> {}
+  async stopLaunch(): Promise<void> {}
 
   private emit(runId: string, payload: BridgeEventPayload): void {
     const event: BridgeEvent = {

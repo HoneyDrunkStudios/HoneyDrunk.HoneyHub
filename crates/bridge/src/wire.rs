@@ -590,6 +590,31 @@ pub enum ClientCommand {
         root: String,
         language_id: String,
     },
+    /// **Launch** (ADR-0104): detect the launch targets an allowlisted workspace `root` implies
+    /// (a host-owned read). Acked; the host answers with a single
+    /// [`BridgeEventPayload::LaunchTargets`] listing the detected target ids (empty for an
+    /// unrecognized repo type).
+    DetectLaunchTargets {
+        root: String,
+    },
+    /// **Launch**: start the detected target `target_id` in the allowlisted `root`. The client
+    /// picks a detected id, NEVER a command line; the host resolves it to an argv from its own
+    /// detection table and denies an unknown id (ADR-0104 D1). Launch is mobile-safe (a relay
+    /// session may start one, unlike the desktop-local terminal, ADR-0104 D3). Acked; the host
+    /// broadcasts a [`BridgeEventPayload::LaunchStarted`] carrying the `launch_id`, then streams
+    /// [`BridgeEventPayload::LaunchOutput`]. `open_id` is a correlation nonce echoed on
+    /// `LaunchStarted` (the event is broadcast device-wide) so the caller adopts its own launch.
+    LaunchStart {
+        root: String,
+        target_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        open_id: Option<String>,
+    },
+    /// **Launch**: stop a running launch, tree-killing its process group (ADR-0104 D2). Acked
+    /// with a final [`BridgeEventPayload::LaunchStopped`]. Idempotent.
+    LaunchStop {
+        launch_id: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1423,6 +1448,91 @@ impl BridgeEvent {
         }
     }
 
+    /// A device-wide launch-targets event (ADR-0104). Host-synthesized, so the envelope ids are
+    /// empty and `sequence` is `0`.
+    pub fn launch_targets(
+        id: impl Into<String>,
+        created_at: impl Into<String>,
+        root: String,
+        targets: Vec<crate::launch::LaunchTarget>,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            session_id: String::new(),
+            run_id: String::new(),
+            sequence: 0,
+            created_at: created_at.into(),
+            payload: BridgeEventPayload::LaunchTargets { root, targets },
+        }
+    }
+
+    /// A device-wide launch-started event (ADR-0104). Host-synthesized envelope.
+    pub fn launch_started(
+        id: impl Into<String>,
+        created_at: impl Into<String>,
+        launch_id: String,
+        target_id: String,
+        open_id: Option<String>,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            session_id: String::new(),
+            run_id: String::new(),
+            sequence: 0,
+            created_at: created_at.into(),
+            payload: BridgeEventPayload::LaunchStarted {
+                launch_id,
+                target_id,
+                open_id,
+            },
+        }
+    }
+
+    /// A device-wide launch-output chunk (ADR-0104). `data` is base64 of the raw bytes.
+    /// Host-synthesized envelope.
+    pub fn launch_output(
+        id: impl Into<String>,
+        created_at: impl Into<String>,
+        launch_id: String,
+        stream: impl Into<String>,
+        data: String,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            session_id: String::new(),
+            run_id: String::new(),
+            sequence: 0,
+            created_at: created_at.into(),
+            payload: BridgeEventPayload::LaunchOutput {
+                launch_id,
+                stream: stream.into(),
+                data,
+            },
+        }
+    }
+
+    /// A device-wide launch-stopped event (ADR-0104). Host-synthesized envelope.
+    pub fn launch_stopped(
+        id: impl Into<String>,
+        created_at: impl Into<String>,
+        launch_id: String,
+        reason: impl Into<String>,
+        exit_code: Option<i32>,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            session_id: String::new(),
+            run_id: String::new(),
+            sequence: 0,
+            created_at: created_at.into(),
+            payload: BridgeEventPayload::LaunchStopped {
+                launch_id,
+                reason: reason.into(),
+                exit_code,
+            },
+        }
+    }
+
     /// A device-wide persisted-session-list event. Not scoped to a run or session, so
     /// `session_id`/`run_id` are empty and `sequence` is `0`.
     pub fn session_list(
@@ -1672,6 +1782,39 @@ pub enum BridgeEventPayload {
     /// honest degradation flag (ADR-0090 D4). Host-synthesized, device-wide.
     LspStatus {
         status: LspStatus,
+    },
+    /// The launch targets detected for a workspace root (ADR-0104 D1). Host-synthesized,
+    /// device-wide; the cockpit routes it to the picker for `root`. Rejected from backend
+    /// streams by the stream validator.
+    LaunchTargets {
+        root: String,
+        targets: Vec<crate::launch::LaunchTarget>,
+    },
+    /// A launch started (ADR-0104 D2). Carries the `launch_id` the client keys stop on, the
+    /// resolved `target_id`, and echoes the request's `open_id` correlation nonce so the caller
+    /// adopts its own launch (the event is broadcast device-wide). Host-synthesized.
+    LaunchStarted {
+        launch_id: String,
+        target_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        open_id: Option<String>,
+    },
+    /// One chunk of a launch's output (`data`, base64 of the raw bytes), tagged `stdout` or
+    /// `stderr`. Host-synthesized, device-wide (launch is mobile-safe, ADR-0104 D3, so unlike
+    /// terminal output this is NOT dropped for relay connections). Never persisted (D2).
+    LaunchOutput {
+        launch_id: String,
+        stream: String,
+        data: String,
+    },
+    /// A launch ended (ADR-0104 D2): the operator stopped it, it exited, or the host retired it
+    /// (device disconnect / token revoke / root removal). `reason` is a short opaque code and
+    /// `exit_code` is present when the process exited on its own. Host-synthesized, device-wide.
+    LaunchStopped {
+        launch_id: String,
+        reason: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        exit_code: Option<i32>,
     },
 }
 

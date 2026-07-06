@@ -23,6 +23,7 @@ import {
   defaultCodexCapabilities
 } from "@honeydrunk/honeyhub-types";
 import { summarizeUsage } from "../routes/spend/spendModel";
+import { utf8ToBase64 } from "./base64";
 import type { StartedRun, WireClient, WireEventHandler } from "./client";
 
 // An in-memory wire client that scripts a realistic Claude Code exchange:
@@ -59,6 +60,8 @@ export class MockWireClient implements WireClient {
   // same way the real host does (mirroring `UsageSummary::from_signals`).
   private readonly usageSignals: UsageSignal[] = [];
   private readonly sessionIds = new Set<string>();
+  // Open fake launches in the offline demo (see startLaunch / stopLaunch).
+  private readonly mockLaunches = new Set<string>();
 
   subscribe(handler: WireEventHandler): () => void {
     this.handlers.add(handler);
@@ -958,6 +961,34 @@ export class MockWireClient implements WireClient {
 
   async lspStop(_root: string, _languageId: string): Promise<void> {
     // Nothing to stop in the offline mock.
+  }
+
+  async detectLaunchTargets(root: string): Promise<void> {
+    // Offer a couple of fake detected targets so the launch panel is exercisable offline.
+    this.emitDevice({
+      kind: "launch_targets",
+      root,
+      targets: [
+        { id: "node:dev", label: "npm run dev", kind: "run" },
+        { id: "cargo:test", label: "cargo test", kind: "test" }
+      ]
+    });
+  }
+
+  async startLaunch(_root: string, targetId: string, openId: string): Promise<void> {
+    // The offline demo runs no real process; open a fake launch and stream a line so the log
+    // panel is exercisable without a host. The openId is echoed so the caller adopts it.
+    const launchId = `mock-launch-${this.sequence}`;
+    this.emitDevice({ kind: "launch_started", launchId, targetId, openId });
+    this.mockLaunches.add(launchId);
+    const line = `(demo) launching ${targetId}...\r\nrunning\r\n`;
+    this.emitDevice({ kind: "launch_output", launchId, stream: "stdout", data: utf8ToBase64(line) });
+  }
+
+  async stopLaunch(launchId: string): Promise<void> {
+    if (this.mockLaunches.delete(launchId)) {
+      this.emitDevice({ kind: "launch_stopped", launchId, reason: "stopped" });
+    }
   }
 
   async detectEnvironment(): Promise<void> {

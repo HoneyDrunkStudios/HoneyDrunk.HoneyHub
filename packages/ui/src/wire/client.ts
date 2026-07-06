@@ -267,6 +267,17 @@ export interface WireClient {
   lspSend(root: string, languageId: string, message: unknown): Promise<void>;
   /** **LSP**: stop the language server for (`languageId`, `root`). Resolves on the ack. */
   lspStop(root: string, languageId: string): Promise<void>;
+  /** **Launch** (ADR-0104): detect the launch targets an allowlisted `root` implies. The host
+      answers with a `launch_targets` event via `subscribe` (empty for an unrecognized repo). */
+  detectLaunchTargets(root: string): Promise<void>;
+  /** **Launch**: start the detected target `targetId` in `root` (the client picks a detected
+      id, never a command line). Launch is mobile-safe (a relay session may start one). `openId`
+      is a correlation nonce echoed on the broadcast `launch_started` so the caller adopts its
+      own launch; output then streams as `launch_output` events via `subscribe`. */
+  startLaunch(root: string, targetId: string, openId: string): Promise<void>;
+  /** **Launch**: stop a running launch, tree-killing its process group. The host answers with a
+      final `launch_stopped` event via `subscribe`. Idempotent. */
+  stopLaunch(launchId: string): Promise<void>;
   /** Subscribe to bridge events; returns an unsubscribe function. */
   subscribe(handler: WireEventHandler): () => void;
 }

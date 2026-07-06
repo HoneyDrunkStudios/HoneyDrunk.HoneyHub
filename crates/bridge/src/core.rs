@@ -1434,6 +1434,34 @@ fn validate_stream_payload(
                 "a backend stream must not emit device-wide LSP status",
             ));
         }
+        BridgeEventPayload::LaunchTargets { .. } => {
+            // Device-wide, host-synthesized launch-target detection, never streamed (ADR-0104).
+            return Err(BridgeError::new(
+                "event_unexpected_launch_targets",
+                "a backend stream must not emit device-wide launch targets",
+            ));
+        }
+        BridgeEventPayload::LaunchStarted { .. } => {
+            // Device-wide, host-synthesized launch lifecycle, never streamed (ADR-0104).
+            return Err(BridgeError::new(
+                "event_unexpected_launch_started",
+                "a backend stream must not emit device-wide launch-started events",
+            ));
+        }
+        BridgeEventPayload::LaunchOutput { .. } => {
+            // Device-wide, host-synthesized launch output, never streamed (ADR-0104).
+            return Err(BridgeError::new(
+                "event_unexpected_launch_output",
+                "a backend stream must not emit device-wide launch output",
+            ));
+        }
+        BridgeEventPayload::LaunchStopped { .. } => {
+            // Device-wide, host-synthesized launch lifecycle, never streamed (ADR-0104).
+            return Err(BridgeError::new(
+                "event_unexpected_launch_stopped",
+                "a backend stream must not emit device-wide launch-stopped events",
+            ));
+        }
     }
 
     Ok(())
@@ -3240,6 +3268,37 @@ mod tests {
                 },
             }),
             "event_unexpected_lsp_status"
+        );
+        assert_eq!(
+            err_code(BridgeEventPayload::LaunchTargets {
+                root: "/r".to_string(),
+                targets: Vec::new(),
+            }),
+            "event_unexpected_launch_targets"
+        );
+        assert_eq!(
+            err_code(BridgeEventPayload::LaunchStarted {
+                launch_id: "l".to_string(),
+                target_id: "cargo:run".to_string(),
+                open_id: None,
+            }),
+            "event_unexpected_launch_started"
+        );
+        assert_eq!(
+            err_code(BridgeEventPayload::LaunchOutput {
+                launch_id: "l".to_string(),
+                stream: "stdout".to_string(),
+                data: String::new(),
+            }),
+            "event_unexpected_launch_output"
+        );
+        assert_eq!(
+            err_code(BridgeEventPayload::LaunchStopped {
+                launch_id: "l".to_string(),
+                reason: "exited".to_string(),
+                exit_code: Some(0),
+            }),
+            "event_unexpected_launch_stopped"
         );
     }
 }

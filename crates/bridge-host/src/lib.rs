@@ -15,11 +15,12 @@
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::{Query, State};
+use axum::extract::{ConnectInfo, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
@@ -46,6 +47,12 @@ const FS_PATHS_CAP: usize = 64;
 
 /// Default poll cadence for draining the runtime's event stream.
 pub const DEFAULT_POLL_INTERVAL: Duration = Duration::from_millis(80);
+
+/// Cap on project launches a single connection may hold at once, so a buggy or hostile client
+/// cannot spawn unbounded long-lived processes (ADR-0104 D2 supervised lifecycle).
+const LAUNCH_MAX_PER_CONN: usize = 8;
+/// How often the launch watchdog polls each launch for process exit.
+const LAUNCH_EXIT_POLL: Duration = Duration::from_secs(1);
 
 /// Shared host state: the runtime (single-writer behind an async mutex), the set
 /// of runs still worth polling, and a broadcast of events to every client.
@@ -75,6 +82,35 @@ struct Host {
     /// poll loop can **revoke** a run's per-run capability token the moment the run reaches a
     /// terminal state, so a token cannot outlive the parent run it was minted for.
     dispatch: Option<Arc<DispatchGovernor>>,
+    /// Live project launches plus the allowlisted-roots snapshot they are authorized against,
+    /// behind ONE mutex (ADR-0104 D2). Keeping the roots snapshot inside the same lock that guards
+    /// the launch map makes a launch's root-authorization check atomic with its registration: a
+    /// concurrent `SetWorkspaceRoots` cannot slip a launch into a just-removed root (the
+    /// atomic-revocation pattern already used for LSP). Launch is mobile-safe (relay-reachable),
+    /// so a relay connection may start one (D3).
+    active_launches: Mutex<LaunchState>,
+    /// Monotonic source of per-connection ids, so a launch (or terminal) can be tied to the
+    /// socket that opened it and swept when that socket disconnects.
+    next_conn_id: AtomicU64,
+}
+
+/// The live launches plus the roots snapshot they are validated against, behind one mutex so a
+/// launch's authorization check and its registration are atomic against root removal.
+#[derive(Default)]
+struct LaunchState {
+    launches: HashMap<String, LaunchEntry>,
+    roots: honeyhub_bridge::WorkspaceAllowlist,
+}
+
+/// One live project launch and the bookkeeping to supervise it (ADR-0104 D2).
+struct LaunchEntry {
+    /// The supervised child. Dropping it tree-kills the process group.
+    session: honeyhub_bridge::launch::LaunchSession,
+    /// The canonical allowlisted project root, re-checked on a workspace-root change so a launch
+    /// whose root is removed is retired (D2).
+    root: String,
+    /// The connection that owns this launch (swept on that connection's disconnect).
+    conn_id: u64,
 }
 
 /// The running language servers plus the allowlisted-roots snapshot they are validated
@@ -212,9 +248,14 @@ pub async fn serve(
     // Seed the LSP roots snapshot from the runtime's initial allowlist, so LSP forwarding
     // is authorized against the real roots before the first SetWorkspaceRoots (which then
     // keeps the snapshot in sync under the active_lsp lock).
+    let initial_roots = runtime.workspace_roots();
     let initial_lsp = LspState {
-        roots: honeyhub_bridge::WorkspaceAllowlist::new(runtime.workspace_roots()),
+        roots: honeyhub_bridge::WorkspaceAllowlist::new(initial_roots.clone()),
         ..LspState::default()
+    };
+    let initial_launches = LaunchState {
+        roots: honeyhub_bridge::WorkspaceAllowlist::new(initial_roots),
+        ..LaunchState::default()
     };
     let host = Arc::new(Host {
         runtime: Mutex::new(runtime),
@@ -226,6 +267,8 @@ pub async fn serve(
         events: events_tx,
         watcher: Mutex::new(None),
         dispatch: dispatch.clone(),
+        active_launches: Mutex::new(initial_launches),
+        next_conn_id: AtomicU64::new(0),
     });
 
     {
@@ -235,6 +278,33 @@ pub async fn serve(
             loop {
                 ticker.tick().await;
                 poll_active_runs(&host).await;
+            }
+        });
+    }
+
+    // Launch exit watchdog (ADR-0104 D2): poll each launch's process for exit. This detects a
+    // finished launch by its PROCESS exiting, independent of its output pipes, so a launch whose
+    // descendant still holds a pipe open is still reaped (and gives the real exit code the wire
+    // reports). Retiring tree-kills, which also closes any pipe a lingering descendant held.
+    {
+        let host = Arc::clone(&host);
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(LAUNCH_EXIT_POLL);
+            loop {
+                ticker.tick().await;
+                let exited: Vec<(String, Option<i32>)> = {
+                    let mut state = host.active_launches.lock().await;
+                    state
+                        .launches
+                        .iter_mut()
+                        .filter_map(|(id, entry)| {
+                            entry.session.poll_exit().map(|code| (id.clone(), code))
+                        })
+                        .collect()
+                };
+                for (launch_id, code) in exited {
+                    retire_launch(&host, &launch_id, "exited", code).await;
+                }
             }
         });
     }
@@ -274,12 +344,20 @@ pub async fn serve(
     }
     let app = app.with_state(state);
 
-    axum::serve(listener, app.into_make_service()).await
+    // Carry the peer address into handlers (`ConnectInfo<SocketAddr>`) so the WS handshake can
+    // classify a connection as desktop-local (loopback) or relay (off-box), which the launch
+    // audit records (ADR-0104 D3/D7) and the cockpit uses to decide the relay confirmation.
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await
 }
 
 async fn ws_handler(
     upgrade: WebSocketUpgrade,
     Query(params): Query<HashMap<String, String>>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
     State(state): State<AppState>,
 ) -> Response {
     // axum URL-decodes query values, so the token matches the registry as issued.
@@ -290,7 +368,17 @@ async fn ws_handler(
     if !authorized {
         return (StatusCode::UNAUTHORIZED, "invalid pairing token").into_response();
     }
-    upgrade.on_upgrade(move |socket| handle_socket(socket, state.host))
+    // A loopback peer is the desktop shell's own cockpit (local); anything else reached the
+    // bridge over the LAN / tailnet relay. Launch is mobile-safe so both may start one, but the
+    // classification is recorded in the launch audit and drives the cockpit's relay confirmation.
+    //
+    // Honest limitation (ADR-0090 D4): this trusts the transport peer address. It correctly labels
+    // the default relay topologies (a tailnet/LAN client arrives with its own address), but a peer
+    // reaching the bridge THROUGH a localhost-terminating forwarder the operator set up presents as
+    // loopback and is recorded local. Since launch is mobile-safe either way, the only effect is a
+    // mislabelled audit line and a skipped client confirmation, not a bypassed exec gate.
+    let local = peer.ip().is_loopback();
+    upgrade.on_upgrade(move |socket| handle_socket(socket, state.host, local))
 }
 
 /// Directories whose churn is build/VCS noise rather than user edits: filesystem events anywhere
@@ -432,9 +520,11 @@ async fn poll_active_runs(host: &Arc<Host>) {
     }
 }
 
-async fn handle_socket(socket: WebSocket, host: Arc<Host>) {
+async fn handle_socket(socket: WebSocket, host: Arc<Host>, local: bool) {
     host.connected_clients
         .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    // A per-connection id so the launches this socket starts can be swept on disconnect.
+    let conn_id = host.next_conn_id.fetch_add(1, Ordering::Relaxed);
     let (mut sink, mut stream) = socket.split();
     let mut events_rx = host.events.subscribe();
     let (outbound_tx, mut outbound_rx) = mpsc::channel::<WireFrame>(256);
@@ -502,11 +592,34 @@ async fn handle_socket(socket: WebSocket, host: Arc<Host>) {
             }
         };
         if let Some(command) = frame.command {
-            handle_command(&host, command, &frame.frame_id, &outbound_tx).await;
+            handle_command(
+                &host,
+                command,
+                &frame.frame_id,
+                &outbound_tx,
+                local,
+                conn_id,
+            )
+            .await;
         }
     }
 
     writer.abort();
+
+    // Retire every launch this connection started (ADR-0104 D2: a launch is tree-killed on the
+    // owning device's disconnect; a mobile launch lives only as long as the phone is connected).
+    let mine: Vec<String> = {
+        let state = host.active_launches.lock().await;
+        state
+            .launches
+            .iter()
+            .filter(|(_, entry)| entry.conn_id == conn_id)
+            .map(|(id, _)| id.clone())
+            .collect()
+    };
+    for launch_id in mine {
+        retire_launch(&host, &launch_id, "disconnected", None).await;
+    }
 
     // ADR-0102 D-C: a language server never outlives the cockpit it serves. When the LAST
     // client disconnects, retire every running server (a second connected device keeps them
@@ -539,6 +652,8 @@ async fn handle_command(
     command: ClientCommand,
     frame_id: &str,
     outbound_tx: &mpsc::Sender<WireFrame>,
+    local: bool,
+    conn_id: u64,
 ) {
     // LSP send/stop touch only the language-server map — never the runtime — so handle them
     // WITHOUT taking the runtime lock. A completion request on every keystroke must not queue
@@ -553,6 +668,13 @@ async fn handle_command(
         return;
     }
 
+    // LaunchStop touches only the launches map, never the runtime, so handle it off-lock too.
+    if let ClientCommand::LaunchStop { launch_id } = &command {
+        retire_launch(host, launch_id, "stopped", None).await;
+        respond(outbound_tx, frame_id, Ok(None)).await;
+        return;
+    }
+
     let mut to_register: Option<String> = None;
     // Set when the workspace allowlist changes, so the watcher is re-pointed after the
     // runtime lock is released.
@@ -561,10 +683,17 @@ async fn handle_command(
     // out under the lock and dropped off-lock below (a supervised server must never outlive
     // its authorization; the reader-thread join is kept off the async worker).
     let mut lsp_orphans: Vec<honeyhub_bridge::LspServer> = Vec::new();
+    // Launches whose project root fell out of the allowlist on the same `SetWorkspaceRoots`,
+    // retired off-lock below (ADR-0104 D2: a launch must not outlive its authorization).
+    let mut launch_orphans: Vec<(String, LaunchEntry)> = Vec::new();
     // A content search validated under the runtime lock but executed after it is released
     // (grepping a big tree is slow filesystem work; holding the runtime lock through it
     // would stall every other client command).
     let mut search_job: Option<(String, String, honeyhub_bridge::ContentSearchOptions)> = None;
+    // A launch gated under the runtime lock (root allowlist + host-owned target resolution) but
+    // SPAWNED after it is released: spawning a process is blocking work that must not stall the
+    // poll loop. Carries (local, root, target_id, open_id).
+    let mut launch_job: Option<(bool, String, String, Option<String>)> = None;
     let result: Result<Option<Vec<BridgeEvent>>, BridgeError> = {
         let mut runtime = host.runtime.lock().await;
         match command {
@@ -624,6 +753,26 @@ async fn handle_command(
                 for key in orphan_keys {
                     if let Some(server) = state.take_server(&key) {
                         lsp_orphans.push(server);
+                    }
+                }
+                drop(state);
+                // Update the launch roots snapshot AND sweep orphaned launches under the ONE
+                // active_launches lock, so a launch's authorization is atomic with the change:
+                // `start_launch` re-checks the same snapshot under this lock, so no launch can be
+                // registered into a root this sweep just removed (ADR-0104 D2). Orphans are
+                // retired off-lock below.
+                let new_roots = runtime.workspace_roots();
+                let mut launch_state = host.active_launches.lock().await;
+                launch_state.roots = honeyhub_bridge::WorkspaceAllowlist::new(new_roots);
+                let orphan_ids: Vec<String> = launch_state
+                    .launches
+                    .iter()
+                    .filter(|(_, entry)| !launch_state.roots.allows(&entry.root))
+                    .map(|(id, _)| id.clone())
+                    .collect();
+                for id in orphan_ids {
+                    if let Some(entry) = launch_state.launches.remove(&id) {
+                        launch_orphans.push((id, entry));
                     }
                 }
                 Ok(None)
@@ -1132,6 +1281,36 @@ async fn handle_command(
                 // this arm exists only for match exhaustiveness and is never reached.
                 Ok(None)
             }
+            ClientCommand::DetectLaunchTargets { root } => {
+                // Detection is a read over an allowlisted root (ADR-0104 D1), gated like ReadFile.
+                require(runtime.workspace_allows(&root), "launch root").map(|()| {
+                    let targets = honeyhub_bridge::launch::detect_targets(&root);
+                    one(BridgeEvent::launch_targets(
+                        new_id(),
+                        now_rfc3339(),
+                        root,
+                        targets,
+                    ))
+                })
+            }
+            ClientCommand::LaunchStart {
+                root,
+                target_id,
+                open_id,
+            } => {
+                // Gate the root under the runtime lock, but DEFER the spawn: starting a process
+                // is blocking work that must not stall the poll loop. The host-owned target
+                // resolution + spawn happen off-lock in `start_launch` (below).
+                require(runtime.workspace_allows(&root), "launch root").map(|()| {
+                    launch_job = Some((local, root, target_id, open_id));
+                    None
+                })
+            }
+            ClientCommand::LaunchStop { .. } => {
+                // Handled before the runtime lock (see the early return in `handle_command`);
+                // this arm exists only for match exhaustiveness and is never reached.
+                Ok(None)
+            }
             ClientCommand::Resume { .. } => Err(BridgeError::new(
                 "unsupported_command",
                 "resume is not driven by the host runtime yet",
@@ -1151,6 +1330,28 @@ async fn handle_command(
     for server in lsp_orphans {
         tokio::task::spawn_blocking(move || drop(server));
     }
+    // Retire any de-authorized launches off-lock: announce the stop, then tree-kill the process
+    // group on a blocking task. Each was already removed from the map under the launches lock, so
+    // exactly one path announces its stop.
+    for (launch_id, entry) in launch_orphans {
+        let _ = host.events.send(BridgeEvent::launch_stopped(
+            new_id(),
+            now_rfc3339(),
+            launch_id,
+            "root_removed",
+            None,
+        ));
+        tokio::task::spawn_blocking(move || drop(entry.session));
+    }
+    // Spawn a gated launch off the runtime lock (starting a process is blocking). The root was
+    // authorized under the lock; `start_launch` resolves the host-owned target (denying an
+    // unknown id) and caps per connection under the launches lock.
+    let result = match launch_job {
+        Some((launch_local, root, target_id, open_id)) if result.is_ok() => {
+            start_launch(host, launch_local, conn_id, root, target_id, open_id).await
+        }
+        _ => result,
+    };
     // Run a gated content search off the runtime lock, on blocking work: only this client's
     // task waits for it, never every other command.
     let result = match search_job {
@@ -1728,6 +1929,145 @@ fn spawn_check(host: &Arc<Host>, root: String, check: String) {
         });
         host.active_checks.lock().await.remove(&guard_key);
         publish(outcome);
+    });
+}
+
+/// Start a project launch off the runtime lock (ADR-0104 D1/D2): resolve the host-owned target id
+/// (deny an unknown id), spawn the supervised child WITHOUT holding a lock (spawning is blocking),
+/// then register it under the launches lock only after re-checking the roots snapshot held in that
+/// same lock. Keeping the roots snapshot inside the launches lock makes the authorization check
+/// atomic with registration, so a concurrent `SetWorkspaceRoots` cannot leave a launch running in
+/// a just-removed root; if it did remove the root during the spawn, the just-spawned child is
+/// killed and the launch denied.
+async fn start_launch(
+    host: &Arc<Host>,
+    local: bool,
+    conn_id: u64,
+    root: String,
+    target_id: String,
+    open_id: Option<String>,
+) -> Result<Option<Vec<BridgeEvent>>, BridgeError> {
+    let canonical = std::fs::canonicalize(&root)
+        .map(|path| path.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| root.clone());
+    // Host-owned resolution: re-detect and find the id; an unknown id runs nothing (D1).
+    let Some(target) = honeyhub_bridge::launch::resolve_target(&canonical, &target_id) else {
+        return Err(BridgeError::new(
+            "launch_denied",
+            format!("no detected launch target '{target_id}' in this project"),
+        ));
+    };
+
+    // Spawn OFF any lock (openpty/CreateProcess is blocking and must not stall the poll loop or
+    // wedge the launches lock the reaper/stop/disconnect paths need).
+    let (session, receiver) = honeyhub_bridge::launch::LaunchSession::spawn(&target, &canonical)?;
+
+    // Register under the launches lock, re-checking the roots snapshot held in that same lock so
+    // the authorization is atomic with the insert. If the root was removed while we spawned, kill
+    // the orphan and deny rather than leave it running in a de-authorized tree.
+    let launch_id = new_id();
+    {
+        let mut state = host.active_launches.lock().await;
+        if !state.roots.allows(&canonical) {
+            drop(state);
+            tokio::task::spawn_blocking(move || drop(session));
+            return Err(BridgeError::new(
+                "launch_root_revoked",
+                "the project root was removed from the workspace allowlist before launch",
+            ));
+        }
+        let open_here = state
+            .launches
+            .values()
+            .filter(|entry| entry.conn_id == conn_id)
+            .count();
+        if open_here >= LAUNCH_MAX_PER_CONN {
+            drop(state);
+            tokio::task::spawn_blocking(move || drop(session));
+            return Err(BridgeError::new(
+                "launch_limit",
+                format!(
+                    "too many launches on this connection (max {LAUNCH_MAX_PER_CONN}); stop one first"
+                ),
+            ));
+        }
+        // Audit line (ADR-0104 D7): target id, project root, and whether the launch was local or
+        // relay-reached, so a launch is traceable from the bridge console.
+        eprintln!(
+            "[launch] {launch_id} target={target_id} root={canonical} {}",
+            if local { "local" } else { "relay" }
+        );
+        state.launches.insert(
+            launch_id.clone(),
+            LaunchEntry {
+                session,
+                root: canonical,
+                conn_id,
+            },
+        );
+    }
+
+    // Announce the start on the SAME broadcast channel the output rides, BEFORE spawning the pump,
+    // so the cockpit adopts the launch id before the first output chunk (matching the terminal
+    // ordering fix). The command itself just acks.
+    let _ = host.events.send(BridgeEvent::launch_started(
+        new_id(),
+        now_rfc3339(),
+        launch_id.clone(),
+        target_id,
+        open_id,
+    ));
+    spawn_launch_pump(Arc::clone(host), launch_id, receiver);
+    Ok(None)
+}
+
+/// Retire a launch: remove it from the map, announce its stop, and tree-kill the process group on
+/// a blocking task (Drop kills the tree). The map removal is the mutex: whichever path removes an
+/// entry announces its stop, and a second path finds it already gone, so the stop is announced
+/// exactly once. `exit_code` is the process exit code on the natural-exit path (from the
+/// watchdog), and `None` when the launch was killed (stop / disconnect / root removal).
+async fn retire_launch(host: &Arc<Host>, launch_id: &str, reason: &str, exit_code: Option<i32>) {
+    let removed = host.active_launches.lock().await.launches.remove(launch_id);
+    if let Some(entry) = removed {
+        let _ = host.events.send(BridgeEvent::launch_stopped(
+            new_id(),
+            now_rfc3339(),
+            launch_id.to_string(),
+            reason,
+            exit_code,
+        ));
+        tokio::task::spawn_blocking(move || drop(entry.session));
+    }
+}
+
+/// Spawn the per-launch output pump: a std thread draining the process's tagged byte channel,
+/// base64ing each chunk, and broadcasting it as a device-wide `launch_output` (launch is
+/// mobile-safe, ADR-0104 D3, so it is NOT filtered for relay connections like terminal output).
+/// The pump only streams output; process exit is detected by the launch watchdog (which polls the
+/// child and retires it with its exit code), so a descendant that keeps an output pipe open does
+/// not prevent the launch from being reaped.
+fn spawn_launch_pump(
+    host: Arc<Host>,
+    launch_id: String,
+    receiver: std::sync::mpsc::Receiver<honeyhub_bridge::launch::LaunchChunk>,
+) {
+    std::thread::spawn(move || {
+        use base64::Engine;
+        while let Ok(chunk) = receiver.recv() {
+            let stream = match chunk.stream {
+                honeyhub_bridge::launch::LaunchStream::Stdout => "stdout",
+                honeyhub_bridge::launch::LaunchStream::Stderr => "stderr",
+            };
+            let encoded = base64::engine::general_purpose::STANDARD.encode(&chunk.data);
+            let event = BridgeEvent::launch_output(
+                new_id(),
+                now_rfc3339(),
+                launch_id.clone(),
+                stream,
+                encoded,
+            );
+            let _ = host.events.send(event);
+        }
     });
 }
 

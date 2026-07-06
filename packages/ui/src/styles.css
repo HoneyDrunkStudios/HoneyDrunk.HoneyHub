@@ -8752,3 +8752,128 @@ button:focus-visible,
   z-index: -1;
   pointer-events: none;
 }
+
+/* Project launch (ADR-0104): the Launch page, target list, and streamed log panel. */
+.launch-view {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  height: 100%;
+  min-height: 0;
+}
+
+.launch-view__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.launch-view__head h2 {
+  margin: 0;
+}
+
+.launch-view__root {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text-muted);
+  font-size: 0.85rem;
+}
+
+.launch-view__root select {
+  max-width: 46ch;
+}
+
+.launch-view__hint {
+  margin: 0;
+  color: var(--text-dim);
+  font-size: 0.82rem;
+  max-width: 80ch;
+}
+
+.launch-view__empty {
+  color: var(--text-dim);
+}
+
+.launch-view__targets {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.launch-view__target {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text);
+  border-radius: var(--radius-sm);
+  padding: 6px 12px;
+  cursor: pointer;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.85rem;
+}
+
+.launch-view__target:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.launch-view__badge {
+  font-size: 0.68rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 1px 6px;
+  border-radius: var(--radius-pill);
+  border: 1px solid var(--border-strong);
+  color: var(--text-muted);
+}
+
+.launch-view__badge--run {
+  color: var(--honey-bright);
+  border-color: var(--honey-line);
+}
+
+.launch-view__controls {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.launch-view__status {
+  color: var(--text-muted);
+  font-size: 0.85rem;
+}
+
+.launch-view__stop {
+  border: 1px solid var(--border-strong);
+  background: var(--surface);
+  color: var(--text-muted);
+  border-radius: var(--radius-sm);
+  padding: 4px 12px;
+  cursor: pointer;
+}
+
+.launch-view__log {
+  flex: 1 1 auto;
+  min-height: 240px;
+  margin: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: #0b0e14;
+  color: var(--text);
+  padding: 10px 12px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.5;
+}

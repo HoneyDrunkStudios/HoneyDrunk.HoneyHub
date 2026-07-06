@@ -1101,7 +1101,14 @@ export type ClientCommand =
   // LSP JSON-RPC message the bridge frames verbatim to the server's stdin.
   | { kind: "lsp_start"; root: string; languageId: string }
   | { kind: "lsp_send"; root: string; languageId: string; message: unknown }
-  | { kind: "lsp_stop"; root: string; languageId: string };
+  | { kind: "lsp_stop"; root: string; languageId: string }
+  // Project launch (ADR-0104): detect a repo's launch targets (a host-owned read), start a
+  // detected target by id (never a command line; launch is mobile-safe / relay-reachable), and
+  // stop a running launch. `openId` is a correlation nonce echoed on the broadcast
+  // `launch_started` so the caller adopts its own launch.
+  | { kind: "detect_launch_targets"; root: string }
+  | { kind: "launch_start"; root: string; targetId: string; openId?: string }
+  | { kind: "launch_stop"; launchId: string };
 
 export interface ReconnectRequest {
   sessionId: string;
@@ -1197,7 +1204,24 @@ export type BridgeEventPayload =
   // cockpit routes `lsp_message` to the matching (languageId, root) client; `lsp_status`
   // is the honest degradation flag (keep in-file IntelliSense when installed/running false).
   | { kind: "lsp_message"; root: string; languageId: string; message: unknown }
-  | { kind: "lsp_status"; status: LspStatus };
+  | { kind: "lsp_status"; status: LspStatus }
+  // Project launch (ADR-0104): the detected targets for a root, a launch started (echoing the
+  // request's openId nonce), one output chunk (base64, tagged stdout/stderr), and a launch
+  // ended. All host-synthesized + device-wide; the cockpit routes them to the launch panel.
+  // Launch output is NOT filtered for relay connections (launch is mobile-safe, D3).
+  | { kind: "launch_targets"; root: string; targets: LaunchTarget[] }
+  | { kind: "launch_started"; launchId: string; targetId: string; openId?: string }
+  | { kind: "launch_output"; launchId: string; stream: string; data: string }
+  | { kind: "launch_stopped"; launchId: string; reason: string; exitCode?: number };
+
+/** A host-detected launch target (ADR-0104 D1). The cockpit shows `label` and badges by
+    `kind`; it starts a launch by sending the `id` back, never a command line. The program and
+    args stay host-side and never cross the wire. */
+export interface LaunchTarget {
+  id: string;
+  label: string;
+  kind: "run" | "build" | "test" | "script";
+}
 
 /** A language-server lifecycle / capability signal (ADR-0102). Mirrors the bridge's serde
     shape. `installed`/`running` are the graceful-degradation flags: when either is false the

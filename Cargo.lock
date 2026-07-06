@@ -1415,6 +1415,7 @@ name = "honeyhub-bridge-host"
 version = "0.27.0"
 dependencies = [
  "axum",
+ "base64 0.22.1",
  "futures-util",
  "honeyhub-bridge",
  "notify",

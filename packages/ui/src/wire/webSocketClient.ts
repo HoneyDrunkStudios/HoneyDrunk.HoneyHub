@@ -624,4 +624,16 @@ export class WebSocketWireClient implements WireClient {
   async lspStop(root: string, languageId: string): Promise<void> {
     await this.dispatch({ kind: "lsp_stop", root, languageId });
   }
+
+  async detectLaunchTargets(root: string): Promise<void> {
+    await this.dispatch({ kind: "detect_launch_targets", root });
+  }
+
+  async startLaunch(root: string, targetId: string, openId: string): Promise<void> {
+    await this.dispatch({ kind: "launch_start", root, targetId, openId });
+  }
+
+  async stopLaunch(launchId: string): Promise<void> {
+    await this.dispatch({ kind: "launch_stop", launchId });
+  }
 }

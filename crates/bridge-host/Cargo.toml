@@ -32,6 +32,9 @@ open = "5"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 uuid = { version = "1.10", features = ["v4"] }
+# Byte-safe framing for launch output (ADR-0104): raw process bytes ride the JSON wire as
+# base64 (the host encodes each chunk). Already resolved in the workspace lock.
+base64 = "0.22"
 # Cross-backend subagents (ADR-0098): the bridge hosts a localhost streamable-HTTP
 # MCP server exposing `dispatch_agent`. rmcp is the official Rust MCP SDK; its
 # streamable-http-server transport nests directly into the same axum 0.8 router that
