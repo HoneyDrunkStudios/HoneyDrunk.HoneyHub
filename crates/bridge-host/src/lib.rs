@@ -422,6 +422,15 @@ async fn ws_handler(
     if !authorized {
         return (StatusCode::UNAUTHORIZED, "invalid pairing token").into_response();
     }
+    // Revocation posture (ADR-0103 D5 "killed on unpair"): the registry is an immutable startup
+    // snapshot (`Arc<PairingRegistry>`) and v1 exposes NO live-revoke wire command, so a device
+    // cannot be revoked while its socket is open. Unpairing is a config edit that takes effect on
+    // the next bridge start, and a restart drops every socket, which the disconnect sweep in
+    // `handle_socket` turns into a tree-kill of that connection's terminals (and the shell dying
+    // with the process tree kills them regardless). So the "kill on unpair" guarantee holds
+    // transitively today. If a live-revoke command is ever added, bind each terminal entry to the
+    // owning device id here and add a device-keyed retirement sweep; the teardown it would call
+    // (`kill_terminal_entry`) already kills-first.
     // A loopback peer is the desktop shell's own cockpit (local); anything else reached the
     // bridge over the LAN / tailnet relay. Only local connections may open a terminal (D3), and
     // terminal events are dropped for non-local connections on egress (see the writer task).
@@ -1384,24 +1393,12 @@ async fn handle_command(
     for server in lsp_orphans {
         tokio::task::spawn_blocking(move || drop(server));
     }
-    // Retire any de-authorized terminals off-lock: announce the close to the OWNING connection
-    // once, then tree-kill the shell on a blocking task (the Drop kills the tree; the reader/
-    // writer threads are detached and self-terminate when the pty closes).
+    // Retire any de-authorized terminals off-lock. Each was already removed from the map under the
+    // terminals lock, so exactly one path closes it. Kill first, then notify (see
+    // `kill_terminal_entry`): a removed root must kill the shell immediately, never after an
+    // owner-channel send that a slow client could stall.
     for (session_id, entry) in terminal_orphans {
-        if !entry.closed.swap(true, Ordering::SeqCst) {
-            // Reliable delivery (see retire_terminal): a backpressured owner must still learn its
-            // terminal was force-killed by a root removal.
-            let _ = entry
-                .owner
-                .send(server_event_frame(BridgeEvent::terminal_closed(
-                    new_id(),
-                    now_rfc3339(),
-                    session_id,
-                    "root_removed",
-                )))
-                .await;
-        }
-        tokio::task::spawn_blocking(move || drop(entry.session));
+        kill_terminal_entry(&session_id, entry, "root_removed");
     }
     // Run a gated content search off the runtime lock, on blocking work: only this client's
     // task waits for it, never every other command.
@@ -2217,22 +2214,33 @@ async fn retire_terminal(host: &Arc<Host>, session_id: &str, reason: &str) {
         .terminals
         .remove(session_id);
     if let Some(entry) = removed {
-        if !entry.closed.swap(true, Ordering::SeqCst) {
-            // `send().await` (not `try_send`) so a backpressured owner still learns its shell was
-            // killed: a busy terminal can fill the outbound channel, and dropping the close there
-            // would leave the cockpit showing a live pane for a dead shell. A disconnected owner
-            // returns `Err` at once, so this never stalls on a gone connection.
-            let _ = entry
-                .owner
-                .send(server_event_frame(BridgeEvent::terminal_closed(
-                    new_id(),
-                    now_rfc3339(),
-                    session_id.to_string(),
-                    reason,
-                )))
-                .await;
-        }
-        tokio::task::spawn_blocking(move || drop(entry.session));
+        kill_terminal_entry(session_id, entry, reason);
+    }
+}
+
+/// Tear down a terminal entry we already removed from the map. **Kill first**: the PTY shell is
+/// tree-killed (via `Drop`) on a blocking task BEFORE anything touches the owner channel, so a
+/// backpressured owner can never delay enforcement (forced close, idle timeout, root removal) while
+/// the shell keeps running. The close is announced once (guarded by `closed` so a concurrent
+/// pump-exit does not double-announce) on a DETACHED task: reliable delivery so a merely-busy
+/// cockpit still learns its shell is gone, but off the caller's teardown loop so a full owner sink
+/// cannot stall the idle watchdog or the root-removal sweep. The map removal is the mutex, so
+/// exactly one path reaches here for a given session.
+fn kill_terminal_entry(session_id: &str, entry: TerminalEntry, reason: &str) {
+    let already_closed = entry.closed.swap(true, Ordering::SeqCst);
+    let TerminalEntry { session, owner, .. } = entry;
+    // KILL FIRST (Drop tree-kills the shell; spawn_blocking keeps the join off the runtime).
+    tokio::task::spawn_blocking(move || drop(session));
+    if !already_closed {
+        let frame = server_event_frame(BridgeEvent::terminal_closed(
+            new_id(),
+            now_rfc3339(),
+            session_id.to_string(),
+            reason,
+        ));
+        tokio::spawn(async move {
+            let _ = owner.send(frame).await;
+        });
     }
 }
 

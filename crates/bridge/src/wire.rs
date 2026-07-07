@@ -595,15 +595,16 @@ pub enum ClientCommand {
     /// Posture: host-owned, opened only after the operator confirms, refused on a relay
     /// connection (desktop-local-only, D3), and anchored to an allowlisted root (D2). The host
     /// resolves the shell itself (the client never supplies a command line). The command is
-    /// acked, and the host broadcasts a [`BridgeEventPayload::TerminalOpened`] carrying the new
-    /// `session_id` on the same channel the output rides (so the cockpit learns the id before
-    /// the first output chunk); a refusal is a `terminal_denied` / `terminal_open_failed` error.
-    /// Shell output then streams as host-synthesized [`BridgeEventPayload::TerminalOutput`].
+    /// acked, and the host sends a [`BridgeEventPayload::TerminalOpened`] carrying the new
+    /// `session_id` to the OWNING connection on the same channel the output rides (so the cockpit
+    /// learns the id before the first output chunk); a refusal is a `terminal_denied` /
+    /// `terminal_open_failed` error. Shell output then streams to that same owner as host-
+    /// synthesized [`BridgeEventPayload::TerminalOutput`]; no other cockpit sees the stream (D1).
     ///
     /// `open_id` is a client-chosen correlation nonce echoed on the resulting `TerminalOpened`
-    /// so the opening cockpit adopts the session that answers ITS request. It matters because
-    /// `terminal_opened` is broadcast (device-wide): without the nonce, two cockpits opening at
-    /// once could each adopt the other's session.
+    /// so the cockpit adopts the session that answers ITS request. It matters even though the
+    /// event is owner-only: one connection can have several opens in flight at once, so the nonce
+    /// matches each `terminal_opened` to the open call that requested it.
     TerminalOpen {
         root: String,
         #[serde(default = "default_terminal_cols")]
@@ -1476,7 +1477,8 @@ impl BridgeEvent {
         }
     }
 
-    /// A device-wide terminal-opened event (ADR-0103). Host-synthesized, so
+    /// An owner-routed terminal-opened event (ADR-0103 D1): the host sends it only to the
+    /// connection that opened the terminal, never device-wide. Host-synthesized, so
     /// `session_id`/`run_id` are empty and `sequence` is `0` (the terminal's own id rides in
     /// the payload, not the envelope).
     pub fn terminal_opened(
@@ -1498,8 +1500,10 @@ impl BridgeEvent {
         }
     }
 
-    /// A device-wide terminal-output chunk (ADR-0103). `data` is base64 of the raw PTY
-    /// bytes. Host-synthesized, so the envelope ids are empty and `sequence` is `0`.
+    /// An owner-routed terminal-output chunk (ADR-0103 D1): raw PTY output is sensitive work
+    /// content, so the host sends it only to the owning connection, never device-wide. `data` is
+    /// base64 of the raw PTY bytes. Host-synthesized, so the envelope ids are empty and
+    /// `sequence` is `0`.
     pub fn terminal_output(
         id: impl Into<String>,
         created_at: impl Into<String>,
@@ -1516,8 +1520,9 @@ impl BridgeEvent {
         }
     }
 
-    /// A device-wide terminal-closed event (ADR-0103). Host-synthesized, so the envelope
-    /// ids are empty and `sequence` is `0`.
+    /// An owner-routed terminal-closed event (ADR-0103 D1): the host sends it only to the owning
+    /// connection, never device-wide. Host-synthesized, so the envelope ids are empty and
+    /// `sequence` is `0`.
     pub fn terminal_closed(
         id: impl Into<String>,
         created_at: impl Into<String>,

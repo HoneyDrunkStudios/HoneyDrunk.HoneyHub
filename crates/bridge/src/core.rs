@@ -1435,24 +1435,27 @@ fn validate_stream_payload(
             ));
         }
         BridgeEventPayload::TerminalOpened { .. } => {
-            // Device-wide, host-synthesized terminal lifecycle, never streamed (ADR-0103).
+            // Host-synthesized, owner-routed terminal lifecycle, never carried on a backend stream
+            // (ADR-0103).
             return Err(BridgeError::new(
                 "event_unexpected_terminal_opened",
-                "a backend stream must not emit device-wide terminal-opened events",
+                "a backend stream must not emit host-synthesized terminal-opened events",
             ));
         }
         BridgeEventPayload::TerminalOutput { .. } => {
-            // Device-wide, host-synthesized terminal output, never streamed (ADR-0103).
+            // Host-synthesized, owner-routed terminal output, never carried on a backend stream
+            // (ADR-0103).
             return Err(BridgeError::new(
                 "event_unexpected_terminal_output",
-                "a backend stream must not emit device-wide terminal output",
+                "a backend stream must not emit host-synthesized terminal output",
             ));
         }
         BridgeEventPayload::TerminalClosed { .. } => {
-            // Device-wide, host-synthesized terminal lifecycle, never streamed (ADR-0103).
+            // Host-synthesized, owner-routed terminal lifecycle, never carried on a backend stream
+            // (ADR-0103).
             return Err(BridgeError::new(
                 "event_unexpected_terminal_closed",
-                "a backend stream must not emit device-wide terminal-closed events",
+                "a backend stream must not emit host-synthesized terminal-closed events",
             ));
         }
     }
