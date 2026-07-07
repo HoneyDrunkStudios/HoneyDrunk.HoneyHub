@@ -403,6 +403,15 @@ async fn ws_handler(
     if !authorized {
         return (StatusCode::UNAUTHORIZED, "invalid pairing token").into_response();
     }
+    // Revocation posture (ADR-0103 D5 / ADR-0104 D2 "killed on unpair"): the registry is an
+    // immutable startup snapshot (`Arc<PairingRegistry>`) and v1 exposes NO live-revoke wire
+    // command, so a device cannot be revoked while its socket is open. Unpairing is a config edit
+    // that takes effect on the next bridge start, and a restart drops every socket, which the
+    // disconnect sweep in `handle_socket` turns into a tree-kill of that connection's terminals and
+    // launches (and the process death tree-kills them regardless). So the "kill on unpair" guarantee
+    // holds transitively today. If a live-revoke command is ever added, bind the resource entries to
+    // the owning device id here and add a device-keyed retirement sweep; the teardown mechanism it
+    // would call (`kill_launch_entry` / terminal retirement) already kills-first.
     // A loopback peer is the desktop shell's own cockpit (local); anything else reached the
     // bridge over the LAN / tailnet relay. This `local` flag is the gate a relay launch's
     // confirmation hangs on: a local launch spawns directly, a relay launch is parked awaiting
@@ -1394,21 +1403,12 @@ async fn handle_command(
     for server in lsp_orphans {
         tokio::task::spawn_blocking(move || drop(server));
     }
-    // Retire any de-authorized launches off-lock: announce the stop to the OWNING connection,
-    // then tree-kill the process group on a blocking task. Each was already removed from the map
-    // under the launches lock, so exactly one path announces its stop.
+    // Retire any de-authorized launches off-lock. Each was already removed from the map under the
+    // launches lock, so exactly one path announces its stop. Kill first, then notify (see
+    // `kill_launch_entry`): a removed root must stop the process immediately, never after an
+    // owner-channel send that a slow client could stall.
     for (launch_id, entry) in launch_orphans {
-        let _ = entry
-            .owner
-            .send(server_event_frame(BridgeEvent::launch_stopped(
-                new_id(),
-                now_rfc3339(),
-                launch_id,
-                "root_removed",
-                None,
-            )))
-            .await;
-        tokio::task::spawn_blocking(move || drop(entry.session));
+        kill_launch_entry(&launch_id, entry, "root_removed", None);
     }
     // Run the gated launch off the runtime lock (starting a process is blocking). A LOCAL launch
     // spawns directly; a RELAY launch is host-gated (ADR-0104 D3): it does not spawn, it parks
@@ -2131,18 +2131,33 @@ async fn start_launch(
 async fn retire_launch(host: &Arc<Host>, launch_id: &str, reason: &str, exit_code: Option<i32>) {
     let removed = host.active_launches.lock().await.launches.remove(launch_id);
     if let Some(entry) = removed {
-        let _ = entry
-            .owner
-            .send(server_event_frame(BridgeEvent::launch_stopped(
-                new_id(),
-                now_rfc3339(),
-                launch_id.to_string(),
-                reason,
-                exit_code,
-            )))
-            .await;
-        tokio::task::spawn_blocking(move || drop(entry.session));
+        kill_launch_entry(launch_id, entry, reason, exit_code);
     }
+}
+
+/// Tear down a launch entry we already removed from the map. **Kill first**: the process group is
+/// tree-killed (via `Drop`) on a blocking task BEFORE anything touches the owner channel, so a full
+/// or slow owner sink can never delay enforcement (forced stop, idle, root removal) while the
+/// process keeps running. Only after the kill is scheduled do we deliver the stop event, and we
+/// deliver it on a DETACHED task so a backpressured client cannot stall the caller's teardown loop
+/// (the exit watchdog and the root-removal sweep both retire in a loop). The map removal is the
+/// mutex, so exactly one path reaches here for a given launch and the stop is announced once.
+fn kill_launch_entry(launch_id: &str, entry: LaunchEntry, reason: &str, exit_code: Option<i32>) {
+    let LaunchEntry { session, owner, .. } = entry;
+    // KILL FIRST (Drop tree-kills the process group; spawn_blocking keeps the join off the runtime).
+    tokio::task::spawn_blocking(move || drop(session));
+    // The frame is built synchronously (so `reason` need not outlive this call); only the owner
+    // sink and the built frame move into the detached notifier.
+    let frame = server_event_frame(BridgeEvent::launch_stopped(
+        new_id(),
+        now_rfc3339(),
+        launch_id.to_string(),
+        reason,
+        exit_code,
+    ));
+    tokio::spawn(async move {
+        let _ = owner.send(frame).await;
+    });
 }
 
 /// Spawn the per-launch output pump: a std thread draining the process's tagged byte channel,

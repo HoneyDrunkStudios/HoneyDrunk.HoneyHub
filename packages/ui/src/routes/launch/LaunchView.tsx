@@ -18,8 +18,7 @@ const ANSI_CSI = new RegExp(String.fromCharCode(27) + "\[[0-9;?]*[A-Za-z]", "g")
 
 /** Strip the common ANSI CSI escape sequences so a colored dev-server log reads as plain text. */
 function stripAnsi(text: string): string {
-  // eslint-disable-next-line no-control-regex
-  return text.replace(/\[[0-9;?]*[A-Za-z]/g, "");
+  return text.replace(ANSI_CSI, "");
 }
 
 interface LaunchViewProps {
