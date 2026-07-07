@@ -22,7 +22,7 @@ interface TerminalViewProps {
   defaultWorkspaceRoot?: string;
 }
 
-function statusLabel(status: TerminalStatus, detail: string | null): string {
+export function statusLabel(status: TerminalStatus, detail: string | null): string {
   switch (status) {
     case "idle":
       return "No terminal open.";

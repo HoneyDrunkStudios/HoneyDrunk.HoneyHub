@@ -1,7 +1,19 @@
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import { MockWireClient } from "../../wire/mockClient";
-import { TerminalView } from "./TerminalView";
+import { TerminalView, statusLabel } from "./TerminalView";
+
+describe("TerminalView statusLabel", () => {
+  it("labels every terminal status", () => {
+    expect(statusLabel("idle", null)).toMatch(/No terminal/i);
+    expect(statusLabel("opening", null)).toMatch(/Opening/i);
+    expect(statusLabel("open", null)).toMatch(/running/i);
+    expect(statusLabel("closed", "exited")).toMatch(/closed \(exited\)/i);
+    expect(statusLabel("closed", null)).toMatch(/closed\./i);
+    expect(statusLabel("denied", null)).toMatch(/desktop-local-only/i);
+    expect(statusLabel("error", "boom")).toMatch(/Could not open.*boom/i);
+  });
+});
 
 // xterm can't render in jsdom, so stub the lazy TerminalPane with a marker that reports the
 // root it was mounted with and exposes buttons to drive its onStatus contract (the page
