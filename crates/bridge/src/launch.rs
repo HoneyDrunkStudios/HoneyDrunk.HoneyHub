@@ -19,10 +19,17 @@ use serde::{Deserialize, Serialize};
 use std::io::Read;
 use std::path::Path;
 use std::process::{Command, Stdio};
-use std::sync::mpsc::{channel, Receiver, Sender};
+use std::sync::mpsc::{sync_channel, Receiver, SyncSender};
 
 /// One inbound read from a launched process's stdout/stderr.
 const LAUNCH_READ_CHUNK: usize = 8192;
+
+/// Bound on the reader-thread -> host-pump output queue. A BOUNDED channel is what keeps a
+/// runaway process (chatty stdout) from growing bridge memory without limit when the owner is
+/// slow or gone: once this many chunks are queued, the reader thread blocks on `send`, which stops
+/// draining the OS pipe, which backpressures the process itself. At `LAUNCH_READ_CHUNK` per chunk
+/// this caps the in-flight buffer near `LAUNCH_OUTPUT_QUEUE * LAUNCH_READ_CHUNK` bytes per launch.
+const LAUNCH_OUTPUT_QUEUE: usize = 256;
 
 /// Which kind of target a detected launch represents, a hint for the cockpit picker.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -312,7 +319,7 @@ impl LaunchSession {
         })?;
         let process_id = child.id();
 
-        let (sender, receiver) = channel::<LaunchChunk>();
+        let (sender, receiver) = sync_channel::<LaunchChunk>(LAUNCH_OUTPUT_QUEUE);
         if let Some(stdout) = child.stdout.take() {
             spawn_reader(stdout, LaunchStream::Stdout, sender.clone());
         }
@@ -367,7 +374,7 @@ impl LaunchSession {
 fn spawn_reader(
     mut source: impl Read + Send + 'static,
     stream: LaunchStream,
-    sender: Sender<LaunchChunk>,
+    sender: SyncSender<LaunchChunk>,
 ) {
     std::thread::spawn(move || {
         let mut buffer = [0_u8; LAUNCH_READ_CHUNK];
