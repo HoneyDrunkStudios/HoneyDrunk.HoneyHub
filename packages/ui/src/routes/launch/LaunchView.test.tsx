@@ -1,7 +1,26 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 import { MockWireClient } from "../../wire/mockClient";
-import { LaunchView } from "./LaunchView";
+import { LaunchView, kindBadge, statusLabel } from "./LaunchView";
+
+describe("LaunchView helpers", () => {
+  it("labels every launch status", () => {
+    expect(statusLabel("idle", null)).toMatch(/No launch/i);
+    expect(statusLabel("starting", null)).toMatch(/Starting/i);
+    expect(statusLabel("running", null)).toMatch(/Running/i);
+    expect(statusLabel("stopped", "exited")).toMatch(/Stopped \(exited\)/i);
+    expect(statusLabel("stopped", null)).toMatch(/Stopped\./i);
+    expect(statusLabel("denied", "nope")).toMatch(/did not offer/i);
+    expect(statusLabel("error", "boom")).toMatch(/Could not start.*boom/i);
+  });
+
+  it("badges every target kind", () => {
+    expect(kindBadge("run")).toBe("Run");
+    expect(kindBadge("build")).toBe("Build");
+    expect(kindBadge("test")).toBe("Test");
+    expect(kindBadge("script")).toBe("Script");
+  });
+});
 
 describe("LaunchView", () => {
   it("prompts to add a root when the allowlist is empty", () => {

@@ -1794,15 +1794,18 @@ pub enum BridgeEventPayload {
     /// resolved `target_id`, and echoes the request's `open_id` correlation nonce so the caller
     /// adopts its own launch (the event is broadcast device-wide). Host-synthesized.
     LaunchStarted {
+        #[serde(rename = "launchId")]
         launch_id: String,
+        #[serde(rename = "targetId")]
         target_id: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[serde(rename = "openId", default, skip_serializing_if = "Option::is_none")]
         open_id: Option<String>,
     },
     /// One chunk of a launch's output (`data`, base64 of the raw bytes), tagged `stdout` or
     /// `stderr`. Host-synthesized, device-wide (launch is mobile-safe, ADR-0104 D3, so unlike
     /// terminal output this is NOT dropped for relay connections). Never persisted (D2).
     LaunchOutput {
+        #[serde(rename = "launchId")]
         launch_id: String,
         stream: String,
         data: String,
@@ -1811,9 +1814,10 @@ pub enum BridgeEventPayload {
     /// (device disconnect / token revoke / root removal). `reason` is a short opaque code and
     /// `exit_code` is present when the process exited on its own. Host-synthesized, device-wide.
     LaunchStopped {
+        #[serde(rename = "launchId")]
         launch_id: String,
         reason: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[serde(rename = "exitCode", default, skip_serializing_if = "Option::is_none")]
         exit_code: Option<i32>,
     },
 }
@@ -3174,5 +3178,85 @@ mod tests {
             ),
             BridgeEventPayload::CheckResult { .. }
         );
+    }
+
+    #[test]
+    fn launch_commands_serialize_camel_case_with_optional_open_id() {
+        assert_eq!(
+            serde_json::to_value(ClientCommand::DetectLaunchTargets {
+                root: "C:/work".to_string()
+            })
+            .expect("serializes"),
+            json!({ "kind": "detect_launch_targets", "root": "C:/work" })
+        );
+        // open_id is omitted when None, present when set.
+        assert_eq!(
+            serde_json::to_value(ClientCommand::LaunchStart {
+                root: "C:/work".to_string(),
+                target_id: "cargo:run".to_string(),
+                open_id: None,
+            })
+            .expect("serializes"),
+            json!({ "kind": "launch_start", "root": "C:/work", "targetId": "cargo:run" })
+        );
+        assert_eq!(
+            serde_json::to_value(ClientCommand::LaunchStart {
+                root: "C:/work".to_string(),
+                target_id: "cargo:run".to_string(),
+                open_id: Some("nonce-1".to_string()),
+            })
+            .expect("serializes"),
+            json!({ "kind": "launch_start", "root": "C:/work", "targetId": "cargo:run", "openId": "nonce-1" })
+        );
+        assert_eq!(
+            serde_json::to_value(ClientCommand::LaunchStop {
+                launch_id: "l1".to_string()
+            })
+            .expect("serializes"),
+            json!({ "kind": "launch_stop", "launchId": "l1" })
+        );
+    }
+
+    #[test]
+    fn launch_events_are_host_synthesized_and_carry_their_payloads() {
+        let at = "2026-07-07T00:00:00Z";
+        let target: crate::launch::LaunchTarget = serde_json::from_value(json!({
+            "id": "cargo:run", "label": "cargo run", "kind": "run"
+        }))
+        .expect("target deserializes");
+
+        let targets = BridgeEvent::launch_targets("e", at, "C:/work".to_string(), vec![target]);
+        // Host-synthesized envelope: empty session/run ids, sequence 0.
+        assert_eq!(targets.session_id, "");
+        assert_eq!(targets.run_id, "");
+        assert_eq!(targets.sequence, 0);
+        let encoded = serde_json::to_value(&targets.payload).expect("encode launch_targets");
+        assert_eq!(encoded["kind"], json!("launch_targets"));
+        assert_eq!(encoded["targets"][0]["id"], json!("cargo:run"));
+        // program/args are host-owned and never serialized.
+        assert!(encoded["targets"][0].get("program").is_none());
+
+        let started = BridgeEvent::launch_started(
+            "e",
+            at,
+            "l1".to_string(),
+            "cargo:run".to_string(),
+            Some("nonce-1".to_string()),
+        );
+        assert!(matches!(
+            started.payload,
+            BridgeEventPayload::LaunchStarted { .. }
+        ));
+
+        let output =
+            BridgeEvent::launch_output("e", at, "l1".to_string(), "stdout", "aGk=".to_string());
+        let encoded = serde_json::to_value(&output.payload).expect("encode launch_output");
+        assert_eq!(encoded["kind"], json!("launch_output"));
+        assert_eq!(encoded["stream"], json!("stdout"));
+
+        let stopped = BridgeEvent::launch_stopped("e", at, "l1".to_string(), "exited", Some(0));
+        let encoded = serde_json::to_value(&stopped.payload).expect("encode launch_stopped");
+        assert_eq!(encoded["kind"], json!("launch_stopped"));
+        assert_eq!(encoded["exitCode"], json!(0));
     }
 }

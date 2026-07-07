@@ -39,7 +39,7 @@ interface LaunchViewProps {
   defaultWorkspaceRoot?: string;
 }
 
-function statusLabel(status: LaunchStatus, detail: string | null): string {
+export function statusLabel(status: LaunchStatus, detail: string | null): string {
   switch (status) {
     case "idle":
       return "No launch running.";
@@ -58,7 +58,7 @@ function statusLabel(status: LaunchStatus, detail: string | null): string {
   }
 }
 
-function kindBadge(kind: LaunchTarget["kind"]): string {
+export function kindBadge(kind: LaunchTarget["kind"]): string {
   switch (kind) {
     case "run":
       return "Run";
