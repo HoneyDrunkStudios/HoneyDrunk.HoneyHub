@@ -94,7 +94,11 @@ struct Host {
     /// shell owned by the connection that opened it (`conn_id`), tree-killed when that
     /// connection disconnects, when its opening root leaves the allowlist, on idle timeout, or
     /// on explicit close. Desktop-local-only: a relay connection is refused a terminal (D3).
-    active_terminals: Mutex<HashMap<String, TerminalEntry>>,
+    /// Live terminals plus the allowlisted-roots snapshot they are authorized against, behind
+    /// ONE mutex (the atomic-revocation pattern, like `LspState`): a terminal's root-auth check
+    /// and its registration are atomic against a concurrent `SetWorkspaceRoots`, so no shell can
+    /// be registered into a just-removed root (ADR-0103 D5 firm root removal).
+    active_terminals: Mutex<TerminalState>,
     /// Reaper channel: a terminal's output-pump thread posts its session id here when the
     /// shell exits (the PTY reached EOF) so a tokio task can drop the now-dead entry off the
     /// map (a std pump thread cannot take the async terminals lock itself).
@@ -102,6 +106,14 @@ struct Host {
     /// Monotonic source of per-connection ids, so a terminal can be tied to the socket that
     /// opened it and swept when that socket disconnects.
     next_conn_id: AtomicU64,
+}
+
+/// The live terminals plus the roots snapshot they are validated against, behind one mutex so a
+/// terminal's authorization check and its registration are atomic against root removal.
+#[derive(Default)]
+struct TerminalState {
+    terminals: HashMap<String, TerminalEntry>,
+    roots: honeyhub_bridge::WorkspaceAllowlist,
 }
 
 /// One live integrated-terminal session and the bookkeeping to supervise it (ADR-0103 D5).
@@ -112,8 +124,15 @@ struct TerminalEntry {
     /// The canonical allowlisted root the shell was opened in, re-checked on a workspace-root
     /// change so a session whose root is removed is retired (D2/D5).
     root: String,
-    /// The connection that owns this session (swept on that connection's disconnect).
+    /// The connection that owns this session. ADR-0103 D1: a terminal is bound to the connection
+    /// that opened it. Only the owner may drive it (input/resize/close are owner-checked) and its
+    /// output is delivered ONLY to the owner (via `owner` below), never broadcast to other local
+    /// cockpits. Swept on that connection's disconnect.
     conn_id: u64,
+    /// The owning connection's outbound frame sink. Every event for this session (opened /
+    /// output / closed) is routed here, so a second local cockpit that learned the session id
+    /// cannot observe another operator's shell.
+    owner: mpsc::Sender<WireFrame>,
     /// Unix-millis of the last input or output, for the idle-timeout watchdog. An `Arc` so the
     /// output pump thread can stamp it lock-free.
     last_activity: Arc<AtomicU64>,
@@ -257,9 +276,14 @@ pub async fn serve(
     // Seed the LSP roots snapshot from the runtime's initial allowlist, so LSP forwarding
     // is authorized against the real roots before the first SetWorkspaceRoots (which then
     // keeps the snapshot in sync under the active_lsp lock).
+    let initial_roots = runtime.workspace_roots();
     let initial_lsp = LspState {
-        roots: honeyhub_bridge::WorkspaceAllowlist::new(runtime.workspace_roots()),
+        roots: honeyhub_bridge::WorkspaceAllowlist::new(initial_roots.clone()),
         ..LspState::default()
+    };
+    let initial_terminals = TerminalState {
+        roots: honeyhub_bridge::WorkspaceAllowlist::new(initial_roots),
+        ..TerminalState::default()
     };
     let (terminal_reaper, mut terminal_reaped) = mpsc::unbounded_channel::<String>();
     let host = Arc::new(Host {
@@ -272,7 +296,7 @@ pub async fn serve(
         events: events_tx,
         watcher: Mutex::new(None),
         dispatch: dispatch.clone(),
-        active_terminals: Mutex::new(HashMap::new()),
+        active_terminals: Mutex::new(initial_terminals),
         terminal_reaper,
         next_conn_id: AtomicU64::new(0),
     });
@@ -296,7 +320,12 @@ pub async fn serve(
         let host = Arc::clone(&host);
         tokio::spawn(async move {
             while let Some(session_id) = terminal_reaped.recv().await {
-                let removed = host.active_terminals.lock().await.remove(&session_id);
+                let removed = host
+                    .active_terminals
+                    .lock()
+                    .await
+                    .terminals
+                    .remove(&session_id);
                 if let Some(entry) = removed {
                     tokio::task::spawn_blocking(move || drop(entry.session));
                 }
@@ -315,8 +344,9 @@ pub async fn serve(
                 ticker.tick().await;
                 let now = now_millis();
                 let expired: Vec<String> = {
-                    let terminals = host.active_terminals.lock().await;
-                    terminals
+                    let state = host.active_terminals.lock().await;
+                    state
+                        .terminals
                         .iter()
                         .filter(|(_, entry)| {
                             now.saturating_sub(entry.last_activity.load(Ordering::Relaxed))
@@ -560,14 +590,6 @@ async fn handle_socket(socket: WebSocket, host: Arc<Host>, local: bool) {
                 event = events_rx.recv() => {
                     match event {
                         Ok(event) => {
-                            // ADR-0103 D3 (desktop-local-only) is enforced on EGRESS as well as
-                            // at open: a terminal's output/lifecycle events are broadcast on the
-                            // shared channel, so a relay (non-loopback) connection must never
-                            // receive them, or an off-box device would read a local shell's byte
-                            // stream (including secrets) despite being unable to open one.
-                            if !local && is_terminal_event(&event) {
-                                continue;
-                            }
                             let frame = WireFrame::server_event(new_id(), event, now_rfc3339());
                             if send_frame(&mut sink, &frame).await.is_err() {
                                 break;
@@ -642,8 +664,9 @@ async fn handle_socket(socket: WebSocket, host: Arc<Host>, local: bool) {
     // Retire every integrated terminal this connection opened (ADR-0103 D5: a session is
     // killed on device disconnect). Dropping each session tree-kills its shell.
     let mine: Vec<String> = {
-        let terminals = host.active_terminals.lock().await;
-        terminals
+        let state = host.active_terminals.lock().await;
+        state
+            .terminals
             .iter()
             .filter(|(_, entry)| entry.conn_id == conn_id)
             .map(|(id, _)| id.clone())
@@ -709,7 +732,7 @@ async fn handle_command(
             | ClientCommand::TerminalResize { .. }
             | ClientCommand::TerminalClose { .. }
     ) {
-        let result = handle_terminal_command(host, command).await;
+        let result = handle_terminal_command(host, command, conn_id).await;
         respond(outbound_tx, frame_id, result).await;
         return;
     }
@@ -796,16 +819,21 @@ async fn handle_command(
                     }
                 }
                 drop(state);
-                // Sweep integrated terminals the same way: any session whose opening root is
-                // no longer allowlisted is moved out here and retired off-lock (ADR-0103 D5).
-                let mut terminals = host.active_terminals.lock().await;
-                let orphan_ids: Vec<String> = terminals
+                // Update the terminal roots snapshot AND sweep orphaned terminals under the ONE
+                // active_terminals lock, so authorization is atomic with the change: `open_terminal`
+                // re-checks the same snapshot under this lock, so no shell can be registered into a
+                // root this sweep just removed (ADR-0103 D5). Orphans are retired off-lock below.
+                let new_roots = runtime.workspace_roots();
+                let mut term_state = host.active_terminals.lock().await;
+                term_state.roots = honeyhub_bridge::WorkspaceAllowlist::new(new_roots);
+                let orphan_ids: Vec<String> = term_state
+                    .terminals
                     .iter()
-                    .filter(|(_, entry)| !runtime.workspace_allows(&entry.root))
+                    .filter(|(_, entry)| !term_state.roots.allows(&entry.root))
                     .map(|(id, _)| id.clone())
                     .collect();
                 for id in orphan_ids {
-                    if let Some(entry) = terminals.remove(&id) {
+                    if let Some(entry) = term_state.terminals.remove(&id) {
                         terminal_orphans.push((id, entry));
                     }
                 }
@@ -1356,17 +1384,22 @@ async fn handle_command(
     for server in lsp_orphans {
         tokio::task::spawn_blocking(move || drop(server));
     }
-    // Retire any de-authorized terminals off-lock: announce the close once, then tree-kill the
-    // shell on a blocking task (the Drop kills the tree; the reader/writer threads are detached
-    // and self-terminate when the pty closes).
+    // Retire any de-authorized terminals off-lock: announce the close to the OWNING connection
+    // once, then tree-kill the shell on a blocking task (the Drop kills the tree; the reader/
+    // writer threads are detached and self-terminate when the pty closes).
     for (session_id, entry) in terminal_orphans {
         if !entry.closed.swap(true, Ordering::SeqCst) {
-            let _ = host.events.send(BridgeEvent::terminal_closed(
-                new_id(),
-                now_rfc3339(),
-                session_id,
-                "root_removed",
-            ));
+            // Reliable delivery (see retire_terminal): a backpressured owner must still learn its
+            // terminal was force-killed by a root removal.
+            let _ = entry
+                .owner
+                .send(server_event_frame(BridgeEvent::terminal_closed(
+                    new_id(),
+                    now_rfc3339(),
+                    session_id,
+                    "root_removed",
+                )))
+                .await;
         }
         tokio::task::spawn_blocking(move || drop(entry.session));
     }
@@ -1412,7 +1445,18 @@ async fn handle_command(
     // caps per connection under the terminals lock.
     let result = match terminal_open_job {
         Some((allowed, root, cols, rows, open_id)) if result.is_ok() => {
-            open_terminal(host, local, allowed, conn_id, root, cols, rows, open_id).await
+            open_terminal(
+                host,
+                local,
+                allowed,
+                conn_id,
+                outbound_tx,
+                root,
+                cols,
+                rows,
+                open_id,
+            )
+            .await
         }
         _ => result,
     };
@@ -1848,6 +1892,12 @@ fn new_id() -> String {
     uuid::Uuid::new_v4().to_string()
 }
 
+/// Wrap a host-synthesized `BridgeEvent` as a `server_event` wire frame, for routing an event to
+/// one owning connection's outbound sink (rather than the device-wide broadcast).
+fn server_event_frame(event: BridgeEvent) -> WireFrame {
+    WireFrame::server_event(new_id(), event, now_rfc3339())
+}
+
 /// Run a plan-usage probe without holding the runtime lock: resolve the backend's
 /// CLI program (honoring the same env overrides the adapters use), execute the PTY
 /// probe on a blocking thread, and **broadcast** the report so every connected
@@ -1960,18 +2010,17 @@ fn spawn_check(host: &Arc<Host>, root: String, check: String) {
     });
 }
 
-/// Gate a command on an allowlisted workspace root, yielding a uniform error
-/// keyed by the human-readable `scope` (e.g. "file", "search root", "git root").
 /// Open an integrated terminal (ADR-0103), gated as the sharpest D9 supervised-exec action:
 /// refused to a relay connection (desktop-local-only, D3), anchored to an allowlisted root
-/// (D2), and capped per connection. On success the PTY-backed shell is registered and an
-/// output pump broadcasts its bytes; the caller receives a `terminal_opened` with the id.
+/// (D2), and capped per connection. Spawned off-lock, then registered under an atomic roots
+/// re-check; the owning connection receives a `terminal_opened` and all subsequent output.
 #[allow(clippy::too_many_arguments)]
 async fn open_terminal(
     host: &Arc<Host>,
     local: bool,
     root_allowed: bool,
     conn_id: u64,
+    owner: &mpsc::Sender<WireFrame>,
     root: String,
     cols: u16,
     rows: u16,
@@ -1989,20 +2038,8 @@ async fn open_terminal(
         .map(|path| path.to_string_lossy().into_owned())
         .unwrap_or_else(|_| root.clone());
 
-    let mut terminals = host.active_terminals.lock().await;
-    let open_here = terminals
-        .values()
-        .filter(|entry| entry.conn_id == conn_id)
-        .count();
-    if open_here >= TERMINAL_MAX_PER_CONN {
-        return Err(BridgeError::new(
-            "terminal_limit",
-            format!(
-                "too many open terminals on this connection (max {TERMINAL_MAX_PER_CONN}); close one first"
-            ),
-        ));
-    }
-
+    // Spawn OFF any lock (openpty + shell spawn is blocking and must not stall the poll loop or
+    // wedge the terminals lock the reaper/retire/disconnect paths need).
     let (session, receiver) =
         honeyhub_bridge::terminal::TerminalSession::open(&canonical, cols, rows)?;
     let session_id = new_id();
@@ -2010,45 +2047,82 @@ async fn open_terminal(
     let closed = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let pump_last_activity = Arc::clone(&last_activity);
     let pump_closed = Arc::clone(&closed);
-    terminals.insert(
-        session_id.clone(),
-        TerminalEntry {
-            session,
-            root: canonical,
-            conn_id,
-            last_activity,
-            closed,
-        },
-    );
+    let pump_owner = owner.clone();
 
-    // Announce the open on the SAME broadcast channel the output pump uses, and BEFORE
-    // spawning the pump. `terminal_output` is broadcast via `host.events`, so if `opened`
-    // rode back only as the unicast command result, an early prompt line could reach the
-    // cockpit before it learned the session id and be dropped. Broadcasting `opened` first
-    // keeps the ordering: the cockpit adopts the id, then the first output matches. The
-    // command itself just acks (`Ok(None)`).
-    let _ = host.events.send(BridgeEvent::terminal_opened(
-        new_id(),
-        now_rfc3339(),
-        session_id.clone(),
-        open_id,
-    ));
+    // Register under the terminals lock, re-checking the roots snapshot held in the SAME lock so
+    // authorization is atomic with the insert. If the root was removed while we spawned, kill the
+    // orphan and deny rather than leave a shell in a de-authorized tree.
+    {
+        let mut state = host.active_terminals.lock().await;
+        if !state.roots.allows(&canonical) {
+            drop(state);
+            tokio::task::spawn_blocking(move || drop(session));
+            return Err(BridgeError::new(
+                "terminal_root_revoked",
+                "the workspace root was removed from the allowlist before the terminal opened",
+            ));
+        }
+        let open_here = state
+            .terminals
+            .values()
+            .filter(|entry| entry.conn_id == conn_id)
+            .count();
+        if open_here >= TERMINAL_MAX_PER_CONN {
+            drop(state);
+            tokio::task::spawn_blocking(move || drop(session));
+            return Err(BridgeError::new(
+                "terminal_limit",
+                format!(
+                    "too many open terminals on this connection (max {TERMINAL_MAX_PER_CONN}); close one first"
+                ),
+            ));
+        }
+        // Audit line (ADR-0103 D6): session id, opening root, and owning connection, so a
+        // terminal is traceable from the bridge console (contents are never logged).
+        eprintln!("[terminal] {session_id} opened in {canonical} (conn {conn_id})");
+        state.terminals.insert(
+            session_id.clone(),
+            TerminalEntry {
+                session,
+                root: canonical,
+                conn_id,
+                owner: owner.clone(),
+                last_activity,
+                closed,
+            },
+        );
+    }
+
+    // Announce the open to the OWNING connection, on the SAME channel the output rides, BEFORE
+    // spawning the pump. Routing both through the owner's sink keeps ordering (the cockpit adopts
+    // the id, then the first output matches) AND keeps a shell's stream off every other cockpit
+    // (ADR-0103 D1 ownership). The command itself just acks.
+    let _ = owner
+        .send(server_event_frame(BridgeEvent::terminal_opened(
+            new_id(),
+            now_rfc3339(),
+            session_id.clone(),
+            open_id,
+        )))
+        .await;
     spawn_terminal_pump(
         Arc::clone(host),
         session_id,
         receiver,
+        pump_owner,
         pump_last_activity,
         pump_closed,
     );
     Ok(None)
 }
 
-/// Handle a terminal input / resize / close off the runtime lock (they touch only the
-/// terminals map). Input feeds keystrokes to the shell's stdin; resize reflows the PTY;
-/// close retires the session (tree-killing the shell).
+/// Handle a terminal input / resize / close off the runtime lock (they touch only the terminals
+/// map). Each is OWNER-CHECKED (ADR-0103 D1): only the connection that opened a session may drive
+/// it, so a second local cockpit that learned a session id cannot feed, resize, or close it.
 async fn handle_terminal_command(
     host: &Arc<Host>,
     command: ClientCommand,
+    conn_id: u64,
 ) -> Result<Option<Vec<BridgeEvent>>, BridgeError> {
     use base64::Engine;
     match command {
@@ -2075,39 +2149,54 @@ async fn handle_terminal_command(
             }
             // `write_input` is a non-blocking queue hand-off (the session's own writer thread
             // does the blocking write), so holding the terminals lock here is O(1).
-            let terminals = host.active_terminals.lock().await;
-            match terminals.get(&session_id) {
-                Some(entry) => {
-                    entry.last_activity.store(now_millis(), Ordering::Relaxed);
-                    entry.session.write_input(&bytes)?;
-                    Ok(None)
-                }
-                None => Err(terminal_not_open()),
-            }
+            let state = host.active_terminals.lock().await;
+            let entry = owned_terminal(&state, &session_id, conn_id)?;
+            entry.last_activity.store(now_millis(), Ordering::Relaxed);
+            entry.session.write_input(&bytes)?;
+            Ok(None)
         }
         ClientCommand::TerminalResize {
             session_id,
             cols,
             rows,
         } => {
-            let terminals = host.active_terminals.lock().await;
-            match terminals.get(&session_id) {
-                Some(entry) => {
-                    // A resize is interaction too, so it stays the idle watchdog (a user reading
-                    // a long pager output and only resizing must not be reaped as idle).
-                    entry.last_activity.store(now_millis(), Ordering::Relaxed);
-                    entry.session.resize(cols, rows);
-                    Ok(None)
-                }
-                None => Err(terminal_not_open()),
-            }
+            let state = host.active_terminals.lock().await;
+            let entry = owned_terminal(&state, &session_id, conn_id)?;
+            // A resize is interaction too, so it stays the idle watchdog (a user reading a long
+            // pager output and only resizing must not be reaped as idle).
+            entry.last_activity.store(now_millis(), Ordering::Relaxed);
+            entry.session.resize(cols, rows);
+            Ok(None)
         }
         ClientCommand::TerminalClose { session_id } => {
+            // Only the owner may close a session, so verify ownership before retiring it.
+            {
+                let state = host.active_terminals.lock().await;
+                owned_terminal(&state, &session_id, conn_id)?;
+            }
             retire_terminal(host, &session_id, "closed").await;
             Ok(None)
         }
         // Unreachable: the caller only routes the three variants above here.
         _ => Ok(None),
+    }
+}
+
+/// Look up a terminal the given connection OWNS. Returns `terminal_not_open` for an unknown id,
+/// and `terminal_not_owner` if the session exists but a different connection opened it, so a
+/// second local cockpit that learned a session id cannot drive it (ADR-0103 D1).
+fn owned_terminal<'a>(
+    state: &'a TerminalState,
+    session_id: &str,
+    conn_id: u64,
+) -> Result<&'a TerminalEntry, BridgeError> {
+    match state.terminals.get(session_id) {
+        Some(entry) if entry.conn_id == conn_id => Ok(entry),
+        Some(_) => Err(BridgeError::new(
+            "terminal_not_owner",
+            "that terminal belongs to a different connection",
+        )),
+        None => Err(terminal_not_open()),
     }
 }
 
@@ -2117,72 +2206,81 @@ fn terminal_not_open() -> BridgeError {
     BridgeError::new("terminal_not_open", "no open terminal for that session id")
 }
 
-/// Retire a terminal: remove it from the map, announce its close exactly once (if no other
-/// path already did), and tree-kill the shell on a blocking task (the Drop kills the tree; the
-/// detached reader/writer threads self-terminate when the pty closes).
+/// Retire a terminal: remove it from the map, announce its close to the OWNING connection
+/// exactly once (if no other path already did), and tree-kill the shell on a blocking task (the
+/// Drop kills the tree; the detached reader/writer threads self-terminate when the pty closes).
 async fn retire_terminal(host: &Arc<Host>, session_id: &str, reason: &str) {
-    let removed = host.active_terminals.lock().await.remove(session_id);
+    let removed = host
+        .active_terminals
+        .lock()
+        .await
+        .terminals
+        .remove(session_id);
     if let Some(entry) = removed {
         if !entry.closed.swap(true, Ordering::SeqCst) {
-            let _ = host.events.send(BridgeEvent::terminal_closed(
-                new_id(),
-                now_rfc3339(),
-                session_id.to_string(),
-                reason,
-            ));
+            // `send().await` (not `try_send`) so a backpressured owner still learns its shell was
+            // killed: a busy terminal can fill the outbound channel, and dropping the close there
+            // would leave the cockpit showing a live pane for a dead shell. A disconnected owner
+            // returns `Err` at once, so this never stalls on a gone connection.
+            let _ = entry
+                .owner
+                .send(server_event_frame(BridgeEvent::terminal_closed(
+                    new_id(),
+                    now_rfc3339(),
+                    session_id.to_string(),
+                    reason,
+                )))
+                .await;
         }
         tokio::task::spawn_blocking(move || drop(entry.session));
     }
 }
 
 /// Spawn the per-session output pump: a std thread draining the PTY's byte channel, base64ing
-/// each chunk, and broadcasting it as a device-wide `terminal_output`. When the channel
-/// disconnects (the shell exited), it announces the close once and asks the reaper to drop the
-/// dead entry. A std thread (not a tokio task) because the source is a blocking `std::mpsc`.
+/// each chunk, and routing it as a `terminal_output` to the OWNING connection ONLY (ADR-0103 D1:
+/// a shell's stream is never delivered to another cockpit). `blocking_send` backpressures the PTY
+/// when the owner is slow; a send error means the owner disconnected, so the pump stops. When the
+/// channel disconnects (the shell exited), it announces the close once and asks the reaper to
+/// drop the dead entry. A std thread (not a tokio task) because the source is a blocking `std::mpsc`.
 fn spawn_terminal_pump(
     host: Arc<Host>,
     session_id: String,
     receiver: std::sync::mpsc::Receiver<Vec<u8>>,
+    owner: mpsc::Sender<WireFrame>,
     last_activity: Arc<AtomicU64>,
     closed: Arc<std::sync::atomic::AtomicBool>,
 ) {
     std::thread::spawn(move || {
         use base64::Engine;
         while let Ok(chunk) = receiver.recv() {
-            last_activity.store(now_millis(), Ordering::Relaxed);
             let encoded = base64::engine::general_purpose::STANDARD.encode(&chunk);
-            let event =
-                BridgeEvent::terminal_output(new_id(), now_rfc3339(), session_id.clone(), encoded);
-            // `send` errs only when there are momentarily no subscribers (every cockpit
-            // disconnected); keep draining so the PTY never blocks. The session is swept on
-            // that disconnect anyway.
-            let _ = host.events.send(event);
+            let frame = server_event_frame(BridgeEvent::terminal_output(
+                new_id(),
+                now_rfc3339(),
+                session_id.clone(),
+                encoded,
+            ));
+            // Route to the owner. A send error means the owner's socket is gone; stop pumping
+            // (the session is swept on that disconnect).
+            if owner.blocking_send(frame).is_err() {
+                break;
+            }
+            // Stamp AFTER the send succeeds, so a terminal that is actively producing output but
+            // merely backpressured on a slow owner is not mistaken for idle and reaped.
+            last_activity.store(now_millis(), Ordering::Relaxed);
         }
-        // The channel disconnected: the shell exited (PTY EOF). Announce the close once, then
-        // ask the reaper to drop the dead entry off the terminals map.
+        // The channel disconnected: the shell exited (PTY EOF). Announce the close once to the
+        // owner, then ask the reaper to drop the dead entry off the terminals map.
         if !closed.swap(true, Ordering::SeqCst) {
-            let _ = host.events.send(BridgeEvent::terminal_closed(
+            let _ = owner.blocking_send(server_event_frame(BridgeEvent::terminal_closed(
                 new_id(),
                 now_rfc3339(),
                 session_id.clone(),
                 "exited",
-            ));
+            )));
         }
         let _ = host.terminal_reaper.send(session_id);
     });
-}
-
-/// True for the host-synthesized terminal lifecycle/output events. They are desktop-local-only
-/// on egress (ADR-0103 D3): the writer task drops them for a relay (non-loopback) connection, so
-/// an off-box device never receives a local shell's byte stream even though it shares the
-/// broadcast channel.
-fn is_terminal_event(event: &BridgeEvent) -> bool {
-    matches!(
-        event.payload,
-        honeyhub_bridge::BridgeEventPayload::TerminalOpened { .. }
-            | honeyhub_bridge::BridgeEventPayload::TerminalOutput { .. }
-            | honeyhub_bridge::BridgeEventPayload::TerminalClosed { .. }
-    )
 }
 
 /// Unix-millis wall clock, for the terminal idle-timeout comparison (monotonicity is not
@@ -2203,6 +2301,8 @@ fn terminal_idle_ms() -> u64 {
         .saturating_mul(1000)
 }
 
+/// Gate a command on an allowlisted workspace root, yielding a uniform error keyed by the
+/// human-readable `scope` (e.g. "file", "search root", "git root").
 fn require(allowed: bool, scope: &str) -> Result<(), BridgeError> {
     if allowed {
         Ok(())

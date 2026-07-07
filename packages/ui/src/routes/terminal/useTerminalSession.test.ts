@@ -123,6 +123,24 @@ describe("useTerminalSession", () => {
     expect(calls.open).toHaveLength(1);
   });
 
+  it("closes a session opened after a close was requested (no leaked shell)", async () => {
+    const { client, calls, emit } = fakeClient();
+    const { result } = renderHook(() => useTerminalSession(client, () => {}));
+    await act(async () => {
+      result.current.open("/repo", 80, 24);
+    });
+    const openId = calls.open[0]!.openId;
+    // Close BEFORE the host answers the open (the pane unmounted mid-open).
+    await act(async () => {
+      result.current.close();
+    });
+    expect(calls.close).toHaveLength(0); // no id yet, nothing to close
+    // The host now reports the opened session; the hook must close it immediately.
+    act(() => emit({ kind: "terminal_opened", sessionId: "t9", openId }));
+    expect(calls.close).toEqual(["t9"]);
+    expect(result.current.sessionId).toBeNull();
+  });
+
   it("surfaces a relay denial as denied status", async () => {
     const { client } = fakeClient({
       openTerminal: vi.fn().mockRejectedValue({

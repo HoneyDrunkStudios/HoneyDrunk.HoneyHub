@@ -82,6 +82,10 @@ export function useTerminalSession(
   // OUR request (the event is broadcast to every cockpit, so a second cockpit opening at the
   // same time would otherwise be adopted here). Cleared once adopted or on failure.
   const pendingOpenIdRef = useRef<string | null>(null);
+  // Set when `close()` is called while an open is still in flight (no session id yet). The shell
+  // is being spawned host-side, so we cannot close it until we learn its id; on adoption we close
+  // it immediately, so a pane that unmounts mid-open never leaks a live shell (ADR-0103 D5).
+  const wantCloseRef = useRef(false);
 
   useEffect(() => {
     const unsubscribe = client.subscribe((event) => {
@@ -94,6 +98,17 @@ export function useTerminalSession(
         ) {
           pendingOpenIdRef.current = null;
           sessionIdRef.current = payload.sessionId;
+          if (wantCloseRef.current) {
+            // A close was requested before this open resolved (e.g. the pane unmounted). Close
+            // the now-known session at once instead of leaving it running, and settle the status
+            // so the hook does not stay stuck on "opening" if the component is still mounted.
+            wantCloseRef.current = false;
+            client.closeTerminal(payload.sessionId).catch(() => {});
+            sessionIdRef.current = null;
+            setStatus("closed");
+            setDetail("closed");
+            return;
+          }
           setSessionId(payload.sessionId);
           setStatus("open");
         }
@@ -125,6 +140,8 @@ export function useTerminalSession(
       }
       const openId = nextOpenId();
       pendingOpenIdRef.current = openId;
+      // Clear any stale pending-close from a prior aborted open, so it cannot tear down THIS one.
+      wantCloseRef.current = false;
       setStatus("opening");
       setDetail(null);
       client.openTerminal(root, cols, rows, openId).catch((error: unknown) => {
@@ -168,6 +185,12 @@ export function useTerminalSession(
       client.closeTerminal(id).catch(() => {
         // Idempotent close; a rejection means it was already gone.
       });
+      return;
+    }
+    // No session id yet: an open is still in flight. Remember the close so the session is torn
+    // down the moment it is adopted, rather than leaking a shell whose id we never learned.
+    if (pendingOpenIdRef.current !== null) {
+      wantCloseRef.current = true;
     }
   }, [client]);
 
