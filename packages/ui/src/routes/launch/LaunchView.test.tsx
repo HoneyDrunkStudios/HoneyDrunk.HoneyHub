@@ -1,5 +1,6 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
+import type { BridgeEvent, BridgeEventPayload } from "@honeydrunk/honeyhub-types";
 import { MockWireClient } from "../../wire/mockClient";
 import { LaunchView, kindBadge, statusLabel } from "./LaunchView";
 
@@ -52,5 +53,46 @@ describe("LaunchView", () => {
 
     fireEvent.click(stop);
     await waitFor(() => expect(screen.getByText(/Stopped/i)).toBeTruthy());
+  });
+
+  it("shows a host-driven confirm bar for a relay launch and confirms it", async () => {
+    // A client that, on start, answers with launch_confirm_required (the relay path), then on
+    // confirm emits launch_started. This exercises the host-driven confirmation bar (ADR-0104 D3).
+    const handlers = new Set<(event: BridgeEvent) => void>();
+    const emit = (payload: BridgeEventPayload) =>
+      handlers.forEach((h) =>
+        h({ id: "e", sessionId: "", runId: "", sequence: 0, createdAt: "", payload })
+      );
+    let openId = "";
+    const confirmed: string[] = [];
+    const client = {
+      subscribe: (h: (event: BridgeEvent) => void) => {
+        handlers.add(h);
+        return () => handlers.delete(h);
+      },
+      detectLaunchTargets: async (root: string) => {
+        emit({ kind: "launch_targets", root, targets: [{ id: "cargo:run", label: "cargo run", kind: "run" }] });
+      },
+      startLaunch: async (_root: string, targetId: string, nonce: string) => {
+        openId = nonce;
+        emit({ kind: "launch_confirm_required", confirmId: "c1", targetId, openId });
+      },
+      confirmLaunch: async (confirmId: string) => {
+        confirmed.push(confirmId);
+        emit({ kind: "launch_started", launchId: "l1", targetId: "cargo:run", openId });
+      },
+      cancelLaunch: async () => {}
+    } as unknown as import("../../wire/client").WireClient;
+
+    render(<LaunchView client={client} active workspaceRoots={["/repo"]} />);
+    fireEvent.click(await screen.findByRole("button", { name: /cargo run/i }));
+
+    // The confirm bar appears naming the target.
+    const confirmBtn = await screen.findByRole("button", { name: /^confirm$/i });
+    expect(screen.getByText(/Waiting for your confirmation/i)).toBeTruthy();
+
+    fireEvent.click(confirmBtn);
+    expect(confirmed).toEqual(["c1"]);
+    await waitFor(() => expect(screen.getByText(/^Running\.$/i)).toBeTruthy());
   });
 });
