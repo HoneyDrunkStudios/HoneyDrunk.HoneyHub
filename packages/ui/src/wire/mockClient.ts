@@ -985,6 +985,15 @@ export class MockWireClient implements WireClient {
     this.emitDevice({ kind: "launch_output", launchId, stream: "stdout", data: utf8ToBase64(line) });
   }
 
+  async confirmLaunch(_confirmId: string): Promise<void> {
+    // The offline demo is always local (localhost), so startLaunch spawns directly and never
+    // asks for a relay confirmation; this stub keeps the seam total.
+  }
+
+  async cancelLaunch(_confirmId: string): Promise<void> {
+    // No relay confirmations in the offline demo (see confirmLaunch); stub for seam totality.
+  }
+
   async stopLaunch(launchId: string): Promise<void> {
     if (this.mockLaunches.delete(launchId)) {
       this.emitDevice({ kind: "launch_stopped", launchId, reason: "stopped" });

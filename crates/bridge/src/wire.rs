@@ -600,15 +600,30 @@ pub enum ClientCommand {
     /// **Launch**: start the detected target `target_id` in the allowlisted `root`. The client
     /// picks a detected id, NEVER a command line; the host resolves it to an argv from its own
     /// detection table and denies an unknown id (ADR-0104 D1). Launch is mobile-safe (a relay
-    /// session may start one, unlike the desktop-local terminal, ADR-0104 D3). Acked; the host
-    /// broadcasts a [`BridgeEventPayload::LaunchStarted`] carrying the `launch_id`, then streams
-    /// [`BridgeEventPayload::LaunchOutput`]. `open_id` is a correlation nonce echoed on
-    /// `LaunchStarted` (the event is broadcast device-wide) so the caller adopts its own launch.
+    /// session may start one, unlike the desktop-local terminal, ADR-0104 D3), but a RELAY launch
+    /// is host-gated by a confirmation: the host does not spawn on this command alone; it answers
+    /// with a [`BridgeEventPayload::LaunchConfirmRequired`] and spawns only after the matching
+    /// [`ClientCommand::LaunchConfirm`]. A LOCAL launch spawns directly. Either way the host then
+    /// emits [`BridgeEventPayload::LaunchStarted`] and streams [`BridgeEventPayload::LaunchOutput`]
+    /// to the owning connection. `open_id` is a correlation nonce echoed back so the caller adopts
+    /// its own launch (and its own confirmation).
     LaunchStart {
         root: String,
         target_id: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         open_id: Option<String>,
+    },
+    /// **Launch**: confirm a pending RELAY launch the host is holding (ADR-0104 D3, host-enforced
+    /// per-launch confirmation). `confirm_id` is the host-generated token from the preceding
+    /// `LaunchConfirmRequired`; the host spawns the held target only for the connection that
+    /// requested it. An unknown/expired/foreign `confirm_id` is denied.
+    LaunchConfirm {
+        confirm_id: String,
+    },
+    /// **Launch**: discard a parked RELAY launch the operator declined, freeing its pending slot
+    /// immediately rather than waiting for the host TTL. Owner-checked; unknown ids are a no-op.
+    LaunchCancel {
+        confirm_id: String,
     },
     /// **Launch**: stop a running launch, tree-killing its process group (ADR-0104 D2). Acked
     /// with a final [`BridgeEventPayload::LaunchStopped`]. Idempotent.
@@ -1466,7 +1481,7 @@ impl BridgeEvent {
         }
     }
 
-    /// A device-wide launch-started event (ADR-0104). Host-synthesized envelope.
+    /// A launch-started event (ADR-0104), routed to the owning connection. Host-synthesized envelope.
     pub fn launch_started(
         id: impl Into<String>,
         created_at: impl Into<String>,
@@ -1482,6 +1497,28 @@ impl BridgeEvent {
             created_at: created_at.into(),
             payload: BridgeEventPayload::LaunchStarted {
                 launch_id,
+                target_id,
+                open_id,
+            },
+        }
+    }
+
+    /// A relay-launch confirm-required event (ADR-0104 D3), routed to the owning connection.
+    pub fn launch_confirm_required(
+        id: impl Into<String>,
+        created_at: impl Into<String>,
+        confirm_id: String,
+        target_id: String,
+        open_id: Option<String>,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            session_id: String::new(),
+            run_id: String::new(),
+            sequence: 0,
+            created_at: created_at.into(),
+            payload: BridgeEventPayload::LaunchConfirmRequired {
+                confirm_id,
                 target_id,
                 open_id,
             },
@@ -1792,7 +1829,7 @@ pub enum BridgeEventPayload {
     },
     /// A launch started (ADR-0104 D2). Carries the `launch_id` the client keys stop on, the
     /// resolved `target_id`, and echoes the request's `open_id` correlation nonce so the caller
-    /// adopts its own launch (the event is broadcast device-wide). Host-synthesized.
+    /// adopts its own launch. Host-synthesized and routed ONLY to the owning connection.
     LaunchStarted {
         #[serde(rename = "launchId")]
         launch_id: String,
@@ -1801,9 +1838,22 @@ pub enum BridgeEventPayload {
         #[serde(rename = "openId", default, skip_serializing_if = "Option::is_none")]
         open_id: Option<String>,
     },
+    /// A relay launch is waiting on the operator's confirmation (ADR-0104 D3). Carries the host
+    /// `confirm_id` the client returns via [`ClientCommand::LaunchConfirm`], the resolved
+    /// `target_id` to name in the prompt, and the request's `open_id`. Host-synthesized, routed
+    /// only to the owning connection.
+    LaunchConfirmRequired {
+        #[serde(rename = "confirmId")]
+        confirm_id: String,
+        #[serde(rename = "targetId")]
+        target_id: String,
+        #[serde(rename = "openId", default, skip_serializing_if = "Option::is_none")]
+        open_id: Option<String>,
+    },
     /// One chunk of a launch's output (`data`, base64 of the raw bytes), tagged `stdout` or
-    /// `stderr`. Host-synthesized, device-wide (launch is mobile-safe, ADR-0104 D3, so unlike
-    /// terminal output this is NOT dropped for relay connections). Never persisted (D2).
+    /// `stderr`. Host-synthesized and routed ONLY to the owning connection (raw process output is
+    /// sensitive work content, ADR-0104 D2 / ADR-0090 D11, so it is never delivered to any other
+    /// device). Never persisted.
     LaunchOutput {
         #[serde(rename = "launchId")]
         launch_id: String,
@@ -1812,7 +1862,8 @@ pub enum BridgeEventPayload {
     },
     /// A launch ended (ADR-0104 D2): the operator stopped it, it exited, or the host retired it
     /// (device disconnect / token revoke / root removal). `reason` is a short opaque code and
-    /// `exit_code` is present when the process exited on its own. Host-synthesized, device-wide.
+    /// `exit_code` is present when the process exited on its own. Host-synthesized, routed only to
+    /// the owning connection.
     LaunchStopped {
         #[serde(rename = "launchId")]
         launch_id: String,
@@ -3215,6 +3266,38 @@ mod tests {
             .expect("serializes"),
             json!({ "kind": "launch_stop", "launchId": "l1" })
         );
+        assert_eq!(
+            serde_json::to_value(ClientCommand::LaunchConfirm {
+                confirm_id: "c1".to_string()
+            })
+            .expect("serializes"),
+            json!({ "kind": "launch_confirm", "confirmId": "c1" })
+        );
+        assert_eq!(
+            serde_json::to_value(ClientCommand::LaunchCancel {
+                confirm_id: "c1".to_string()
+            })
+            .expect("serializes"),
+            json!({ "kind": "launch_cancel", "confirmId": "c1" })
+        );
+    }
+
+    #[test]
+    fn launch_confirm_required_is_host_synthesized_and_camel_cased() {
+        let event = BridgeEvent::launch_confirm_required(
+            "e",
+            "2026-07-07T00:00:00Z",
+            "c1".to_string(),
+            "cargo:run".to_string(),
+            Some("nonce-1".to_string()),
+        );
+        assert_eq!(event.session_id, "");
+        assert_eq!(event.sequence, 0);
+        let encoded = serde_json::to_value(&event.payload).expect("encode");
+        assert_eq!(encoded["kind"], json!("launch_confirm_required"));
+        assert_eq!(encoded["confirmId"], json!("c1"));
+        assert_eq!(encoded["targetId"], json!("cargo:run"));
+        assert_eq!(encoded["openId"], json!("nonce-1"));
     }
 
     #[test]

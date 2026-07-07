@@ -8877,3 +8877,23 @@ button:focus-visible,
   font-size: 12px;
   line-height: 1.5;
 }
+
+/* Launch relay confirmation bar (ADR-0104 D3). */
+.launch-view__confirm {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  border: 1px solid var(--honey-line);
+  background: var(--honey-glow);
+  color: var(--text);
+  border-radius: var(--radius-sm);
+  padding: 10px 14px;
+  font-size: 0.9rem;
+}
+
+.launch-view__confirm-actions {
+  display: flex;
+  gap: 8px;
+}

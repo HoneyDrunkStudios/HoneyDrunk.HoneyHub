@@ -11,16 +11,6 @@ import { useLaunchSession, type LaunchStatus } from "./useLaunchSession";
 /** Cap on retained log characters, a bounded scrollback (ADR-0104 D2). */
 const LOG_MAX_CHARS = 200_000;
 
-/** True when the cockpit was loaded over the relay rather than on the machine running the
-    bridge. The host classifies the same connection by peer address; this is the client-side
-    mirror that drives the per-launch relay confirmation (ADR-0104 D3). */
-function isRelayConnection(): boolean {
-  // Strip the brackets an IPv6 URL host carries (e.g. "[::1]"), then treat localhost and the whole
-  // 127.0.0.0/8 loopback range as local, matching the host's `is_loopback()` classification.
-  const host = (globalThis.location?.hostname ?? "").replace(/^\[|\]$/g, "");
-  return !(host === "localhost" || host === "::1" || host === "" || /^127\./.test(host));
-}
-
 /** ANSI CSI escape sequence: ESC (0x1b) then [, params, and a final letter. Built via
     fromCharCode so the source carries no invisible control-character literal (which reads as
     a missing ESC anchor in diffs and would strip legitimate bracketed text like [vite]). */
@@ -45,6 +35,8 @@ export function statusLabel(status: LaunchStatus, detail: string | null): string
       return "No launch running.";
     case "starting":
       return "Starting...";
+    case "confirming":
+      return "Waiting for your confirmation...";
     case "running":
       return "Running.";
     case "stopped":
@@ -131,23 +123,20 @@ export function LaunchView({
     }
   }, [log]);
 
-  // "Busy" (starting or running) disables the root switch and target buttons; "can stop" is only
-  // true once a launch is actually adopted (a launch id exists), since stop() is a no-op before
-  // that, so a Stop control shown during "starting" would silently do nothing.
-  const isRunning = session.status === "running" || session.status === "starting";
+  // "Busy" (starting/confirming/running) disables the root switch and target buttons; "can stop"
+  // is only true once a launch is actually adopted (a launch id exists), since stop() is a no-op
+  // before that, so a Stop control shown during "starting" would silently do nothing.
+  const isRunning =
+    session.status === "running" ||
+    session.status === "starting" ||
+    session.status === "confirming";
   const canStop = session.launchId !== null;
 
   const onStart = useCallback(
     (target: LaunchTarget) => {
-      // A relay session confirms each launch, naming the target, before it runs (ADR-0104 D3).
-      if (isRelayConnection()) {
-        const ok = globalThis.confirm?.(
-          `Start "${target.label}" on the machine running the bridge, from this device?`
-        );
-        if (ok !== true) {
-          return;
-        }
-      }
+      // Always ask the host to start; it decides (a local launch spawns directly, a relay launch
+      // comes back asking for confirmation, ADR-0104 D3). The confirmation gate is host-enforced,
+      // not a client-side check a compromised relay client could skip.
       setLog("");
       session.start(selectedRoot, target.id);
     },
@@ -219,6 +208,31 @@ export function LaunchView({
             </li>
           ))}
         </ul>
+      )}
+
+      {session.awaitingConfirm !== null && (
+        <div className="launch-view__confirm" role="alertdialog" aria-label="Confirm launch">
+          <span>
+            Start <strong>{session.awaitingConfirm}</strong> on the machine running the bridge,
+            from this device?
+          </span>
+          <div className="launch-view__confirm-actions">
+            <button
+              type="button"
+              className="launch-view__button"
+              onClick={() => session.confirm()}
+            >
+              Confirm
+            </button>
+            <button
+              type="button"
+              className="launch-view__stop"
+              onClick={() => session.cancelConfirm()}
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
       )}
 
       <div className="launch-view__controls">

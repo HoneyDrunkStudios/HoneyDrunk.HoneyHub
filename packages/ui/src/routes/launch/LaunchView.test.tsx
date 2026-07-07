@@ -7,6 +7,7 @@ describe("LaunchView helpers", () => {
   it("labels every launch status", () => {
     expect(statusLabel("idle", null)).toMatch(/No launch/i);
     expect(statusLabel("starting", null)).toMatch(/Starting/i);
+    expect(statusLabel("confirming", null)).toMatch(/confirmation/i);
     expect(statusLabel("running", null)).toMatch(/Running/i);
     expect(statusLabel("stopped", "exited")).toMatch(/Stopped \(exited\)/i);
     expect(statusLabel("stopped", null)).toMatch(/Stopped\./i);

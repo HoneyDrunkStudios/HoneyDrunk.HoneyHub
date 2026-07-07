@@ -10,6 +10,8 @@ function fakeClient(overrides?: Partial<WireClient>): {
   client: WireClient;
   calls: {
     start: Array<{ root: string; targetId: string; openId: string }>;
+    confirm: string[];
+    cancel: string[];
     stop: string[];
   };
   emit: (payload: BridgeEventPayload) => void;
@@ -17,6 +19,8 @@ function fakeClient(overrides?: Partial<WireClient>): {
   let handler: ((event: BridgeEvent) => void) | undefined;
   const calls = {
     start: [] as Array<{ root: string; targetId: string; openId: string }>,
+    confirm: [] as string[],
+    cancel: [] as string[],
     stop: [] as string[]
   };
   const client = {
@@ -28,6 +32,12 @@ function fakeClient(overrides?: Partial<WireClient>): {
     },
     startLaunch: async (root: string, targetId: string, openId: string) => {
       calls.start.push({ root, targetId, openId });
+    },
+    confirmLaunch: async (confirmId: string) => {
+      calls.confirm.push(confirmId);
+    },
+    cancelLaunch: async (confirmId: string) => {
+      calls.cancel.push(confirmId);
     },
     stopLaunch: async (launchId: string) => {
       calls.stop.push(launchId);
@@ -103,6 +113,53 @@ describe("useLaunchSession", () => {
       emit({ kind: "launch_output", launchId: "l1", stream: "stdout", data: bytesToBase64(rocket.slice(2)) })
     );
     expect(output.join("")).toBe("\u{1f680}");
+  });
+
+  it("routes a relay launch through a host confirmation before running", async () => {
+    const { client, calls, emit } = fakeClient();
+    const { result } = renderHook(() => useLaunchSession(client, () => {}));
+    await act(async () => {
+      result.current.start("/repo", "cargo:run");
+    });
+    const openId = calls.start[0]!.openId;
+
+    // The host holds the relay launch and asks for confirmation.
+    act(() =>
+      emit({ kind: "launch_confirm_required", confirmId: "c1", targetId: "cargo:run", openId })
+    );
+    expect(result.current.status).toBe("confirming");
+    expect(result.current.awaitingConfirm).toBe("cargo:run");
+    expect(calls.confirm).toHaveLength(0);
+
+    await act(async () => {
+      result.current.confirm();
+    });
+    expect(calls.confirm).toEqual(["c1"]);
+
+    // After confirmation the host spawns and reports the launch; it adopts and runs.
+    act(() => emit({ kind: "launch_started", launchId: "l1", targetId: "cargo:run", openId }));
+    expect(result.current.status).toBe("running");
+    expect(result.current.awaitingConfirm).toBeNull();
+  });
+
+  it("cancels a pending relay confirmation back to idle", async () => {
+    const { client, calls, emit } = fakeClient();
+    const { result } = renderHook(() => useLaunchSession(client, () => {}));
+    await act(async () => {
+      result.current.start("/repo", "cargo:run");
+    });
+    const openId = calls.start[0]!.openId;
+    act(() =>
+      emit({ kind: "launch_confirm_required", confirmId: "c1", targetId: "cargo:run", openId })
+    );
+    await act(async () => {
+      result.current.cancelConfirm();
+    });
+    expect(result.current.status).toBe("idle");
+    expect(result.current.awaitingConfirm).toBeNull();
+    expect(calls.confirm).toHaveLength(0);
+    // Cancel tells the host to free the parked slot immediately.
+    expect(calls.cancel).toEqual(["c1"]);
   });
 
   it("does not start twice while one is in flight", async () => {

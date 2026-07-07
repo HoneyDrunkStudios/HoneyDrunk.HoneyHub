@@ -7,7 +7,14 @@ import { base64ToBytes } from "../../wire/base64";
 // Launch output is line-oriented program stdout/stderr, so (unlike the terminal) the view can
 // render it in a plain scrolling log with no xterm, and this hook is fully unit-testable.
 
-export type LaunchStatus = "idle" | "starting" | "running" | "stopped" | "error" | "denied";
+export type LaunchStatus =
+  | "idle"
+  | "starting"
+  | "confirming"
+  | "running"
+  | "stopped"
+  | "error"
+  | "denied";
 
 export interface LaunchSession {
   /** The launch's lifecycle state, for the panel's status line. */
@@ -17,8 +24,16 @@ export interface LaunchSession {
   /** A short opaque code for a stop (`exited` / `stopped` / `disconnected` / `root_removed`) or
       the message for a denial / error. */
   detail: string | null;
-  /** Start the detected `targetId` in `root`. An unknown/unoffered id is denied by the host. */
+  /** When a RELAY launch is awaiting the operator's confirmation (ADR-0104 D3), the target id
+      to name in the prompt; null otherwise. */
+  awaitingConfirm: string | null;
+  /** Start the detected `targetId` in `root`. An unknown/unoffered id is denied by the host. A
+      relay start returns a confirmation request (see `awaitingConfirm`) rather than running. */
   start: (root: string, targetId: string) => void;
+  /** Confirm a relay launch the host is holding (sends the host confirm token). */
+  confirm: () => void;
+  /** Cancel a pending relay confirmation (the held launch expires host-side). */
+  cancelConfirm: () => void;
   /** Stop the running launch (tree-kills the process group). Idempotent. */
   stop: () => void;
 }
@@ -69,6 +84,13 @@ export function useLaunchSession(
   const [status, setStatus] = useState<LaunchStatus>("idle");
   const [launchId, setLaunchId] = useState<string | null>(null);
   const [detail, setDetail] = useState<string | null>(null);
+  const [awaitingConfirm, setAwaitingConfirm] = useState<string | null>(null);
+  // The host confirm token for a parked relay launch, held until the operator confirms/cancels.
+  const confirmIdRef = useRef<string | null>(null);
+  // True once a confirmation has been sent for the in-flight open, so a duplicate/replayed
+  // `launch_confirm_required` (host resend, reconnect replay) does not bounce a confirmed launch
+  // back to the prompt with a stale token. Reset per open.
+  const confirmSentRef = useRef(false);
 
   const onOutputRef = useRef(onOutput);
   onOutputRef.current = onOutput;
@@ -93,9 +115,25 @@ export function useLaunchSession(
           launchIdRef.current === null
         ) {
           pendingOpenIdRef.current = null;
+          confirmIdRef.current = null;
+          setAwaitingConfirm(null);
           launchIdRef.current = payload.launchId;
           setLaunchId(payload.launchId);
           setStatus("running");
+        }
+        return;
+      }
+      if (payload.kind === "launch_confirm_required") {
+        // A relay start needs the operator's confirmation before the host spawns (ADR-0104 D3).
+        // Ignore a duplicate/replayed prompt once a confirmation has already been sent.
+        if (
+          payload.openId === pendingOpenIdRef.current &&
+          launchIdRef.current === null &&
+          !confirmSentRef.current
+        ) {
+          confirmIdRef.current = payload.confirmId;
+          setAwaitingConfirm(payload.targetId);
+          setStatus("confirming");
         }
         return;
       }
@@ -127,6 +165,7 @@ export function useLaunchSession(
       }
       const openId = nextOpenId();
       pendingOpenIdRef.current = openId;
+      confirmSentRef.current = false;
       decoderRef.current = new TextDecoder();
       setStatus("starting");
       setDetail(null);
@@ -149,5 +188,36 @@ export function useLaunchSession(
     }
   }, [client]);
 
-  return { status, launchId, detail, start, stop };
+  const confirm = useCallback(() => {
+    const confirmId = confirmIdRef.current;
+    if (confirmId === null) {
+      return;
+    }
+    confirmIdRef.current = null;
+    confirmSentRef.current = true;
+    setAwaitingConfirm(null);
+    setStatus("starting");
+    client.confirmLaunch(confirmId).catch((error: unknown) => {
+      pendingOpenIdRef.current = null;
+      const { code, message } = errorParts(error);
+      setStatus(code === "launch_denied" ? "denied" : "error");
+      setDetail(message);
+    });
+  }, [client]);
+
+  const cancelConfirm = useCallback(() => {
+    // Tell the host to discard the parked launch NOW so its pending slot frees immediately
+    // (rather than holding a per-connection slot for the full TTL); then clear local state.
+    const confirmId = confirmIdRef.current;
+    if (confirmId !== null) {
+      client.cancelLaunch(confirmId).catch(() => {});
+    }
+    confirmIdRef.current = null;
+    pendingOpenIdRef.current = null;
+    confirmSentRef.current = false;
+    setAwaitingConfirm(null);
+    setStatus("idle");
+  }, [client]);
+
+  return { status, launchId, detail, awaitingConfirm, start, confirm, cancelConfirm, stop };
 }

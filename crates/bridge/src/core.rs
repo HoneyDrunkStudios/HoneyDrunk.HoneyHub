@@ -1448,6 +1448,13 @@ fn validate_stream_payload(
                 "a backend stream must not emit device-wide launch-started events",
             ));
         }
+        BridgeEventPayload::LaunchConfirmRequired { .. } => {
+            // Host-synthesized relay-launch confirmation prompt, never streamed (ADR-0104).
+            return Err(BridgeError::new(
+                "event_unexpected_launch_confirm_required",
+                "a backend stream must not emit device-wide launch-confirm-required events",
+            ));
+        }
         BridgeEventPayload::LaunchOutput { .. } => {
             // Device-wide, host-synthesized launch output, never streamed (ADR-0104).
             return Err(BridgeError::new(
@@ -3283,6 +3290,14 @@ mod tests {
                 open_id: None,
             }),
             "event_unexpected_launch_started"
+        );
+        assert_eq!(
+            err_code(BridgeEventPayload::LaunchConfirmRequired {
+                confirm_id: "c".to_string(),
+                target_id: "cargo:run".to_string(),
+                open_id: None,
+            }),
+            "event_unexpected_launch_confirm_required"
         );
         assert_eq!(
             err_code(BridgeEventPayload::LaunchOutput {

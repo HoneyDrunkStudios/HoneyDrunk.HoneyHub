@@ -275,6 +275,12 @@ export interface WireClient {
       is a correlation nonce echoed on the broadcast `launch_started` so the caller adopts its
       own launch; output then streams as `launch_output` events via `subscribe`. */
   startLaunch(root: string, targetId: string, openId: string): Promise<void>;
+  /** **Launch**: confirm a parked relay launch (ADR-0104 D3). After a relay `startLaunch`, the
+      host answers with a `launch_confirm_required` event; this returns its `confirmId` to spawn
+      the held launch. Local launches never need this. */
+  confirmLaunch(confirmId: string): Promise<void>;
+  /** **Launch**: discard a parked relay launch the operator declined, freeing its host slot. */
+  cancelLaunch(confirmId: string): Promise<void>;
   /** **Launch**: stop a running launch, tree-killing its process group. The host answers with a
       final `launch_stopped` event via `subscribe`. Idempotent. */
   stopLaunch(launchId: string): Promise<void>;

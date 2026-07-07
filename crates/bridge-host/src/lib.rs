@@ -51,6 +51,11 @@ pub const DEFAULT_POLL_INTERVAL: Duration = Duration::from_millis(80);
 /// Cap on project launches a single connection may hold at once, so a buggy or hostile client
 /// cannot spawn unbounded long-lived processes (ADR-0104 D2 supervised lifecycle).
 const LAUNCH_MAX_PER_CONN: usize = 8;
+/// Cap on relay launches a single connection may have parked awaiting confirmation, so an
+/// unconfirmed-launch flood cannot grow the pending map without bound.
+const PENDING_LAUNCH_MAX_PER_CONN: usize = 8;
+/// A parked relay launch expires if not confirmed within this window (swept by the watchdog).
+const PENDING_LAUNCH_TTL_MS: u64 = 5 * 60 * 1000;
 /// How often the launch watchdog polls each launch for process exit.
 const LAUNCH_EXIT_POLL: Duration = Duration::from_secs(1);
 
@@ -89,6 +94,11 @@ struct Host {
     /// atomic-revocation pattern already used for LSP). Launch is mobile-safe (relay-reachable),
     /// so a relay connection may start one (D3).
     active_launches: Mutex<LaunchState>,
+    /// Relay launches held awaiting the operator's confirmation (ADR-0104 D3): a relay
+    /// `LaunchStart` does not spawn; it parks here keyed by a host `confirm_id` and spawns only on
+    /// the matching `LaunchConfirm` from the same connection. Cleared on that connection's
+    /// disconnect and swept for staleness.
+    pending_launches: Mutex<HashMap<String, PendingLaunch>>,
     /// Monotonic source of per-connection ids, so a launch (or terminal) can be tied to the
     /// socket that opened it and swept when that socket disconnects.
     next_conn_id: AtomicU64,
@@ -102,6 +112,21 @@ struct LaunchState {
     roots: honeyhub_bridge::WorkspaceAllowlist,
 }
 
+/// A relay launch held awaiting the operator's confirmation (ADR-0104 D3).
+struct PendingLaunch {
+    /// The canonical allowlisted project root (gated at request time; re-checked atomically at spawn).
+    root: String,
+    /// The detected target id the operator will confirm; the host re-resolves it to an argv at spawn.
+    target_id: String,
+    /// The connection that requested it; only that connection may confirm (and the confirming
+    /// connection's own outbound sink is used at spawn, so the parked entry holds no sender).
+    conn_id: u64,
+    /// The client's correlation nonce, echoed on the eventual `LaunchStarted`.
+    open_id: Option<String>,
+    /// Unix-millis when parked, for the staleness sweep.
+    created_at: u64,
+}
+
 /// One live project launch and the bookkeeping to supervise it (ADR-0104 D2).
 struct LaunchEntry {
     /// The supervised child. Dropping it tree-kills the process group.
@@ -111,6 +136,9 @@ struct LaunchEntry {
     root: String,
     /// The connection that owns this launch (swept on that connection's disconnect).
     conn_id: u64,
+    /// The owning connection's outbound sink. Every event for this launch (started/output/stopped)
+    /// is routed here so raw process output never reaches another device (ADR-0104 D2, D11).
+    owner: mpsc::Sender<WireFrame>,
 }
 
 /// The running language servers plus the allowlisted-roots snapshot they are validated
@@ -268,6 +296,7 @@ pub async fn serve(
         watcher: Mutex::new(None),
         dispatch: dispatch.clone(),
         active_launches: Mutex::new(initial_launches),
+        pending_launches: Mutex::new(HashMap::new()),
         next_conn_id: AtomicU64::new(0),
     });
 
@@ -305,6 +334,12 @@ pub async fn serve(
                 for (launch_id, code) in exited {
                     retire_launch(&host, &launch_id, "exited", code).await;
                 }
+                // Expire relay launches parked awaiting confirmation past the TTL, so an
+                // unconfirmed launch does not linger in the pending map indefinitely.
+                let now = now_millis();
+                host.pending_launches.lock().await.retain(|_, pending| {
+                    now.saturating_sub(pending.created_at) < PENDING_LAUNCH_TTL_MS
+                });
             }
         });
     }
@@ -369,14 +404,18 @@ async fn ws_handler(
         return (StatusCode::UNAUTHORIZED, "invalid pairing token").into_response();
     }
     // A loopback peer is the desktop shell's own cockpit (local); anything else reached the
-    // bridge over the LAN / tailnet relay. Launch is mobile-safe so both may start one, but the
-    // classification is recorded in the launch audit and drives the cockpit's relay confirmation.
+    // bridge over the LAN / tailnet relay. This `local` flag is the gate a relay launch's
+    // confirmation hangs on: a local launch spawns directly, a relay launch is parked awaiting
+    // `LaunchConfirm` (ADR-0104 D3).
     //
-    // Honest limitation (ADR-0090 D4): this trusts the transport peer address. It correctly labels
-    // the default relay topologies (a tailnet/LAN client arrives with its own address), but a peer
-    // reaching the bridge THROUGH a localhost-terminating forwarder the operator set up presents as
-    // loopback and is recorded local. Since launch is mobile-safe either way, the only effect is a
-    // mislabelled audit line and a skipped client confirmation, not a bypassed exec gate.
+    // Honest limitation (ADR-0090 D4): this trusts the transport peer address, which correctly
+    // labels the supported relay topology (a Tailscale peer arrives with its 100.64/10 address, so
+    // it is classified relay and gated). A peer reaching the bridge THROUGH a localhost-terminating
+    // forwarder the operator deliberately set up (an `ssh -L` tunnel, a 127.0.0.1-bound reverse
+    // proxy) presents as loopback and is treated local, spawning without the confirmation. That is
+    // the operator choosing to expose a local surface, the same way port-forwarding exposes any
+    // localhost service; a hardened remote-debug/-launch posture behind an explicit host opt-in is
+    // the ADR-0104 D5 / ADR-0106 D5 follow-up, and this classifier does not claim to defeat it.
     let local = peer.ip().is_loopback();
     upgrade.on_upgrade(move |socket| handle_socket(socket, state.host, local))
 }
@@ -620,6 +659,11 @@ async fn handle_socket(socket: WebSocket, host: Arc<Host>, local: bool) {
     for launch_id in mine {
         retire_launch(&host, &launch_id, "disconnected", None).await;
     }
+    // Drop any relay launches this connection parked but never confirmed (nothing spawned yet).
+    host.pending_launches
+        .lock()
+        .await
+        .retain(|_, pending| pending.conn_id != conn_id);
 
     // ADR-0102 D-C: a language server never outlives the cockpit it serves. When the LAST
     // client disconnects, retire every running server (a second connected device keeps them
@@ -669,8 +713,26 @@ async fn handle_command(
     }
 
     // LaunchStop touches only the launches map, never the runtime, so handle it off-lock too.
+    // Owner-checked: only the connection that started a launch may stop it.
     if let ClientCommand::LaunchStop { launch_id } = &command {
-        retire_launch(host, launch_id, "stopped", None).await;
+        let result = stop_owned_launch(host, launch_id, conn_id).await;
+        respond(outbound_tx, frame_id, result).await;
+        return;
+    }
+
+    // LaunchConfirm confirms a parked RELAY launch and spawns it, off the runtime lock.
+    if let ClientCommand::LaunchConfirm { confirm_id } = &command {
+        let result = confirm_relay_launch(host, confirm_id, conn_id, outbound_tx).await;
+        respond(outbound_tx, frame_id, result).await;
+        return;
+    }
+
+    // LaunchCancel discards a parked RELAY launch the operator declined (frees its slot now).
+    if let ClientCommand::LaunchCancel { confirm_id } = &command {
+        host.pending_launches
+            .lock()
+            .await
+            .retain(|id, pending| !(id == confirm_id && pending.conn_id == conn_id));
         respond(outbound_tx, frame_id, Ok(None)).await;
         return;
     }
@@ -1306,9 +1368,11 @@ async fn handle_command(
                     None
                 })
             }
-            ClientCommand::LaunchStop { .. } => {
-                // Handled before the runtime lock (see the early return in `handle_command`);
-                // this arm exists only for match exhaustiveness and is never reached.
+            ClientCommand::LaunchStop { .. }
+            | ClientCommand::LaunchConfirm { .. }
+            | ClientCommand::LaunchCancel { .. } => {
+                // Handled before the runtime lock (see the early returns in `handle_command`);
+                // these arms exist only for match exhaustiveness and are never reached.
                 Ok(None)
             }
             ClientCommand::Resume { .. } => Err(BridgeError::new(
@@ -1330,25 +1394,32 @@ async fn handle_command(
     for server in lsp_orphans {
         tokio::task::spawn_blocking(move || drop(server));
     }
-    // Retire any de-authorized launches off-lock: announce the stop, then tree-kill the process
-    // group on a blocking task. Each was already removed from the map under the launches lock, so
-    // exactly one path announces its stop.
+    // Retire any de-authorized launches off-lock: announce the stop to the OWNING connection,
+    // then tree-kill the process group on a blocking task. Each was already removed from the map
+    // under the launches lock, so exactly one path announces its stop.
     for (launch_id, entry) in launch_orphans {
-        let _ = host.events.send(BridgeEvent::launch_stopped(
-            new_id(),
-            now_rfc3339(),
-            launch_id,
-            "root_removed",
-            None,
-        ));
+        let _ = entry
+            .owner
+            .send(server_event_frame(BridgeEvent::launch_stopped(
+                new_id(),
+                now_rfc3339(),
+                launch_id,
+                "root_removed",
+                None,
+            )))
+            .await;
         tokio::task::spawn_blocking(move || drop(entry.session));
     }
-    // Spawn a gated launch off the runtime lock (starting a process is blocking). The root was
-    // authorized under the lock; `start_launch` resolves the host-owned target (denying an
-    // unknown id) and caps per connection under the launches lock.
+    // Run the gated launch off the runtime lock (starting a process is blocking). A LOCAL launch
+    // spawns directly; a RELAY launch is host-gated (ADR-0104 D3): it does not spawn, it parks
+    // awaiting the operator's confirmation and answers with `launch_confirm_required`.
     let result = match launch_job {
         Some((launch_local, root, target_id, open_id)) if result.is_ok() => {
-            start_launch(host, launch_local, conn_id, root, target_id, open_id).await
+            if launch_local {
+                start_launch(host, true, conn_id, outbound_tx, root, target_id, open_id).await
+            } else {
+                park_relay_launch(host, conn_id, outbound_tx, root, target_id, open_id).await
+            }
         }
         _ => result,
     };
@@ -1820,6 +1891,21 @@ fn new_id() -> String {
     uuid::Uuid::new_v4().to_string()
 }
 
+/// Wrap a host-synthesized `BridgeEvent` as a `server_event` wire frame, for routing an event to
+/// one owning connection's outbound sink (rather than the device-wide broadcast).
+fn server_event_frame(event: BridgeEvent) -> WireFrame {
+    WireFrame::server_event(new_id(), event, now_rfc3339())
+}
+
+/// Unix-millis wall clock, for the pending-launch TTL (monotonicity is not required, just a
+/// coarse "has it been parked too long" check).
+fn now_millis() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_millis() as u64)
+        .unwrap_or(0)
+}
+
 /// Run a plan-usage probe without holding the runtime lock: resolve the backend's
 /// CLI program (honoring the same env overrides the adapters use), execute the PTY
 /// probe on a blocking thread, and **broadcast** the report so every connected
@@ -1943,6 +2029,7 @@ async fn start_launch(
     host: &Arc<Host>,
     local: bool,
     conn_id: u64,
+    owner: &mpsc::Sender<WireFrame>,
     root: String,
     target_id: String,
     open_id: Option<String>,
@@ -1958,8 +2045,35 @@ async fn start_launch(
         ));
     };
 
-    // Spawn OFF any lock (openpty/CreateProcess is blocking and must not stall the poll loop or
-    // wedge the launches lock the reaper/stop/disconnect paths need).
+    // Pre-spawn gate: check the roots snapshot AND the per-connection cap BEFORE spawning, so an
+    // over-limit (or de-authorized) request never briefly runs repository code before being
+    // killed. (A rare concurrent double-start could exceed the cap by one; that is a bounded
+    // over-count, not an un-gated spawn.)
+    {
+        let state = host.active_launches.lock().await;
+        if !state.roots.allows(&canonical) {
+            return Err(BridgeError::new(
+                "launch_root_revoked",
+                "the project root was removed from the workspace allowlist before launch",
+            ));
+        }
+        let open_here = state
+            .launches
+            .values()
+            .filter(|entry| entry.conn_id == conn_id)
+            .count();
+        if open_here >= LAUNCH_MAX_PER_CONN {
+            return Err(BridgeError::new(
+                "launch_limit",
+                format!(
+                    "too many launches on this connection (max {LAUNCH_MAX_PER_CONN}); stop one first"
+                ),
+            ));
+        }
+    }
+
+    // Spawn OFF the lock (CreateProcess is blocking and must not stall the poll loop or wedge the
+    // launches lock the reaper/stop/disconnect paths need).
     let (session, receiver) = honeyhub_bridge::launch::LaunchSession::spawn(&target, &canonical)?;
 
     // Register under the launches lock, re-checking the roots snapshot held in that same lock so
@@ -1976,25 +2090,10 @@ async fn start_launch(
                 "the project root was removed from the workspace allowlist before launch",
             ));
         }
-        let open_here = state
-            .launches
-            .values()
-            .filter(|entry| entry.conn_id == conn_id)
-            .count();
-        if open_here >= LAUNCH_MAX_PER_CONN {
-            drop(state);
-            tokio::task::spawn_blocking(move || drop(session));
-            return Err(BridgeError::new(
-                "launch_limit",
-                format!(
-                    "too many launches on this connection (max {LAUNCH_MAX_PER_CONN}); stop one first"
-                ),
-            ));
-        }
         // Audit line (ADR-0104 D7): target id, project root, and whether the launch was local or
         // relay-reached, so a launch is traceable from the bridge console.
         eprintln!(
-            "[launch] {launch_id} target={target_id} root={canonical} {}",
+            "[launch] {launch_id} target={target_id} root={canonical} {} (conn {conn_id})",
             if local { "local" } else { "relay" }
         );
         state.launches.insert(
@@ -2003,53 +2102,60 @@ async fn start_launch(
                 session,
                 root: canonical,
                 conn_id,
+                owner: owner.clone(),
             },
         );
     }
 
-    // Announce the start on the SAME broadcast channel the output rides, BEFORE spawning the pump,
-    // so the cockpit adopts the launch id before the first output chunk (matching the terminal
-    // ordering fix). The command itself just acks.
-    let _ = host.events.send(BridgeEvent::launch_started(
-        new_id(),
-        now_rfc3339(),
-        launch_id.clone(),
-        target_id,
-        open_id,
-    ));
-    spawn_launch_pump(Arc::clone(host), launch_id, receiver);
+    // Announce the start to the OWNING connection, on the SAME sink the output rides, BEFORE
+    // spawning the pump, so the cockpit adopts the launch id before the first output chunk and no
+    // other device ever sees this launch's stream. The command itself just acks.
+    let _ = owner
+        .send(server_event_frame(BridgeEvent::launch_started(
+            new_id(),
+            now_rfc3339(),
+            launch_id.clone(),
+            target_id,
+            open_id,
+        )))
+        .await;
+    spawn_launch_pump(launch_id, receiver, owner.clone());
     Ok(None)
 }
 
-/// Retire a launch: remove it from the map, announce its stop, and tree-kill the process group on
-/// a blocking task (Drop kills the tree). The map removal is the mutex: whichever path removes an
-/// entry announces its stop, and a second path finds it already gone, so the stop is announced
-/// exactly once. `exit_code` is the process exit code on the natural-exit path (from the
-/// watchdog), and `None` when the launch was killed (stop / disconnect / root removal).
+/// Retire a launch: remove it from the map, announce its stop to the OWNING connection, and
+/// tree-kill the process group on a blocking task (Drop kills the tree). The map removal is the
+/// mutex: whichever path removes an entry announces its stop, and a second path finds it already
+/// gone, so the stop is announced exactly once. `exit_code` is the process exit code on the
+/// natural-exit path (from the watchdog), and `None` when the launch was killed.
 async fn retire_launch(host: &Arc<Host>, launch_id: &str, reason: &str, exit_code: Option<i32>) {
     let removed = host.active_launches.lock().await.launches.remove(launch_id);
     if let Some(entry) = removed {
-        let _ = host.events.send(BridgeEvent::launch_stopped(
-            new_id(),
-            now_rfc3339(),
-            launch_id.to_string(),
-            reason,
-            exit_code,
-        ));
+        let _ = entry
+            .owner
+            .send(server_event_frame(BridgeEvent::launch_stopped(
+                new_id(),
+                now_rfc3339(),
+                launch_id.to_string(),
+                reason,
+                exit_code,
+            )))
+            .await;
         tokio::task::spawn_blocking(move || drop(entry.session));
     }
 }
 
 /// Spawn the per-launch output pump: a std thread draining the process's tagged byte channel,
-/// base64ing each chunk, and broadcasting it as a device-wide `launch_output` (launch is
-/// mobile-safe, ADR-0104 D3, so it is NOT filtered for relay connections like terminal output).
-/// The pump only streams output; process exit is detected by the launch watchdog (which polls the
-/// child and retires it with its exit code), so a descendant that keeps an output pipe open does
-/// not prevent the launch from being reaped.
+/// base64ing each chunk, and routing it as a `launch_output` to the OWNING connection ONLY (raw
+/// process output is sensitive work content, ADR-0104 D2 / D11, so it never reaches another
+/// device). `blocking_send` backpressures a slow owner; a send error means the owner disconnected,
+/// so the pump stops. Process exit is detected by the launch watchdog (which polls the child and
+/// retires it with its exit code), so a descendant that keeps an output pipe open does not prevent
+/// the launch from being reaped.
 fn spawn_launch_pump(
-    host: Arc<Host>,
     launch_id: String,
     receiver: std::sync::mpsc::Receiver<honeyhub_bridge::launch::LaunchChunk>,
+    owner: mpsc::Sender<WireFrame>,
 ) {
     std::thread::spawn(move || {
         use base64::Engine;
@@ -2059,16 +2165,141 @@ fn spawn_launch_pump(
                 honeyhub_bridge::launch::LaunchStream::Stderr => "stderr",
             };
             let encoded = base64::engine::general_purpose::STANDARD.encode(&chunk.data);
-            let event = BridgeEvent::launch_output(
+            let frame = server_event_frame(BridgeEvent::launch_output(
                 new_id(),
                 now_rfc3339(),
                 launch_id.clone(),
                 stream,
                 encoded,
-            );
-            let _ = host.events.send(event);
+            ));
+            if owner.blocking_send(frame).is_err() {
+                break;
+            }
         }
     });
+}
+
+/// Stop a launch the given connection OWNS (ADR-0104): only the connection that started a launch
+/// may stop it. An unknown id is a no-op (idempotent); a foreign id is denied.
+async fn stop_owned_launch(
+    host: &Arc<Host>,
+    launch_id: &str,
+    conn_id: u64,
+) -> Result<Option<Vec<BridgeEvent>>, BridgeError> {
+    {
+        let state = host.active_launches.lock().await;
+        match state.launches.get(launch_id) {
+            Some(entry) if entry.conn_id == conn_id => {}
+            Some(_) => {
+                return Err(BridgeError::new(
+                    "launch_not_owner",
+                    "that launch belongs to a different connection",
+                ))
+            }
+            None => return Ok(None),
+        }
+    }
+    retire_launch(host, launch_id, "stopped", None).await;
+    Ok(None)
+}
+
+/// Park a RELAY launch awaiting the operator's confirmation (ADR-0104 D3, host-enforced): resolve
+/// the target now (deny an unknown id before parking), cap the pending queue, then ask the owning
+/// connection to confirm. The launch does NOT spawn until the matching `LaunchConfirm` arrives.
+async fn park_relay_launch(
+    host: &Arc<Host>,
+    conn_id: u64,
+    owner: &mpsc::Sender<WireFrame>,
+    root: String,
+    target_id: String,
+    open_id: Option<String>,
+) -> Result<Option<Vec<BridgeEvent>>, BridgeError> {
+    let canonical = std::fs::canonicalize(&root)
+        .map(|path| path.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| root.clone());
+    // Host-owned resolution up front: an unknown id is denied rather than parked (D1).
+    if honeyhub_bridge::launch::resolve_target(&canonical, &target_id).is_none() {
+        return Err(BridgeError::new(
+            "launch_denied",
+            format!("no detected launch target '{target_id}' in this project"),
+        ));
+    }
+    let confirm_id = new_id();
+    {
+        let mut pending = host.pending_launches.lock().await;
+        let parked_here = pending.values().filter(|p| p.conn_id == conn_id).count();
+        if parked_here >= PENDING_LAUNCH_MAX_PER_CONN {
+            return Err(BridgeError::new(
+                "launch_limit",
+                "too many launches awaiting confirmation; confirm or cancel one first",
+            ));
+        }
+        pending.insert(
+            confirm_id.clone(),
+            PendingLaunch {
+                root: canonical,
+                target_id: target_id.clone(),
+                conn_id,
+                open_id: open_id.clone(),
+                created_at: now_millis(),
+            },
+        );
+    }
+    let _ = owner
+        .send(server_event_frame(BridgeEvent::launch_confirm_required(
+            new_id(),
+            now_rfc3339(),
+            confirm_id,
+            target_id,
+            open_id,
+        )))
+        .await;
+    Ok(None)
+}
+
+/// Confirm a parked relay launch and spawn it (ADR-0104 D3). Only the connection that requested it
+/// may confirm; `start_launch` re-resolves the target and re-checks the root atomically, so a root
+/// removed between park and confirm still denies the spawn.
+async fn confirm_relay_launch(
+    host: &Arc<Host>,
+    confirm_id: &str,
+    conn_id: u64,
+    owner: &mpsc::Sender<WireFrame>,
+) -> Result<Option<Vec<BridgeEvent>>, BridgeError> {
+    let pending = {
+        let mut map = host.pending_launches.lock().await;
+        match map.get(confirm_id) {
+            Some(entry) if entry.conn_id == conn_id => map.remove(confirm_id),
+            Some(_) => {
+                return Err(BridgeError::new(
+                    "launch_confirm_denied",
+                    "that confirmation belongs to a different connection",
+                ))
+            }
+            None => {
+                return Err(BridgeError::new(
+                    "launch_confirm_unknown",
+                    "no launch is awaiting that confirmation (it may have expired)",
+                ))
+            }
+        }
+    };
+    let Some(pending) = pending else {
+        return Err(BridgeError::new(
+            "launch_confirm_unknown",
+            "no launch is awaiting that confirmation",
+        ));
+    };
+    start_launch(
+        host,
+        false,
+        conn_id,
+        owner,
+        pending.root,
+        pending.target_id,
+        pending.open_id,
+    )
+    .await
 }
 
 /// Gate a command on an allowlisted workspace root, yielding a uniform error

@@ -77,15 +77,22 @@ pub fn detect_targets(root: &str) -> Vec<LaunchTarget> {
     let dir = Path::new(root);
     let mut targets = Vec::new();
 
-    // .NET: a solution or any C# project resolves to dotnet run/build/test.
-    if has_ext(dir, "sln") || has_ext(dir, "csproj") {
-        targets.push(LaunchTarget::new(
-            "dotnet:run",
-            "dotnet run",
-            LaunchKind::Run,
-            "dotnet",
-            vec!["run".to_string()],
-        ));
+    // .NET: `dotnet build` / `dotnet test` resolve against a solution or any project, but
+    // `dotnet run` needs an UNAMBIGUOUS single runnable project. A `.sln` or multiple `.csproj`
+    // makes `dotnet run` fail-or-ambiguous, so it is offered only when there is exactly one
+    // `.csproj` and no solution; the operator reaches a specific project another way otherwise.
+    let has_sln = has_ext(dir, "sln");
+    let csproj_count = count_ext(dir, "csproj");
+    if has_sln || csproj_count > 0 {
+        if !has_sln && csproj_count == 1 {
+            targets.push(LaunchTarget::new(
+                "dotnet:run",
+                "dotnet run",
+                LaunchKind::Run,
+                "dotnet",
+                vec!["run".to_string()],
+            ));
+        }
         targets.push(LaunchTarget::new(
             "dotnet:build",
             "dotnet build",
@@ -155,16 +162,24 @@ pub fn resolve_target(root: &str, id: &str) -> Option<LaunchTarget> {
 
 /// True when `dir` directly contains any file with extension `ext` (case-insensitive).
 fn has_ext(dir: &Path, ext: &str) -> bool {
+    count_ext(dir, ext) > 0
+}
+
+/// Count files in `dir` (non-recursive) with extension `ext` (case-insensitive).
+fn count_ext(dir: &Path, ext: &str) -> usize {
     let Ok(entries) = std::fs::read_dir(dir) else {
-        return false;
+        return 0;
     };
-    entries.flatten().any(|entry| {
-        entry
-            .path()
-            .extension()
-            .and_then(|value| value.to_str())
-            .is_some_and(|value| value.eq_ignore_ascii_case(ext))
-    })
+    entries
+        .flatten()
+        .filter(|entry| {
+            entry
+                .path()
+                .extension()
+                .and_then(|value| value.to_str())
+                .is_some_and(|value| value.eq_ignore_ascii_case(ext))
+        })
+        .count()
 }
 
 /// Parse the declared script NAMES out of a `package.json` body. Names only; the host resolves
@@ -442,6 +457,42 @@ mod tests {
         assert!(ids.contains(&"cargo:run"));
         assert!(ids.contains(&"cargo:build"));
         assert!(ids.contains(&"cargo:test"));
+    }
+
+    #[test]
+    fn dotnet_run_only_for_a_single_unambiguous_project() {
+        // One .csproj, no solution: run + build + test.
+        let single = tempfile::tempdir().expect("temp dir");
+        std::fs::write(single.path().join("App.csproj"), "<Project/>").expect("write csproj");
+        let ids: Vec<String> = detect_targets(&single.path().to_string_lossy())
+            .into_iter()
+            .map(|t| t.id)
+            .collect();
+        assert!(ids.contains(&"dotnet:run".to_string()));
+        assert!(ids.contains(&"dotnet:build".to_string()));
+
+        // A solution present: run is ambiguous, so only build + test are offered.
+        let sln = tempfile::tempdir().expect("temp dir");
+        std::fs::write(sln.path().join("App.sln"), "").expect("write sln");
+        std::fs::write(sln.path().join("App.csproj"), "<Project/>").expect("write csproj");
+        let ids: Vec<String> = detect_targets(&sln.path().to_string_lossy())
+            .into_iter()
+            .map(|t| t.id)
+            .collect();
+        assert!(!ids.contains(&"dotnet:run".to_string()));
+        assert!(ids.contains(&"dotnet:build".to_string()));
+        assert!(ids.contains(&"dotnet:test".to_string()));
+
+        // Multiple projects, no solution: run is still ambiguous.
+        let multi = tempfile::tempdir().expect("temp dir");
+        std::fs::write(multi.path().join("A.csproj"), "<Project/>").expect("write a");
+        std::fs::write(multi.path().join("B.csproj"), "<Project/>").expect("write b");
+        let ids: Vec<String> = detect_targets(&multi.path().to_string_lossy())
+            .into_iter()
+            .map(|t| t.id)
+            .collect();
+        assert!(!ids.contains(&"dotnet:run".to_string()));
+        assert!(ids.contains(&"dotnet:build".to_string()));
     }
 
     #[test]

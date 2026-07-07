@@ -633,6 +633,14 @@ export class WebSocketWireClient implements WireClient {
     await this.dispatch({ kind: "launch_start", root, targetId, openId });
   }
 
+  async confirmLaunch(confirmId: string): Promise<void> {
+    await this.dispatch({ kind: "launch_confirm", confirmId });
+  }
+
+  async cancelLaunch(confirmId: string): Promise<void> {
+    await this.dispatch({ kind: "launch_cancel", confirmId });
+  }
+
   async stopLaunch(launchId: string): Promise<void> {
     await this.dispatch({ kind: "launch_stop", launchId });
   }

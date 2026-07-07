@@ -1108,6 +1108,11 @@ export type ClientCommand =
   // `launch_started` so the caller adopts its own launch.
   | { kind: "detect_launch_targets"; root: string }
   | { kind: "launch_start"; root: string; targetId: string; openId?: string }
+  // Confirm a parked RELAY launch (ADR-0104 D3): the host holds a relay launch_start and answers
+  // with launch_confirm_required; this returns the host confirmId to actually spawn it.
+  | { kind: "launch_confirm"; confirmId: string }
+  // Discard a parked relay launch the operator declined, freeing its slot before the host TTL.
+  | { kind: "launch_cancel"; confirmId: string }
   | { kind: "launch_stop"; launchId: string };
 
 export interface ReconnectRequest {
@@ -1206,11 +1211,13 @@ export type BridgeEventPayload =
   | { kind: "lsp_message"; root: string; languageId: string; message: unknown }
   | { kind: "lsp_status"; status: LspStatus }
   // Project launch (ADR-0104): the detected targets for a root, a launch started (echoing the
-  // request's openId nonce), one output chunk (base64, tagged stdout/stderr), and a launch
-  // ended. All host-synthesized + device-wide; the cockpit routes them to the launch panel.
-  // Launch output is NOT filtered for relay connections (launch is mobile-safe, D3).
+  // request's openId nonce), a relay launch awaiting the operator's confirmation (D3), one output
+  // chunk (base64, tagged stdout/stderr), and a launch ended. All host-synthesized; the
+  // started/confirm/output/stopped events are routed ONLY to the owning connection (raw output is
+  // sensitive work content, D2/D11), while launch_targets is a device-wide detection answer.
   | { kind: "launch_targets"; root: string; targets: LaunchTarget[] }
   | { kind: "launch_started"; launchId: string; targetId: string; openId?: string }
+  | { kind: "launch_confirm_required"; confirmId: string; targetId: string; openId?: string }
   | { kind: "launch_output"; launchId: string; stream: string; data: string }
   | { kind: "launch_stopped"; launchId: string; reason: string; exitCode?: number };
 
