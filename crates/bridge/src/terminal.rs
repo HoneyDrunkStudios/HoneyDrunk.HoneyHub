@@ -26,7 +26,7 @@
 use crate::adapter::BridgeError;
 use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
 use std::io::{Read, Write};
-use std::sync::mpsc::{channel, sync_channel, Receiver, Sender, SyncSender, TrySendError};
+use std::sync::mpsc::{sync_channel, Receiver, SyncSender, TrySendError};
 
 /// One inbound PTY read. 8 KiB matches the usage-probe reader and is a good balance between
 /// latency and syscall overhead for an interactive stream.
@@ -36,6 +36,13 @@ const PTY_READ_CHUNK: usize = 8192;
 /// normally drains instantly; a bounded queue means that if the shell stops reading its
 /// stdin, further input is refused (`terminal_backpressure`) rather than blocking the caller.
 const INPUT_QUEUE_DEPTH: usize = 256;
+
+/// Depth of the output queue draining the PTY reader thread to the host pump. A BOUNDED channel
+/// keeps a runaway shell (chatty output) from growing bridge memory without limit when the owner
+/// is slow or gone: once this many chunks are queued, the reader thread blocks on `send`, which
+/// stops draining the PTY, which backpressures the shell. At `PTY_READ_CHUNK` per chunk this caps
+/// the in-flight buffer near `OUTPUT_QUEUE_DEPTH * PTY_READ_CHUNK` bytes per session.
+const OUTPUT_QUEUE_DEPTH: usize = 256;
 
 /// Environment override for the shell a terminal launches. Unset defaults to the operator's
 /// login shell (`$SHELL` on Unix, `%COMSPEC%` on Windows), then a platform fallback. The
@@ -150,7 +157,7 @@ impl TerminalSession {
         // host drops the receiver (session retired). The channel closing is how the host
         // observes the shell's exit. The thread is detached (its handle dropped): on Drop we
         // must not join it (see the Drop impl), and it self-terminates when the pty closes.
-        let (sender, receiver) = channel::<Vec<u8>>();
+        let (sender, receiver) = sync_channel::<Vec<u8>>(OUTPUT_QUEUE_DEPTH);
         std::thread::spawn(move || pump_output(&mut reader, &sender));
 
         // Writer thread: own the pty writer and drain the bounded input queue. Keeping the
@@ -242,7 +249,7 @@ impl TerminalSession {
 /// Drain PTY output to `sender` until EOF or a hard read error (shell exit), one chunk per read.
 /// A signal-interrupted read (`ErrorKind::Interrupted`) is retried rather than treated as exit,
 /// so a stray signal to the reader thread does not close a live session.
-fn pump_output(reader: &mut (dyn Read + Send), sender: &Sender<Vec<u8>>) {
+fn pump_output(reader: &mut (dyn Read + Send), sender: &SyncSender<Vec<u8>>) {
     let mut buffer = [0_u8; PTY_READ_CHUNK];
     loop {
         match reader.read(&mut buffer) {
