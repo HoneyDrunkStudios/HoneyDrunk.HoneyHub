@@ -660,4 +660,21 @@ export class WebSocketWireClient implements WireClient {
   async closeTerminal(sessionId: string): Promise<void> {
     await this.dispatch({ kind: "terminal_close", sessionId });
   }
+
+  async openDapSession(
+    root: string,
+    adapterId: string,
+    configId: string,
+    openId: string
+  ): Promise<void> {
+    await this.dispatch({ kind: "dap_start", root, adapterId, configId, openId });
+  }
+
+  async sendDap(sessionId: string, message: unknown): Promise<void> {
+    await this.dispatch({ kind: "dap_send", sessionId, message });
+  }
+
+  async stopDap(sessionId: string): Promise<void> {
+    await this.dispatch({ kind: "dap_stop", sessionId });
+  }
 }

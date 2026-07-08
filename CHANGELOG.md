@@ -5,6 +5,18 @@
 Dogfooding round: smarter cost signals, hardened group checks, a resizable chat dock, and a
 user-centered Jobs page.
 
+- **Debugger, bridge foundation** (PRD-0013 / ADR-0106, Slice A): the bridge gains a supervised
+  Debug Adapter Protocol (DAP) runner. The host owns adapter selection (a named `netcoredbg` id
+  resolved against a built-in allowlist table, never a client command line), speaks the
+  Content-Length DAP framing to a supervised adapter subprocess, and proxies DAP frames to the
+  owning cockpit only (a frame can carry runtime memory). Debugging is desktop-local-only (a relay
+  connection is refused), the session is tree-killed (adapter plus debuggee) on stop / disconnect /
+  token revocation / root removal, and a client-supplied `launch` is refused: under ADR-0106 D3 the
+  host resolves the debuggee, and host-side resolution per adapter is not designed yet (D3 /
+  Open-Question-#2), so a real debug session cannot start until that lands. This ships only the
+  reviewed bridge runner and the additive `dap_*` wire surface (no cockpit Debug page yet); the
+  debug UI (breakpoints, stepping, call stack, variables, watch) and the host-resolved launch flow
+  are follow-ups.
 - **Project launch** (PRD-0013 / ADR-0104): a Launch page detects how each allowlisted repo runs
   (a host-owned table maps `.sln`/`.csproj` to dotnet, `package.json` scripts to npm, `Cargo.toml`
   to cargo) and runs a chosen target as a supervised child process, streaming its stdout/stderr to

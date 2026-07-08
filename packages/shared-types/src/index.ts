@@ -1120,7 +1120,17 @@ export type ClientCommand =
   | { kind: "terminal_open"; root: string; cols?: number; rows?: number; openId?: string }
   | { kind: "terminal_input"; sessionId: string; data: string }
   | { kind: "terminal_resize"; sessionId: string; cols: number; rows: number }
-  | { kind: "terminal_close"; sessionId: string };
+  | { kind: "terminal_close"; sessionId: string }
+  // Debug adapter (ADR-0106): open a debug session (the host resolves the named `adapterId`
+  // and detected `configId`, spawns the adapter, and launches/attaches the debuggee through
+  // the ADR-0104 substrate; desktop-local-only, a relay session is refused by default, D5),
+  // send a DAP JSON-RPC frame to the adapter (setBreakpoints / continue / next / stackTrace /
+  // variables / evaluate), and stop the session (graceful DAP disconnect then a two-process
+  // tree-kill, D6). `openId` is a correlation nonce echoed on `dap_session_opened` so the
+  // opening cockpit adopts its own session.
+  | { kind: "dap_start"; root: string; adapterId: string; configId: string; openId?: string }
+  | { kind: "dap_send"; sessionId: string; message: unknown }
+  | { kind: "dap_stop"; sessionId: string };
 
 export interface ReconnectRequest {
   sessionId: string;
@@ -1233,7 +1243,17 @@ export type BridgeEventPayload =
   // the pane matching `sessionId`. Terminal output is never persisted (envelope-audit-only).
   | { kind: "terminal_opened"; sessionId: string; openId?: string }
   | { kind: "terminal_output"; sessionId: string; data: string }
-  | { kind: "terminal_closed"; sessionId: string; reason: string };
+  | { kind: "terminal_closed"; sessionId: string; reason: string }
+  // Debug adapter (ADR-0106). `dap_session_opened` / `dap_session_closed` are DEVICE-WIDE,
+  // self-announcing anti-forgery events (D6): a running agent can neither open a debug session
+  // nor hide one, and `openId` is echoed so the opening cockpit adopts its own session.
+  // `dap_message` carries one DAP frame FROM the adapter (stackTrace / variables / evaluate
+  // results / output) and is routed ONLY to the owning connection, since runtime memory is
+  // potentially secret-bearing (D7 / D9). `dap_status` is the honest capability flag (D8).
+  | { kind: "dap_session_opened"; sessionId: string; adapterId: string; openId?: string }
+  | { kind: "dap_message"; sessionId: string; message: unknown }
+  | { kind: "dap_status"; status: DapStatus }
+  | { kind: "dap_session_closed"; sessionId: string; reason: string };
 
 /** A host-detected launch target (ADR-0104 D1). The cockpit shows `label` and badges by
     `kind`; it starts a launch by sending the `id` back, never a command line. The program and
@@ -1242,6 +1262,16 @@ export interface LaunchTarget {
   id: string;
   label: string;
   kind: "run" | "build" | "test" | "script";
+}
+
+/** A debug-adapter capability signal (ADR-0106 D8). Mirrors the bridge's serde shape. The
+    cockpit offers Debug only when a resolvable adapter for the detected language is installed,
+    degrading to Run (ADR-0104) otherwise; `installed` is the honest-degradation flag. */
+export interface DapStatus {
+  languageId: string;
+  adapterId: string;
+  installed: boolean;
+  reason: string;
 }
 
 /** A language-server lifecycle / capability signal (ADR-0102). Mirrors the bridge's serde

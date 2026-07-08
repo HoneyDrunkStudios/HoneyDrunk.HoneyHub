@@ -64,6 +64,8 @@ export class MockWireClient implements WireClient {
   private readonly mockLaunches = new Set<string>();
   // Open fake terminal sessions in the offline demo (see openTerminal / sendTerminalInput).
   private readonly mockTerminals = new Set<string>();
+  // Open fake debug sessions in the offline demo (see openDapSession / sendDap).
+  private readonly mockDapSessions = new Set<string>();
 
   subscribe(handler: WireEventHandler): () => void {
     this.handlers.add(handler);
@@ -1032,6 +1034,31 @@ export class MockWireClient implements WireClient {
   async closeTerminal(sessionId: string): Promise<void> {
     if (this.mockTerminals.delete(sessionId)) {
       this.emitDevice({ kind: "terminal_closed", sessionId, reason: "closed" });
+    }
+  }
+
+  async openDapSession(
+    _root: string,
+    adapterId: string,
+    _configId: string,
+    openId: string
+  ): Promise<void> {
+    // The offline demo runs no real adapter, and the host-resolved debug launch is not
+    // implemented yet (ADR-0106 D3 / Open-Question-#2), so the mock only announces the session
+    // (device-wide, echoing openId) and does NOT fabricate a debug flow: pretending a debuggee
+    // stopped at a breakpoint would misrepresent behavior the bridge cannot yet perform.
+    const sessionId = `mock-dap-${this.sequence}`;
+    this.mockDapSessions.add(sessionId);
+    this.emitDevice({ kind: "dap_session_opened", sessionId, adapterId, openId });
+  }
+
+  async sendDap(_sessionId: string, _message: unknown): Promise<void> {
+    // No real adapter offline; DAP frames are dropped (the bridge denies launch, D3).
+  }
+
+  async stopDap(sessionId: string): Promise<void> {
+    if (this.mockDapSessions.delete(sessionId)) {
+      this.emitDevice({ kind: "dap_session_closed", sessionId, reason: "operator_closed" });
     }
   }
 
