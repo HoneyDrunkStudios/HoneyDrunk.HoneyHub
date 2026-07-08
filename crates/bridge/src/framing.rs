@@ -6,8 +6,13 @@
 //! `lsp.rs` and `dap.rs` call it. The per-runner reader threads differ only in their message-size
 //! cap and their sink, which [`read_frames`] takes as parameters.
 
+use crate::adapters::child_run::put_in_own_process_group;
 use serde_json::Value;
-use std::io::{BufRead, Read};
+use std::ffi::OsStr;
+use std::io::{BufRead, BufReader, Read, Write};
+use std::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command, Stdio};
+use std::sync::mpsc::{sync_channel, SyncSender};
+use std::thread::JoinHandle;
 
 /// Prefix `message` with a `Content-Length` header framing its UTF-8 JSON body.
 pub fn frame_message(message: &Value) -> Vec<u8> {
@@ -87,6 +92,91 @@ pub fn read_frames(
                 return;
             }
         }
+    }
+}
+
+/// Spawn `program args` in `root`, shell-free and in its own process group (so a later tree-kill
+/// takes the whole tree), with piped stdio, and hand back the child plus its three streams. Shared
+/// by the LSP (ADR-0102) and DAP (ADR-0106) framed-subprocess runners; the caller adds its own
+/// audit line and error code. An absent stdin/stdout is an error (a framed peer must expose both).
+pub fn spawn_child_in_group(
+    program: &OsStr,
+    args: &[&str],
+    root: &str,
+) -> std::io::Result<(Child, ChildStdin, ChildStdout, Option<ChildStderr>)> {
+    let mut command = Command::new(program);
+    command
+        .args(args)
+        .current_dir(root)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    put_in_own_process_group(&mut command);
+    let mut child = command.spawn()?;
+    let stdin = child.stdin.take().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::BrokenPipe,
+            "subprocess exposed no stdin",
+        )
+    })?;
+    let stdout = child.stdout.take().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::BrokenPipe,
+            "subprocess exposed no stdout",
+        )
+    })?;
+    let stderr = child.stderr.take();
+    Ok((child, stdin, stdout, stderr))
+}
+
+/// The three I/O threads of a framed subprocess: a writer owning stdin (fed by a bounded queue), a
+/// reader draining stdout into `sink`, and a detached stderr drain.
+pub struct Pumps {
+    /// Enqueue an outbound message for the writer thread (bounded; a full queue is backpressure).
+    pub writer_tx: SyncSender<Value>,
+    pub writer: JoinHandle<()>,
+    pub reader: JoinHandle<()>,
+}
+
+/// Spawn the reader / writer / stderr-drain threads for a Content-Length framed subprocess. The
+/// reader frames `stdout` and hands each message to `sink` (which returns `false` to stop, e.g. its
+/// receiver was dropped); `max_bytes` caps one inbound frame. The writer frames the bounded outbound
+/// queue (`out_bound`) to `stdin`. stderr is drained so a chatty peer cannot wedge itself. Shared by
+/// the LSP and DAP runners so the supervised-subprocess I/O lives in one place (ADR-0106 D2).
+pub fn spawn_framed_pumps(
+    stdin: ChildStdin,
+    stdout: ChildStdout,
+    stderr: Option<ChildStderr>,
+    max_bytes: usize,
+    out_bound: usize,
+    sink: impl FnMut(Value) -> bool + Send + 'static,
+) -> Pumps {
+    if let Some(stderr) = stderr {
+        std::thread::spawn(move || {
+            let mut reader = BufReader::new(stderr);
+            let mut void = std::io::sink();
+            let _ = std::io::copy(&mut reader, &mut void);
+        });
+    }
+    let reader = std::thread::spawn(move || read_frames(BufReader::new(stdout), max_bytes, sink));
+    let (writer_tx, writer_rx) = sync_channel::<Value>(out_bound);
+    let mut stdin = stdin;
+    let writer = std::thread::spawn(move || {
+        while let Ok(message) = writer_rx.recv() {
+            let framed = frame_message(&message);
+            if stdin
+                .write_all(&framed)
+                .and_then(|()| stdin.flush())
+                .is_err()
+            {
+                return;
+            }
+        }
+    });
+    Pumps {
+        writer_tx,
+        writer,
+        reader,
     }
 }
 

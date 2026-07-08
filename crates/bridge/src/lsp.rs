@@ -40,15 +40,14 @@
 //! *what the wire may name* — never the semantics of a completion or a hover.
 
 use crate::adapter::BridgeError;
-use crate::adapters::child_run::{kill_process_tree, put_in_own_process_group};
+use crate::adapters::child_run::kill_process_tree;
 use crate::backend_catalog::resolve_program;
 use crate::pairing::WorkspaceAllowlist;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::ffi::OsString;
-use std::io::{BufReader, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::Child;
 use std::sync::mpsc::{channel, Receiver};
 use std::thread::JoinHandle;
 
@@ -219,19 +218,17 @@ impl LspServer {
         root: &str,
         server_id: impl Into<String>,
     ) -> Result<(Self, Receiver<Value>), BridgeError> {
-        let mut command = Command::new(&program);
-        command
-            .args(args)
-            .current_dir(root)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-        // Own process group (unix) so a later kill takes the whole tree; no-op on Windows,
-        // where `taskkill /T` walks the tree by pid.
-        put_in_own_process_group(&mut command);
-
         let server_id = server_id.into();
         let display = program.to_string_lossy().into_owned();
+        // Own process group + piped stdio; shared with the DAP runner (ADR-0102 D-C).
+        let (child, stdin, stdout, stderr) =
+            crate::framing::spawn_child_in_group(&program, args, root).map_err(|error| {
+                BridgeError::new(
+                    "lsp_spawn_failed",
+                    format!("failed to launch language server '{display}': {error}"),
+                )
+            })?;
+        let process_id = child.id();
         // Audit line (ADR-0102 D-C): every language-server spawn is host-logged with the
         // root, server id, and resolved program, so running servers are traceable from
         // the bridge console.
@@ -239,65 +236,25 @@ impl LspServer {
             "[lsp] running '{server_id}' in {root}: {display} {}",
             args.join(" ")
         );
-        let mut child = command.spawn().map_err(|error| {
-            BridgeError::new(
-                "lsp_spawn_failed",
-                format!("failed to launch language server '{display}': {error}"),
-            )
-        })?;
-        let process_id = child.id();
-        let stdin = child.stdin.take().ok_or_else(|| {
-            BridgeError::new("lsp_spawn_failed", "language server exposed no stdin")
-        })?;
-        let stdout = child.stdout.take().ok_or_else(|| {
-            BridgeError::new("lsp_spawn_failed", "language server exposed no stdout")
-        })?;
-
-        // Drain stderr on its own thread so a chatty server cannot fill the stderr pipe and
-        // block itself while we read stdout.
-        if let Some(stderr) = child.stderr.take() {
-            std::thread::spawn(move || {
-                let mut reader = BufReader::new(stderr);
-                let mut sink = std::io::sink();
-                let _ = std::io::copy(&mut reader, &mut sink);
-            });
-        }
 
         let (sender, receiver) = channel();
-        let reader = std::thread::spawn(move || {
-            crate::framing::read_frames(BufReader::new(stdout), MAX_LSP_MESSAGE_BYTES, |value| {
-                sender.send(value).is_ok()
-            })
-        });
-
-        // The writer thread owns stdin: callers enqueue frames (bounded, non-blocking)
-        // and this thread does the blocking framed writes, so a slow server never blocks
-        // the host. It exits when the queue disconnects (handle dropped) or a write
-        // fails (server gone); dropping stdin on exit is the EOF the server sees.
-        let (writer_tx, writer_rx) =
-            std::sync::mpsc::sync_channel::<Value>(MAX_QUEUED_OUTBOUND_FRAMES);
-        let mut stdin = stdin;
-        let writer = std::thread::spawn(move || {
-            while let Ok(message) = writer_rx.recv() {
-                let framed = crate::framing::frame_message(&message);
-                if stdin
-                    .write_all(&framed)
-                    .and_then(|()| stdin.flush())
-                    .is_err()
-                {
-                    return;
-                }
-            }
-        });
+        let pumps = crate::framing::spawn_framed_pumps(
+            stdin,
+            stdout,
+            stderr,
+            MAX_LSP_MESSAGE_BYTES,
+            MAX_QUEUED_OUTBOUND_FRAMES,
+            move |value| sender.send(value).is_ok(),
+        );
 
         Ok((
             Self {
                 server_id,
                 child,
                 process_id,
-                writer_tx: Some(writer_tx),
-                writer: Some(writer),
-                reader: Some(reader),
+                writer_tx: Some(pumps.writer_tx),
+                writer: Some(pumps.writer),
+                reader: Some(pumps.reader),
                 killed: false,
             },
             receiver,

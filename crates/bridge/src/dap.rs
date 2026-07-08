@@ -14,14 +14,13 @@
 //! An unknown id resolves to `None` and is refused, never executed.
 
 use crate::adapter::BridgeError;
-use crate::adapters::child_run::{kill_process_tree, put_in_own_process_group};
+use crate::adapters::child_run::kill_process_tree;
 use crate::backend_catalog::resolve_program;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::ffi::OsString;
-use std::io::{BufReader, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::Child;
 use std::sync::mpsc::{Receiver, SyncSender, TrySendError};
 use std::thread::JoinHandle;
 
@@ -207,77 +206,39 @@ impl DapAdapter {
         root: &str,
         adapter_id: impl Into<String>,
     ) -> Result<(Self, Receiver<Value>), BridgeError> {
-        let mut command = Command::new(&program);
-        command
-            .args(args)
-            .current_dir(root)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-        // Own process group (unix) so a later kill takes the whole tree, adapter and any
-        // debugger child included; no-op on Windows, where `taskkill /T` walks by pid.
-        put_in_own_process_group(&mut command);
-
         let adapter_id = adapter_id.into();
         let display = program.to_string_lossy().into_owned();
+        // Own process group so a later tree-kill takes the adapter AND any debuggee it launches;
+        // piped stdio; shared with the LSP runner (ADR-0106 D2).
+        let (child, stdin, stdout, stderr) =
+            crate::framing::spawn_child_in_group(&program, args, root).map_err(|error| {
+                BridgeError::new(
+                    "dap_spawn_failed",
+                    format!("failed to launch debug adapter '{display}': {error}"),
+                )
+            })?;
+        let process_id = child.id();
         // Audit line (ADR-0106 D7): every adapter spawn is host-logged with the root, adapter
         // id, and resolved binary, so a running debug session is traceable from the console.
         eprintln!(
             "[dap] running '{adapter_id}' in {root}: {display} {}",
             args.join(" ")
         );
-        let mut child = command.spawn().map_err(|error| {
-            BridgeError::new(
-                "dap_spawn_failed",
-                format!("failed to launch debug adapter '{display}': {error}"),
-            )
-        })?;
-        let process_id = child.id();
-        let stdin = child.stdin.take().ok_or_else(|| {
-            BridgeError::new("dap_spawn_failed", "debug adapter exposed no stdin")
-        })?;
-        let stdout = child.stdout.take().ok_or_else(|| {
-            BridgeError::new("dap_spawn_failed", "debug adapter exposed no stdout")
-        })?;
 
-        // Drain stderr on its own thread so a chatty adapter cannot fill the stderr pipe and
-        // wedge itself while we read stdout.
-        if let Some(stderr) = child.stderr.take() {
-            std::thread::spawn(move || {
-                let mut reader = BufReader::new(stderr);
-                let mut sink = std::io::sink();
-                let _ = std::io::copy(&mut reader, &mut sink);
-            });
-        }
-
+        // The bounded inbound `sender` backpressures the reader (and thus the adapter's stdout)
+        // when the host pump is slow, so a chatty debuggee cannot grow bridge memory without limit.
         let (sender, receiver) = std::sync::mpsc::sync_channel::<Value>(MAX_INBOUND_FRAMES);
-        // The bounded `sender` backpressures this reader (and thus the adapter's stdout) when the
-        // host pump is slow, so a chatty debuggee cannot grow bridge memory without limit.
-        let reader = std::thread::spawn(move || {
-            crate::framing::read_frames(BufReader::new(stdout), MAX_DAP_MESSAGE_BYTES, |value| {
-                sender.send(value).is_ok()
-            })
-        });
-
-        // The writer thread owns stdin: callers enqueue frames (bounded, non-blocking) and
-        // this thread does the blocking framed writes, so a slow adapter never blocks the
-        // host. It exits when the queue disconnects (handle dropped) or a write fails (adapter
-        // gone); dropping stdin on exit is the EOF the adapter sees.
-        let (writer_tx, writer_rx) =
-            std::sync::mpsc::sync_channel::<Value>(MAX_QUEUED_OUTBOUND_FRAMES);
-        let mut stdin = stdin;
-        let writer = std::thread::spawn(move || {
-            while let Ok(message) = writer_rx.recv() {
-                let framed = crate::framing::frame_message(&message);
-                if stdin
-                    .write_all(&framed)
-                    .and_then(|()| stdin.flush())
-                    .is_err()
-                {
-                    return;
-                }
-            }
-        });
+        let pumps = crate::framing::spawn_framed_pumps(
+            stdin,
+            stdout,
+            stderr,
+            MAX_DAP_MESSAGE_BYTES,
+            MAX_QUEUED_OUTBOUND_FRAMES,
+            move |value| sender.send(value).is_ok(),
+        );
+        let writer_tx = pumps.writer_tx;
+        let writer = pumps.writer;
+        let reader = pumps.reader;
 
         Ok((
             Self {
