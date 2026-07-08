@@ -22,7 +22,7 @@ use std::ffi::OsString;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdout, Command, Stdio};
-use std::sync::mpsc::{channel, Receiver, SyncSender, TrySendError};
+use std::sync::mpsc::{Receiver, SyncSender, TrySendError};
 use std::thread::JoinHandle;
 
 /// One allowlisted debug adapter: how the host launches it. The client never sends a command
@@ -198,8 +198,10 @@ pub fn discard_exact(reader: &mut impl Read, mut remaining: usize) -> std::io::R
 /// Read Content-Length framed DAP messages off `reader` until EOF (adapter exit) or a
 /// malformed frame, sending each parsed message to `sender`. The reader ending is how the
 /// host observes the adapter's exit (the channel disconnects). Mirrors the ADR-0102 LSP
-/// reader; an over-cap body is drained to stay framed, then dropped.
-fn read_frames(mut reader: BufReader<ChildStdout>, sender: &std::sync::mpsc::Sender<Value>) {
+/// reader; an over-cap body is drained to stay framed, then dropped. `sender` is a BOUNDED
+/// `SyncSender`, so a slow / wedged host pump backpressures this reader (and thus the adapter's
+/// stdout) instead of letting a chatty debuggee grow bridge memory without limit.
+fn read_frames(mut reader: BufReader<ChildStdout>, sender: &SyncSender<Value>) {
     loop {
         let Some(len) = read_content_length(&mut reader) else {
             return;
@@ -230,6 +232,12 @@ fn read_frames(mut reader: BufReader<ChildStdout>, sender: &std::sync::mpsc::Sen
 /// otherwise stall while holding its session map lock); the bound keeps a wedged adapter from
 /// accumulating frames without limit. Interactive stepping sits far below this.
 const MAX_QUEUED_OUTBOUND_FRAMES: usize = 256;
+
+/// Bound on the inbound (adapter-stdout -> host-pump) frame queue. A BOUNDED channel keeps a
+/// chatty debuggee from growing bridge memory without limit when the owning cockpit is slow: a
+/// full queue blocks the reader thread, backpressuring the adapter's stdout (the same shape as
+/// the outbound queue and the terminal / launch output queues).
+const MAX_INBOUND_FRAMES: usize = 256;
 
 /// A live debug **adapter**: the ADR-0106 D2 host-owned streaming subprocess, the ADR-0102
 /// `LspServer` shape applied to DAP. A writer thread owns its piped stdin (Content-Length
@@ -321,7 +329,7 @@ impl DapAdapter {
             });
         }
 
-        let (sender, receiver) = channel();
+        let (sender, receiver) = std::sync::mpsc::sync_channel::<Value>(MAX_INBOUND_FRAMES);
         let reader = std::thread::spawn(move || read_frames(BufReader::new(stdout), &sender));
 
         // The writer thread owns stdin: callers enqueue frames (bounded, non-blocking) and

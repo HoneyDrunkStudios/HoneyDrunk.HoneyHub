@@ -2869,33 +2869,56 @@ fn path_within_root(candidate: &str, root: &str) -> bool {
     }
 }
 
+/// Apply the ADR-0106 D3 debuggee boundary to one launch configuration object (the `arguments` of
+/// a `launch`, or the nested `arguments.arguments` of a `restart`): the debuggee `program` must
+/// resolve INSIDE the allowlisted `root`, its `cwd` is FORCED to that root, and the client-supplied
+/// `env` is DROPPED. Dropping `env` is load-bearing: `DOTNET_STARTUP_HOOKS` / `CORECLR_PROFILER_PATH`
+/// / `LD_PRELOAD` / `DYLD_INSERT_LIBRARIES` and kin would load out-of-root code into a program that
+/// passed the in-root check, so the whole client environment is removed rather than denylisted key
+/// by key (host-owned env customization is a follow-up).
+fn gate_launch_config(
+    args: &mut serde_json::Map<String, serde_json::Value>,
+    root: &str,
+) -> Result<(), BridgeError> {
+    match args.get("program").and_then(serde_json::Value::as_str) {
+        Some(program) if path_within_root(program, root) => {}
+        _ => {
+            return Err(BridgeError::new(
+                "dap_debuggee_denied",
+                "a debug launch must name a program inside the allowlisted workspace root (ADR-0106 D3)",
+            ));
+        }
+    }
+    args.insert(
+        "cwd".to_string(),
+        serde_json::Value::String(root.to_string()),
+    );
+    args.remove("env");
+    args.remove("environment");
+    Ok(())
+}
+
 /// Enforce the ADR-0106 D3 debuggee boundary on an outbound DAP frame before it reaches the
-/// adapter. A `launch` request is the one frame that starts a real process, so its `cwd` is forced
-/// to the session's allowlisted `root` and its `program` (and `cwd`, if the client set one) must
-/// resolve INSIDE that root, or the launch is denied. Every other frame (setBreakpoints, continue,
-/// stackTrace, variables, evaluate) passes through unchanged. `attach` is denied until Slice C.
-/// Full host-side program resolution per adapter is the ADR-0106 D3 / Open-Question-#2 follow-up;
-/// this enforces the enforceable allowlist-containment invariant in the meantime.
+/// adapter. The frames that START a process are `launch` and `restart` (which MAY carry a fresh
+/// launch config in `arguments.arguments`); each is gated by [`gate_launch_config`] or denied.
+/// `attach` is denied until Slice C. Every other frame (setBreakpoints, continue, stackTrace,
+/// variables, evaluate) passes through unchanged. The gate keys on the `command` name, NOT on
+/// `type`, so it is fail-closed: a process-starting command cannot skip it by omitting `type`.
+/// Full host-side program resolution per adapter is the ADR-0106 D3 / Open-Question-#2 follow-up.
 fn gate_dap_request(
     mut message: serde_json::Value,
     root: &str,
 ) -> Result<serde_json::Value, BridgeError> {
-    let is_request = message.get("type").and_then(serde_json::Value::as_str) == Some("request");
-    if !is_request {
-        return Ok(message);
-    }
     match message.get("command").and_then(serde_json::Value::as_str) {
         Some("attach") => Err(BridgeError::new(
             "dap_attach_unsupported",
             "launch-then-attach is not wired for this adapter yet (ADR-0106 D3, Slice C)",
         )),
         Some("launch") => {
-            // A client-proposed program/cwd must stay inside the allowlisted root; the cwd is then
-            // forced to the root so the debuggee runs where the host says, not where the client asks.
-            if message
+            if !message
                 .get("arguments")
-                .and_then(serde_json::Value::as_object)
-                .is_none()
+                .map(serde_json::Value::is_object)
+                .unwrap_or(false)
             {
                 message["arguments"] = serde_json::json!({});
             }
@@ -2903,23 +2926,20 @@ fn gate_dap_request(
                 .get_mut("arguments")
                 .and_then(serde_json::Value::as_object_mut)
                 .expect("arguments is an object");
-            if let Some(program) = args.get("program").and_then(serde_json::Value::as_str) {
-                if !path_within_root(program, root) {
-                    return Err(BridgeError::new(
-                        "dap_debuggee_denied",
-                        "the debuggee program must resolve inside the allowlisted workspace root (ADR-0106 D3)",
-                    ));
-                }
-            } else {
-                return Err(BridgeError::new(
-                    "dap_debuggee_denied",
-                    "a debug launch must name a program inside the allowlisted workspace root (ADR-0106 D3)",
-                ));
+            gate_launch_config(args, root)?;
+            Ok(message)
+        }
+        Some("restart") => {
+            // `restart` may carry a fresh launch config in `arguments.arguments`; gate it the same
+            // way. Absent → it re-runs the already-gated original config, which is safe.
+            if let Some(inner) = message
+                .get_mut("arguments")
+                .and_then(serde_json::Value::as_object_mut)
+                .and_then(|a| a.get_mut("arguments"))
+                .and_then(serde_json::Value::as_object_mut)
+            {
+                gate_launch_config(inner, root)?;
             }
-            args.insert(
-                "cwd".to_string(),
-                serde_json::Value::String(root.to_string()),
-            );
             Ok(message)
         }
         _ => Ok(message),
@@ -2992,6 +3012,14 @@ async fn retire_dap(host: &Arc<Host>, session_id: &str, reason: &str) {
 /// task BEFORE anything else, so a slow client can never delay enforcement. The `dap_session_closed`
 /// announcement is DEVICE-WIDE (self-announcing, D6) on the broadcast bus, whose `send` is
 /// non-blocking, so no detached task is needed.
+///
+/// Honest teardown limitation (ADR-0090 D4): the debuggee is reaped via the adapter's process
+/// TREE. On Unix that is `killpg(pgid)`, which reaches the debuggee even if the adapter already
+/// exited. On Windows it is `taskkill /PID <adapter> /T`, which walks live parent->child links, so
+/// if the ADAPTER dies first (crash) a still-running debuggee child can be orphaned. Binding both
+/// processes to a Windows Job Object (or capturing the debuggee pid) is the durable fix and the
+/// Slice C follow-up; for Slice A this is a resource-leak edge on Windows, not a containment escape
+/// (the debuggee was allowlist-gated in-root at launch, D3).
 fn kill_dap_entry(
     events: &broadcast::Sender<BridgeEvent>,
     session_id: &str,
@@ -3492,15 +3520,54 @@ mod tests {
         std::fs::write(&program, b"x").expect("write");
         let root_s = root.to_string_lossy().into_owned();
 
-        // A launch naming an in-root program passes, and its cwd is FORCED to the root (D3),
-        // overwriting whatever the client sent.
+        // A launch naming an in-root program passes; its cwd is FORCED to the root (D3), and the
+        // client-supplied `env` (a code-injection surface: DOTNET_STARTUP_HOOKS / LD_PRELOAD) is
+        // DROPPED, overwriting whatever the client sent.
         let launch = serde_json::json!({
             "type": "request",
             "command": "launch",
-            "arguments": { "program": program.to_string_lossy(), "cwd": "/tmp/attacker" }
+            "arguments": {
+                "program": program.to_string_lossy(),
+                "cwd": "/tmp/attacker",
+                "env": { "DOTNET_STARTUP_HOOKS": "/tmp/evil.dll" }
+            }
         });
         let gated = gate_dap_request(launch, &root_s).expect("in-root launch is allowed");
         assert_eq!(gated["arguments"]["cwd"], serde_json::json!(root_s));
+        assert!(
+            gated["arguments"].get("env").is_none(),
+            "client env is stripped so it cannot load out-of-root code"
+        );
+
+        // Fail-CLOSED: a launch that omits `type` is still gated on the `command` name, so an
+        // out-of-root program cannot slip through by dropping the `type` field.
+        let no_type = serde_json::json!({
+            "command": "launch",
+            "arguments": { "program": "/usr/bin/whoami" }
+        });
+        assert_eq!(
+            gate_dap_request(no_type, &root_s)
+                .expect_err("out-of-root launch without a type is still denied")
+                .code,
+            "dap_debuggee_denied"
+        );
+
+        // `restart` can carry a fresh launch config in `arguments.arguments`; it is gated the same
+        // way (out-of-root program denied; in-root forces cwd + strips env).
+        let restart_escape = serde_json::json!({
+            "type": "request",
+            "command": "restart",
+            "arguments": { "arguments": { "program": "/usr/bin/whoami" } }
+        });
+        assert_eq!(
+            gate_dap_request(restart_escape, &root_s)
+                .expect_err("restart with an out-of-root program is denied")
+                .code,
+            "dap_debuggee_denied"
+        );
+        // A restart with no fresh config re-runs the already-gated original: it passes untouched.
+        let restart_bare = serde_json::json!({ "type": "request", "command": "restart" });
+        assert!(gate_dap_request(restart_bare, &root_s).is_ok());
 
         // A launch naming a program OUTSIDE the root is denied (the RCE-injection the gate stops).
         let escape = serde_json::json!({
