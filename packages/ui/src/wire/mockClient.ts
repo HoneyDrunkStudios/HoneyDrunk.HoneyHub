@@ -64,6 +64,8 @@ export class MockWireClient implements WireClient {
   private readonly mockLaunches = new Set<string>();
   // Open fake terminal sessions in the offline demo (see openTerminal / sendTerminalInput).
   private readonly mockTerminals = new Set<string>();
+  // Open fake debug sessions in the offline demo (see openDapSession / sendDap).
+  private readonly mockDapSessions = new Set<string>();
 
   subscribe(handler: WireEventHandler): () => void {
     this.handlers.add(handler);
@@ -1032,6 +1034,62 @@ export class MockWireClient implements WireClient {
   async closeTerminal(sessionId: string): Promise<void> {
     if (this.mockTerminals.delete(sessionId)) {
       this.emitDevice({ kind: "terminal_closed", sessionId, reason: "closed" });
+    }
+  }
+
+  async openDapSession(
+    _root: string,
+    adapterId: string,
+    _configId: string,
+    openId: string
+  ): Promise<void> {
+    // The offline demo runs no real adapter; open a fake session and stream a minimal DAP
+    // handshake (an `initialized` event, then a `stopped`-at-entry) so the debug UI is
+    // exercisable without a host. dap_session_opened is device-wide (self-announcing); the
+    // openId is echoed so the caller adopts this session.
+    const sessionId = `mock-dap-${this.sequence}`;
+    this.mockDapSessions.add(sessionId);
+    this.emitDevice({ kind: "dap_session_opened", sessionId, adapterId, openId });
+    this.emitDevice({
+      kind: "dap_message",
+      sessionId,
+      message: { type: "event", event: "initialized" }
+    });
+    this.emitDevice({
+      kind: "dap_message",
+      sessionId,
+      message: { type: "event", event: "stopped", body: { reason: "entry", threadId: 1 } }
+    });
+  }
+
+  async sendDap(sessionId: string, message: unknown): Promise<void> {
+    // Answer a couple of DAP requests with canned responses so the call-stack / variables
+    // panels populate in the offline demo.
+    if (!this.mockDapSessions.has(sessionId)) {
+      return;
+    }
+    const request = message as { seq?: number; command?: string };
+    if (request.command === "stackTrace") {
+      this.emitDevice({
+        kind: "dap_message",
+        sessionId,
+        message: {
+          type: "response",
+          request_seq: request.seq,
+          command: "stackTrace",
+          success: true,
+          body: {
+            stackFrames: [{ id: 1, name: "Main", line: 1, column: 1 }],
+            totalFrames: 1
+          }
+        }
+      });
+    }
+  }
+
+  async stopDap(sessionId: string): Promise<void> {
+    if (this.mockDapSessions.delete(sessionId)) {
+      this.emitDevice({ kind: "dap_session_closed", sessionId, reason: "operator_closed" });
     }
   }
 

@@ -298,6 +298,24 @@ export interface WireClient {
   /** **Terminal**: close an open session, tree-killing the shell. The host answers with a
       final `terminal_closed` event via `subscribe`. Idempotent. */
   closeTerminal(sessionId: string): Promise<void>;
+  /** **Debug** (ADR-0106): open a debug session for the detected `configId` in `root` with the
+      named `adapterId` (e.g. `netcoredbg`). Desktop-local-only: a relay connection is refused
+      with a `dap_denied` error, and an absent adapter answers `dap_adapter_not_installed`.
+      `openId` is a correlation nonce echoed on the device-wide `dap_session_opened` so the caller
+      adopts its own session; DAP frames then stream as `dap_message` events via `subscribe`. */
+  openDapSession(
+    root: string,
+    adapterId: string,
+    configId: string,
+    openId: string
+  ): Promise<void>;
+  /** **Debug**: forward one DAP JSON-RPC frame to the session's adapter (setBreakpoints,
+      continue, next, stepIn/Out, stackTrace, scopes, variables, evaluate). The host gates the
+      `launch`/`restart` frames (D3) and rejects an unowned or unknown session. */
+  sendDap(sessionId: string, message: unknown): Promise<void>;
+  /** **Debug**: stop a debug session, tree-killing the adapter and the debuggee. The host answers
+      with a device-wide `dap_session_closed` via `subscribe`. Owner-checked, idempotent. */
+  stopDap(sessionId: string): Promise<void>;
   /** Subscribe to bridge events; returns an unsubscribe function. */
   subscribe(handler: WireEventHandler): () => void;
 }
