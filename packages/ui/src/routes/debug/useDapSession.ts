@@ -172,6 +172,28 @@ export function useDapSession(
     [request]
   );
 
+  // A handshake failure (initialize / launch rejected) must not dead-end the UI: surface the error
+  // AND tear the dead session down (tree-kills the adapter host-side) and clear local state, so the
+  // Debug button can start a fresh session rather than silently no-op on a still-set session id.
+  const failHandshake = useCallback(
+    (messageText: string) => {
+      const id = sessionIdRef.current;
+      sessionIdRef.current = null;
+      setSessionId(null);
+      setStoppedThreadId(null);
+      setCallStack([]);
+      pendingRef.current.clear();
+      setStatus("error");
+      setDetail(messageText);
+      if (id !== null) {
+        void client.stopDap(id).catch(() => {
+          /* already gone */
+        });
+      }
+    },
+    [client]
+  );
+
   useEffect(() => {
     const unsubscribe = client.subscribe((event: BridgeEvent) => {
       const payload = event.payload;
@@ -203,11 +225,10 @@ export function useDapSession(
             supportsStartDebuggingRequest: false
           })
             .then((initResponse) => {
-              // Only launch once initialize succeeded; a failed initialize surfaces as an error
-              // and no debuggee is started.
+              // Only launch once initialize succeeded; a failed initialize tears the session down
+              // and surfaces an error, and no debuggee is started.
               if (initResponse.success === false) {
-                setStatus("error");
-                setDetail(initResponse.message ?? "initialize failed");
+                failHandshake(initResponse.message ?? "initialize failed");
                 return undefined;
               }
               return request("launch", {});
@@ -217,8 +238,7 @@ export function useDapSession(
                 return; // initialize failed; already surfaced
               }
               if (response.success === false) {
-                setStatus("error");
-                setDetail(response.message ?? "launch failed");
+                failHandshake(response.message ?? "launch failed");
               } else {
                 // Launched. Stay "stopped" if a breakpoint already hit; otherwise it is running.
                 setStatus((prev) => (prev === "stopped" ? prev : "running"));
@@ -327,7 +347,7 @@ export function useDapSession(
       }
     });
     return unsubscribe;
-  }, [client, request, refreshStack]);
+  }, [client, request, refreshStack, failHandshake]);
 
   const start = useCallback(
     (root: string, adapterId: string, configId: string) => {
@@ -370,8 +390,11 @@ export function useDapSession(
 
   const resume = useCallback(
     (command: string) => {
-      const threadId = stoppedThreadId ?? 1;
-      void request(command, { threadId });
+      // Send the stopped thread id when we actually know it; DAP permits a `stopped` event with no
+      // threadId, and fabricating `1` would resume / step the wrong thread. When it is unknown the
+      // request omits it rather than guessing.
+      const args = stoppedThreadId !== null ? { threadId: stoppedThreadId } : {};
+      void request(command, args);
     },
     [request, stoppedThreadId]
   );

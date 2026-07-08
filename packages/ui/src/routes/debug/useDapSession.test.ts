@@ -184,6 +184,34 @@ describe("useDapSession", () => {
     expect(result.current.detail).toBe("no adapter");
     // A failed initialize must NOT be followed by a launch.
     expect(calls.send.some((s) => s.message.command === "launch")).toBe(false);
+    // The dead session is torn down and cleared, so a later Debug can start a fresh one (no
+    // dead-end): the host is asked to stop it, and the session id is cleared.
+    expect(calls.stop).toContain("d1");
+    expect(result.current.sessionId).toBeNull();
+    await act(async () => {
+      result.current.start("/repo", "netcoredbg", "dotnet:App");
+    });
+    expect(calls.open).toHaveLength(2); // the retry actually opens again
+  });
+
+  it("omits threadId on resume when the stopped event carried none", async () => {
+    const { client, calls, emit } = fakeClient();
+    const { result } = renderHook(() => useDapSession(client, () => {}));
+    await act(async () => {
+      result.current.start("/repo", "netcoredbg", "dotnet:App");
+    });
+    const openId = calls.open[0]!.openId;
+    await act(async () => {
+      emit({ kind: "dap_session_opened", sessionId: "d1", adapterId: "netcoredbg", openId });
+    });
+    // A stopped event with NO threadId (DAP permits this).
+    act(() => emit(dapMessage("d1", { type: "event", event: "stopped", body: { reason: "pause" } })));
+    calls.send.length = 0;
+    act(() => result.current.continue());
+    const cont = calls.send.find((s) => s.message.command === "continue");
+    expect(cont).toBeTruthy();
+    // It must NOT fabricate threadId=1; the arguments carry no threadId.
+    expect((cont!.message.arguments as Record<string, unknown>).threadId).toBeUndefined();
   });
 
   it("continues on resume, and stops the session", async () => {

@@ -1261,7 +1261,7 @@ export type BridgeEventPayload =
   // `dap_list_configs`. Returned to the requesting connection only; carries the `root` it is for
   // (to match a response to the client's current selection) and entries of config id + label,
   // never a filesystem path.
-  | { kind: "dap_configs"; root: string; configs: DebugConfig[] }
+  | { kind: "dap_configs"; root?: string; configs: DebugConfig[] }
   | { kind: "dap_session_closed"; sessionId: string; reason: string };
 
 /** A host-detected launch target (ADR-0104 D1). The cockpit shows `label` and badges by

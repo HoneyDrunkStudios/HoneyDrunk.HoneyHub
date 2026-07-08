@@ -2185,6 +2185,9 @@ pub enum BridgeEventPayload {
     /// (so the client matches it to its selection) and entries of config id + label, never a
     /// filesystem path. Host-synthesized (rejected from backend streams).
     DapConfigs {
+        // Tolerant on decode (`default`): a frame that predates this field still deserializes (root
+        // becomes empty), so old/new frame compatibility is preserved rather than a hard reject.
+        #[serde(default)]
         root: String,
         configs: Vec<crate::dap::DebugConfig>,
     },
