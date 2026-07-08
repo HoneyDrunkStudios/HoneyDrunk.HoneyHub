@@ -13,12 +13,17 @@
 //! table), locates the operator-installed binary on `PATH`, and would spawn it shell-free.
 //! An unknown id resolves to `None` and is refused, never executed.
 
+use crate::adapter::BridgeError;
+use crate::adapters::child_run::{kill_process_tree, put_in_own_process_group};
 use crate::backend_catalog::resolve_program;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::ffi::OsString;
-use std::io::{BufRead, Read};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
+use std::process::{Child, ChildStdout, Command, Stdio};
+use std::sync::mpsc::{channel, Receiver, SyncSender, TrySendError};
+use std::thread::JoinHandle;
 
 /// One allowlisted debug adapter: how the host launches it. The client never sends a command
 /// line (ADR-0106 D2): it sends an `adapter_id`, resolved to one of these rows.
@@ -190,6 +195,227 @@ pub fn discard_exact(reader: &mut impl Read, mut remaining: usize) -> std::io::R
     Ok(())
 }
 
+/// Read Content-Length framed DAP messages off `reader` until EOF (adapter exit) or a
+/// malformed frame, sending each parsed message to `sender`. The reader ending is how the
+/// host observes the adapter's exit (the channel disconnects). Mirrors the ADR-0102 LSP
+/// reader; an over-cap body is drained to stay framed, then dropped.
+fn read_frames(mut reader: BufReader<ChildStdout>, sender: &std::sync::mpsc::Sender<Value>) {
+    loop {
+        let Some(len) = read_content_length(&mut reader) else {
+            return;
+        };
+        if len == 0 {
+            continue;
+        }
+        if len > MAX_DAP_MESSAGE_BYTES {
+            if discard_exact(&mut reader, len).is_err() {
+                return;
+            }
+            continue;
+        }
+        let mut body = vec![0_u8; len];
+        if reader.read_exact(&mut body).is_err() {
+            return;
+        }
+        if let Ok(value) = serde_json::from_slice::<Value>(&body) {
+            if sender.send(value).is_err() {
+                return;
+            }
+        }
+    }
+}
+
+/// Bound on queued-but-unwritten outbound DAP frames per adapter. Writes happen on a
+/// dedicated writer thread so a slow or wedged adapter can never block the host (which would
+/// otherwise stall while holding its session map lock); the bound keeps a wedged adapter from
+/// accumulating frames without limit. Interactive stepping sits far below this.
+const MAX_QUEUED_OUTBOUND_FRAMES: usize = 256;
+
+/// A live debug **adapter**: the ADR-0106 D2 host-owned streaming subprocess, the ADR-0102
+/// `LspServer` shape applied to DAP. A writer thread owns its piped stdin (Content-Length
+/// framed writes fed by a bounded queue), a reader thread drains framed messages off stdout
+/// into a channel, and the handle tree-kills the adapter exactly once. Owned by the host
+/// inside its session map. This is ONLY the adapter (the protocol translator); the debuggee
+/// (the program being debugged) is launched separately through the ADR-0104 substrate (D3)
+/// and supervised alongside it (D6).
+pub struct DapAdapter {
+    adapter_id: String,
+    child: Child,
+    process_id: u32,
+    /// Sender feeding the writer thread; dropping it closes stdin (EOF to the adapter).
+    writer_tx: Option<SyncSender<Value>>,
+    writer: Option<JoinHandle<()>>,
+    reader: Option<JoinHandle<()>>,
+    /// Set once the process tree has been signalled, so it is signalled exactly once across
+    /// `close_and_kill` + `Drop`.
+    killed: bool,
+}
+
+impl Drop for DapAdapter {
+    fn drop(&mut self) {
+        // Disconnect the writer (closes stdin, EOF to the adapter), kill the whole tree once,
+        // and join both pump threads, so dropping the handle (session-end / disconnect /
+        // token-revocation / root-removal, D6) tears the adapter down deterministically.
+        self.writer_tx.take();
+        self.kill_tree_once();
+        if let Some(writer) = self.writer.take() {
+            let _ = writer.join();
+        }
+        if let Some(reader) = self.reader.take() {
+            let _ = reader.join();
+        }
+    }
+}
+
+impl DapAdapter {
+    /// Spawn the located `program` with `args` in `root`, shell-free and in its own process
+    /// group, with piped stdio. `program`/`args` come from the host-owned adapter table
+    /// ([`resolve_adapter`] + [`locate`]), never from the client (ADR-0106 D2). Returns the
+    /// handle plus a receiver of every inbound DAP message the adapter frames on stdout.
+    pub fn spawn(
+        program: OsString,
+        args: &[&str],
+        root: &str,
+        adapter_id: impl Into<String>,
+    ) -> Result<(Self, Receiver<Value>), BridgeError> {
+        let mut command = Command::new(&program);
+        command
+            .args(args)
+            .current_dir(root)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        // Own process group (unix) so a later kill takes the whole tree, adapter and any
+        // debugger child included; no-op on Windows, where `taskkill /T` walks by pid.
+        put_in_own_process_group(&mut command);
+
+        let adapter_id = adapter_id.into();
+        let display = program.to_string_lossy().into_owned();
+        // Audit line (ADR-0106 D7): every adapter spawn is host-logged with the root, adapter
+        // id, and resolved binary, so a running debug session is traceable from the console.
+        eprintln!(
+            "[dap] running '{adapter_id}' in {root}: {display} {}",
+            args.join(" ")
+        );
+        let mut child = command.spawn().map_err(|error| {
+            BridgeError::new(
+                "dap_spawn_failed",
+                format!("failed to launch debug adapter '{display}': {error}"),
+            )
+        })?;
+        let process_id = child.id();
+        let stdin = child.stdin.take().ok_or_else(|| {
+            BridgeError::new("dap_spawn_failed", "debug adapter exposed no stdin")
+        })?;
+        let stdout = child.stdout.take().ok_or_else(|| {
+            BridgeError::new("dap_spawn_failed", "debug adapter exposed no stdout")
+        })?;
+
+        // Drain stderr on its own thread so a chatty adapter cannot fill the stderr pipe and
+        // wedge itself while we read stdout.
+        if let Some(stderr) = child.stderr.take() {
+            std::thread::spawn(move || {
+                let mut reader = BufReader::new(stderr);
+                let mut sink = std::io::sink();
+                let _ = std::io::copy(&mut reader, &mut sink);
+            });
+        }
+
+        let (sender, receiver) = channel();
+        let reader = std::thread::spawn(move || read_frames(BufReader::new(stdout), &sender));
+
+        // The writer thread owns stdin: callers enqueue frames (bounded, non-blocking) and
+        // this thread does the blocking framed writes, so a slow adapter never blocks the
+        // host. It exits when the queue disconnects (handle dropped) or a write fails (adapter
+        // gone); dropping stdin on exit is the EOF the adapter sees.
+        let (writer_tx, writer_rx) =
+            std::sync::mpsc::sync_channel::<Value>(MAX_QUEUED_OUTBOUND_FRAMES);
+        let mut stdin = stdin;
+        let writer = std::thread::spawn(move || {
+            while let Ok(message) = writer_rx.recv() {
+                let framed = frame_message(&message);
+                if stdin
+                    .write_all(&framed)
+                    .and_then(|()| stdin.flush())
+                    .is_err()
+                {
+                    return;
+                }
+            }
+        });
+
+        Ok((
+            Self {
+                adapter_id,
+                child,
+                process_id,
+                writer_tx: Some(writer_tx),
+                writer: Some(writer),
+                reader: Some(reader),
+                killed: false,
+            },
+            receiver,
+        ))
+    }
+
+    /// The allowlist adapter id this process is running for.
+    pub fn adapter_id(&self) -> &str {
+        &self.adapter_id
+    }
+
+    /// The OS process id, captured at spawn.
+    pub fn process_id(&self) -> u32 {
+        self.process_id
+    }
+
+    /// Enqueue a DAP `message` for the writer thread, which frames and writes it to the
+    /// adapter's stdin. Never blocks: errors with `dap_not_running` when the writer is gone
+    /// (adapter exited), or `dap_backpressure` when the bounded queue is full (a wedged
+    /// adapter), so a slow adapter can never stall the host.
+    pub fn write_message(&mut self, message: &Value) -> Result<(), BridgeError> {
+        let sender = self
+            .writer_tx
+            .as_ref()
+            .ok_or_else(|| BridgeError::new("dap_not_running", "debug adapter stdin is closed"))?;
+        match sender.try_send(message.clone()) {
+            Ok(()) => Ok(()),
+            Err(TrySendError::Full(_)) => Err(BridgeError::new(
+                "dap_backpressure",
+                "debug adapter is not draining its input; frame dropped",
+            )),
+            Err(TrySendError::Disconnected(_)) => Err(BridgeError::new(
+                "dap_not_running",
+                "debug adapter stdin is closed",
+            )),
+        }
+    }
+
+    /// Observe process exit: `Some(success)` once the adapter has exited, `None` while it is
+    /// still running. The host's session watchdog polls this to reap a crashed adapter.
+    pub fn poll_exit(&mut self) -> Option<bool> {
+        match self.child.try_wait() {
+            Ok(Some(status)) => Some(status.success()),
+            _ => None,
+        }
+    }
+
+    /// Close stdin (via the writer) and kill the whole process tree (once). Idempotent with
+    /// `Drop`. Teardown prefers a graceful DAP `disconnect`/`terminate` (sent by the host
+    /// before calling this); this is the fallback tree-kill so no adapter outlives the
+    /// session (ADR-0106 D6).
+    pub fn close_and_kill(&mut self) {
+        self.writer_tx.take();
+        self.kill_tree_once();
+    }
+
+    fn kill_tree_once(&mut self) {
+        if !self.killed {
+            kill_process_tree(&mut self.child);
+            self.killed = true;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -258,6 +484,46 @@ mod tests {
         // EOF before any header block ends the reader (the host observes adapter exit).
         let mut empty = BufReader::new(&b""[..]);
         assert_eq!(read_content_length(&mut empty), None);
+    }
+
+    /// A trivial process that exits immediately, for the spawn/kill lifecycle test without a
+    /// real adapter installed (the framed proxy round-trip is covered separately).
+    fn quick_command() -> (OsString, Vec<&'static str>) {
+        #[cfg(windows)]
+        {
+            (OsString::from("cmd"), vec!["/C", "exit", "0"])
+        }
+        #[cfg(not(windows))]
+        {
+            (OsString::from("true"), Vec::new())
+        }
+    }
+
+    #[test]
+    fn adapter_spawn_kill_lifecycle_is_idempotent() {
+        let root = std::env::temp_dir().to_string_lossy().into_owned();
+        let (program, args) = quick_command();
+        let (mut adapter, _inbound) =
+            DapAdapter::spawn(program, &args, &root, "netcoredbg").expect("spawn quick command");
+        assert!(adapter.process_id() > 0);
+        assert_eq!(adapter.adapter_id(), "netcoredbg");
+        // Explicit kills and the implicit Drop must not double-signal a reaped pid.
+        adapter.close_and_kill();
+        adapter.close_and_kill();
+        // Dropping at end of scope is the third potential kill; it must be a no-op.
+    }
+
+    #[test]
+    fn write_message_after_close_reports_not_running() {
+        let root = std::env::temp_dir().to_string_lossy().into_owned();
+        let (program, args) = quick_command();
+        let (mut adapter, _inbound) =
+            DapAdapter::spawn(program, &args, &root, "netcoredbg").expect("spawn quick command");
+        adapter.close_and_kill();
+        let err = adapter
+            .write_message(&json!({ "seq": 1, "type": "request", "command": "next" }))
+            .expect_err("writing to a closed adapter is refused, not a panic");
+        assert_eq!(err.code, "dap_not_running");
     }
 
     #[test]
