@@ -316,6 +316,10 @@ export interface WireClient {
   /** **Debug**: stop a debug session, tree-killing the adapter and the debuggee. The host answers
       with a device-wide `dap_session_closed` via `subscribe`. Owner-checked, idempotent. */
   stopDap(sessionId: string): Promise<void>;
+  /** **Debug** (ADR-0106 D3 / Amendment 1): ask which debug configurations `root` offers. The host
+      detects them by convention and answers with a `dap_configs` event via `subscribe`, carrying
+      config ids + labels only (never a path). The caller opens one by id via `openDapSession`. */
+  listDapConfigs(root: string): Promise<void>;
   /** Subscribe to bridge events; returns an unsubscribe function. */
   subscribe(handler: WireEventHandler): () => void;
 }

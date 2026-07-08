@@ -51,3 +51,5 @@ schemars = "1"
 
 [dev-dependencies]
 tokio-tungstenite = "0.24"
+# Temp workspaces for host-boundary tests (e.g. debug-config resolution over a fixture .csproj).
+tempfile = "3"

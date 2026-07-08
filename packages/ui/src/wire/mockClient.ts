@@ -1043,23 +1043,38 @@ export class MockWireClient implements WireClient {
     _configId: string,
     openId: string
   ): Promise<void> {
-    // The offline demo runs no real adapter, and the host-resolved debug launch is not
-    // implemented yet (ADR-0106 D3 / Open-Question-#2), so the mock only announces the session
-    // (device-wide, echoing openId) and does NOT fabricate a debug flow: pretending a debuggee
-    // stopped at a breakpoint would misrepresent behavior the bridge cannot yet perform.
+    // The offline demo runs no real adapter, so the mock only announces the session (device-wide,
+    // echoing openId) and does NOT fabricate a debug flow: pretending a debuggee stopped at a
+    // breakpoint would misrepresent behavior only a real adapter can perform.
     const sessionId = `mock-dap-${this.sequence}`;
     this.mockDapSessions.add(sessionId);
     this.emitDevice({ kind: "dap_session_opened", sessionId, adapterId, openId });
   }
 
   async sendDap(_sessionId: string, _message: unknown): Promise<void> {
-    // No real adapter offline; DAP frames are dropped (the bridge denies launch, D3).
+    // No real adapter offline; DAP frames are dropped.
   }
 
   async stopDap(sessionId: string): Promise<void> {
     if (this.mockDapSessions.delete(sessionId)) {
       this.emitDevice({ kind: "dap_session_closed", sessionId, reason: "operator_closed" });
     }
+  }
+
+  async listDapConfigs(_root: string): Promise<void> {
+    // Offline, answer with one host-derived-by-convention config so a picker is exercisable
+    // (ADR-0106 D3 / Amendment 1). Ids + labels only, never a path, mirroring the bridge.
+    this.emitDevice({
+      kind: "dap_configs",
+      configs: [
+        {
+          configId: "dotnet:App",
+          label: "App (net9.0)",
+          language: "csharp",
+          adapterId: "netcoredbg",
+        },
+      ],
+    });
   }
 
   async detectEnvironment(): Promise<void> {

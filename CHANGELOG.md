@@ -10,13 +10,21 @@ user-centered Jobs page.
   resolved against a built-in allowlist table, never a client command line), speaks the
   Content-Length DAP framing to a supervised adapter subprocess, and proxies DAP frames to the
   owning cockpit only (a frame can carry runtime memory). Debugging is desktop-local-only (a relay
-  connection is refused), the session is tree-killed (adapter plus debuggee) on stop / disconnect /
-  token revocation / root removal, and a client-supplied `launch` is refused: under ADR-0106 D3 the
-  host resolves the debuggee, and host-side resolution per adapter is not designed yet (D3 /
-  Open-Question-#2), so a real debug session cannot start until that lands. This ships only the
-  reviewed bridge runner and the additive `dap_*` wire surface (no cockpit Debug page yet); the
-  debug UI (breakpoints, stepping, call stack, variables, watch) and the host-resolved launch flow
-  are follow-ups.
+  connection is refused), and the session is tree-killed (adapter plus debuggee) on stop /
+  disconnect / token revocation / root removal / idle timeout. This ships the reviewed bridge
+  runner and the additive `dap_*` wire surface (no cockpit Debug page yet); the debug UI
+  (breakpoints, stepping, call stack, variables, watch) is a follow-up.
+- **Debugger, host-resolved launch** (PRD-0013 / ADR-0106 D3 / Amendment 1): the host now owns the
+  debuggee end to end. A new `dap_list_configs` surface detects the debug configurations an
+  allowlisted root offers by convention (its runnable .NET projects, one per target framework) and
+  answers with config ids and labels only, never a filesystem path. The client opens one by id, and
+  the host resolves it to the built assembly (`bin/Debug/<tfm>/<assembly>.dll`), validated to exist
+  and to canonicalize inside the root (a `..`/symlink escape is refused; an unbuilt project reports
+  a clear not-built reason). The client drives the DAP sequence but never chooses what runs: the
+  host overwrites the `launch` request with the resolved program, working directory, and a fixed
+  environment allowlist, so a client-supplied program, extra arguments, or an injected environment
+  variable (`DOTNET_STARTUP_HOOKS`, `LD_PRELOAD`) is discarded. `restart` and `attach` are refused
+  for now.
 - **Project launch** (PRD-0013 / ADR-0104): a Launch page detects how each allowlisted repo runs
   (a host-owned table maps `.sln`/`.csproj` to dotnet, `package.json` scripts to npm, `Cargo.toml`
   to cargo) and runs a chosen target as a supervised child process, streaming its stdout/stderr to
