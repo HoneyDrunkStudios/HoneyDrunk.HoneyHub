@@ -8898,6 +8898,140 @@ button:focus-visible,
   gap: 8px;
 }
 
+/* Integrated debugger (ADR-0106): the Debug page, controls, call stack, and console. */
+.debug-view {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  height: 100%;
+  min-height: 0;
+}
+
+.debug-view__head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.debug-view__head h2 {
+  margin: 0;
+}
+
+.debug-view__status {
+  color: var(--text-muted);
+  font-size: 0.85rem;
+}
+
+.debug-view__controls {
+  display: flex;
+  align-items: flex-end;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.debug-view__field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 0.8rem;
+  color: var(--text-muted);
+}
+
+.debug-view__field select,
+.debug-view__field input {
+  max-width: 46ch;
+}
+
+.debug-view__button {
+  border: 1px solid var(--honey-line);
+  background: var(--honey-glow);
+  color: var(--honey-bright);
+  border-radius: var(--radius-sm);
+  padding: 6px 14px;
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.debug-view__button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.debug-view__button--stop {
+  border-color: var(--border-strong);
+  background: var(--surface);
+  color: var(--text-muted);
+}
+
+.debug-view__detail {
+  margin: 0;
+  color: var(--text-dim);
+  font-size: 0.85rem;
+}
+
+.debug-view__body {
+  display: flex;
+  gap: 12px;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.debug-view__stack {
+  flex: 0 0 32ch;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 8px 12px;
+}
+
+.debug-view__stack h3 {
+  margin: 0 0 8px;
+  font-size: 0.85rem;
+}
+
+.debug-view__empty {
+  color: var(--text-dim);
+  font-size: 0.85rem;
+}
+
+.debug-view__frames {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.debug-view__frame {
+  display: flex;
+  flex-direction: column;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.82rem;
+}
+
+.debug-view__frame-loc {
+  color: var(--text-dim);
+  font-size: 0.72rem;
+}
+
+.debug-view__console {
+  flex: 1 1 auto;
+  min-height: 240px;
+  margin: 0;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: #0b0e14;
+  color: var(--text);
+  padding: 8px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.82rem;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
 /* Integrated terminal (ADR-0103): the Terminal page and its xterm.js pane. */
 .terminal-view {
   display: flex;
