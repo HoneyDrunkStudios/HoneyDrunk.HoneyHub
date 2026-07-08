@@ -11,6 +11,7 @@ pub mod clock;
 pub mod coaching;
 pub mod contentsearch;
 pub mod core;
+pub mod dap;
 pub mod dispatch;
 pub mod environment;
 pub mod fsbrowse;
