@@ -47,6 +47,7 @@ serde_json = "1.0"
 uuid = { version = "1.10", features = ["v4", "serde"] }
 # Drives the vendor CLIs' interactive TUIs (ConPTY on Windows / openpty on Unix) for
 # the one-shot usage probes (/usage, /status) — those panels only render under a PTY.
+# Also backs the integrated terminal (ADR-0103).
 portable-pty = "0.9"
 
 [target.'cfg(unix)'.dependencies]

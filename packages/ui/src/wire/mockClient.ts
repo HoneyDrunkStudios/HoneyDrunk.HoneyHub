@@ -62,6 +62,8 @@ export class MockWireClient implements WireClient {
   private readonly sessionIds = new Set<string>();
   // Open fake launches in the offline demo (see startLaunch / stopLaunch).
   private readonly mockLaunches = new Set<string>();
+  // Open fake terminal sessions in the offline demo (see openTerminal / sendTerminalInput).
+  private readonly mockTerminals = new Set<string>();
 
   subscribe(handler: WireEventHandler): () => void {
     this.handlers.add(handler);
@@ -997,6 +999,39 @@ export class MockWireClient implements WireClient {
   async stopLaunch(launchId: string): Promise<void> {
     if (this.mockLaunches.delete(launchId)) {
       this.emitDevice({ kind: "launch_stopped", launchId, reason: "stopped" });
+    }
+  }
+
+  async openTerminal(
+    _root: string,
+    _cols: number,
+    _rows: number,
+    openId: string
+  ): Promise<void> {
+    // The offline demo runs no real shell; open a fake session and print a banner so the
+    // terminal pane is exercisable without a host. Input is echoed back (see below). The
+    // openId is echoed on terminal_opened so the caller adopts this session.
+    const sessionId = `mock-term-${this.sequence}`;
+    this.emitDevice({ kind: "terminal_opened", sessionId, openId });
+    this.mockTerminals.add(sessionId);
+    const banner = "HoneyHub offline terminal (demo). Echoes input.\r\n$ ";
+    this.emitDevice({ kind: "terminal_output", sessionId, data: utf8ToBase64(banner) });
+  }
+
+  async sendTerminalInput(sessionId: string, data: string): Promise<void> {
+    // Echo the typed bytes back so the demo pane feels live (the data is already base64).
+    if (this.mockTerminals.has(sessionId)) {
+      this.emitDevice({ kind: "terminal_output", sessionId, data });
+    }
+  }
+
+  async resizeTerminal(_sessionId: string, _cols: number, _rows: number): Promise<void> {
+    // No real PTY to resize in the offline mock.
+  }
+
+  async closeTerminal(sessionId: string): Promise<void> {
+    if (this.mockTerminals.delete(sessionId)) {
+      this.emitDevice({ kind: "terminal_closed", sessionId, reason: "closed" });
     }
   }
 

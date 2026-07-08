@@ -8897,3 +8897,98 @@ button:focus-visible,
   display: flex;
   gap: 8px;
 }
+
+/* Integrated terminal (ADR-0103): the Terminal page and its xterm.js pane. */
+.terminal-view {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  height: 100%;
+  min-height: 0;
+}
+
+.terminal-view__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.terminal-view__head h2 {
+  margin: 0;
+}
+
+.terminal-view__controls {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.terminal-view__root {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text-muted);
+  font-size: 0.85rem;
+}
+
+.terminal-view__root select {
+  max-width: 46ch;
+}
+
+.terminal-view__button {
+  border: 1px solid var(--honey-line);
+  background: var(--honey-glow);
+  color: var(--honey-bright);
+  border-radius: var(--radius-sm);
+  padding: 6px 14px;
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.terminal-view__button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.terminal-view__button--stop {
+  border-color: var(--border-strong);
+  background: var(--surface);
+  color: var(--text-muted);
+}
+
+.terminal-view__hint {
+  margin: 0;
+  color: var(--text-dim);
+  font-size: 0.82rem;
+  max-width: 80ch;
+}
+
+.terminal-view__status {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 0.85rem;
+}
+
+.terminal-view__empty {
+  color: var(--text-dim);
+}
+
+.terminal-pane {
+  flex: 1 1 auto;
+  min-height: 320px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: #0b0e14;
+  padding: 8px;
+  overflow: hidden;
+}
+
+.terminal-pane--loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-dim);
+}

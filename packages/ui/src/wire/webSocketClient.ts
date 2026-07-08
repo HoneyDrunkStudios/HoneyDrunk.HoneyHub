@@ -644,4 +644,20 @@ export class WebSocketWireClient implements WireClient {
   async stopLaunch(launchId: string): Promise<void> {
     await this.dispatch({ kind: "launch_stop", launchId });
   }
+
+  async openTerminal(root: string, cols: number, rows: number, openId: string): Promise<void> {
+    await this.dispatch({ kind: "terminal_open", root, cols, rows, openId });
+  }
+
+  async sendTerminalInput(sessionId: string, data: string): Promise<void> {
+    await this.dispatch({ kind: "terminal_input", sessionId, data });
+  }
+
+  async resizeTerminal(sessionId: string, cols: number, rows: number): Promise<void> {
+    await this.dispatch({ kind: "terminal_resize", sessionId, cols, rows });
+  }
+
+  async closeTerminal(sessionId: string): Promise<void> {
+    await this.dispatch({ kind: "terminal_close", sessionId });
+  }
 }

@@ -1113,7 +1113,14 @@ export type ClientCommand =
   | { kind: "launch_confirm"; confirmId: string }
   // Discard a parked relay launch the operator declined, freeing its slot before the host TTL.
   | { kind: "launch_cancel"; confirmId: string }
-  | { kind: "launch_stop"; launchId: string };
+  | { kind: "launch_stop"; launchId: string }
+  // Integrated terminal (ADR-0103): open a PTY-backed shell in an allowlisted root
+  // (desktop-local-only; a relay connection is refused), feed it base64 keystrokes, resize
+  // its PTY, and close it (tree-killing the shell). `data` is base64 of the raw bytes.
+  | { kind: "terminal_open"; root: string; cols?: number; rows?: number; openId?: string }
+  | { kind: "terminal_input"; sessionId: string; data: string }
+  | { kind: "terminal_resize"; sessionId: string; cols: number; rows: number }
+  | { kind: "terminal_close"; sessionId: string };
 
 export interface ReconnectRequest {
   sessionId: string;
@@ -1219,7 +1226,14 @@ export type BridgeEventPayload =
   | { kind: "launch_started"; launchId: string; targetId: string; openId?: string }
   | { kind: "launch_confirm_required"; confirmId: string; targetId: string; openId?: string }
   | { kind: "launch_output"; launchId: string; stream: string; data: string }
-  | { kind: "launch_stopped"; launchId: string; reason: string; exitCode?: number };
+  | { kind: "launch_stopped"; launchId: string; reason: string; exitCode?: number }
+  // Integrated terminal (ADR-0103): a session opened, one chunk of output (`data` is base64
+  // of the raw PTY bytes), and a session's end (`reason` is a short opaque code). All three
+  // are host-synthesized + device-wide (empty session/run ids); the cockpit routes them to
+  // the pane matching `sessionId`. Terminal output is never persisted (envelope-audit-only).
+  | { kind: "terminal_opened"; sessionId: string; openId?: string }
+  | { kind: "terminal_output"; sessionId: string; data: string }
+  | { kind: "terminal_closed"; sessionId: string; reason: string };
 
 /** A host-detected launch target (ADR-0104 D1). The cockpit shows `label` and badges by
     `kind`; it starts a launch by sending the `id` back, never a command line. The program and

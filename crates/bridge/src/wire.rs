@@ -630,6 +630,60 @@ pub enum ClientCommand {
     LaunchStop {
         launch_id: String,
     },
+    /// **Terminal** (ADR-0103): open a PTY-backed interactive shell rooted at the allowlisted
+    /// workspace `root`, sized `cols` x `rows`. The sharpest member of the D9 Supervised Exec
+    /// Posture: host-owned, opened only after the operator confirms, refused on a relay
+    /// connection (desktop-local-only, D3), and anchored to an allowlisted root (D2). The host
+    /// resolves the shell itself (the client never supplies a command line). The command is
+    /// acked, and the host sends a [`BridgeEventPayload::TerminalOpened`] carrying the new
+    /// `session_id` to the OWNING connection on the same channel the output rides (so the cockpit
+    /// learns the id before the first output chunk); a refusal is a `terminal_denied` /
+    /// `terminal_open_failed` error. Shell output then streams to that same owner as host-
+    /// synthesized [`BridgeEventPayload::TerminalOutput`]; no other cockpit sees the stream (D1).
+    ///
+    /// `open_id` is a client-chosen correlation nonce echoed on the resulting `TerminalOpened`
+    /// so the cockpit adopts the session that answers ITS request. It matters even though the
+    /// event is owner-only: one connection can have several opens in flight at once, so the nonce
+    /// matches each `terminal_opened` to the open call that requested it.
+    TerminalOpen {
+        root: String,
+        #[serde(default = "default_terminal_cols")]
+        cols: u16,
+        #[serde(default = "default_terminal_rows")]
+        rows: u16,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        open_id: Option<String>,
+    },
+    /// **Terminal**: feed operator keystrokes (`data`, base64 of the raw bytes) to an open
+    /// session's stdin. Acked with no inline event. An unknown `session_id` answers with a
+    /// `terminal_not_open` error the cockpit folds into a closed pane.
+    TerminalInput {
+        session_id: String,
+        /// base64 of the raw input bytes (keystrokes / paste), byte-safe over the JSON wire.
+        data: String,
+    },
+    /// **Terminal**: resize an open session's PTY so the shell and any TUI reflow. Acked;
+    /// best-effort (a resize on a dead session is a no-op).
+    TerminalResize {
+        session_id: String,
+        cols: u16,
+        rows: u16,
+    },
+    /// **Terminal**: close an open session, tree-killing the shell and its descendants (D5).
+    /// Acked with a final [`BridgeEventPayload::TerminalClosed`]. Idempotent.
+    TerminalClose {
+        session_id: String,
+    },
+}
+
+/// Default terminal width when a client opens without sizing (it resizes on mount).
+fn default_terminal_cols() -> u16 {
+    80
+}
+
+/// Default terminal height when a client opens without sizing.
+fn default_terminal_rows() -> u16 {
+    24
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1503,6 +1557,29 @@ impl BridgeEvent {
         }
     }
 
+    /// An owner-routed terminal-opened event (ADR-0103 D1): the host sends it only to the
+    /// connection that opened the terminal, never device-wide. Host-synthesized, so
+    /// `session_id`/`run_id` are empty and `sequence` is `0` (the terminal's own id rides in
+    /// the payload, not the envelope).
+    pub fn terminal_opened(
+        id: impl Into<String>,
+        created_at: impl Into<String>,
+        session_id: String,
+        open_id: Option<String>,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            session_id: String::new(),
+            run_id: String::new(),
+            sequence: 0,
+            created_at: created_at.into(),
+            payload: BridgeEventPayload::TerminalOpened {
+                session_id,
+                open_id,
+            },
+        }
+    }
+
     /// A relay-launch confirm-required event (ADR-0104 D3), routed to the owning connection.
     pub fn launch_confirm_required(
         id: impl Into<String>,
@@ -1548,6 +1625,26 @@ impl BridgeEvent {
         }
     }
 
+    /// An owner-routed terminal-output chunk (ADR-0103 D1): raw PTY output is sensitive work
+    /// content, so the host sends it only to the owning connection, never device-wide. `data` is
+    /// base64 of the raw PTY bytes. Host-synthesized, so the envelope ids are empty and
+    /// `sequence` is `0`.
+    pub fn terminal_output(
+        id: impl Into<String>,
+        created_at: impl Into<String>,
+        session_id: String,
+        data: String,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            session_id: String::new(),
+            run_id: String::new(),
+            sequence: 0,
+            created_at: created_at.into(),
+            payload: BridgeEventPayload::TerminalOutput { session_id, data },
+        }
+    }
+
     /// A device-wide launch-stopped event (ADR-0104). Host-synthesized envelope.
     pub fn launch_stopped(
         id: impl Into<String>,
@@ -1566,6 +1663,28 @@ impl BridgeEvent {
                 launch_id,
                 reason: reason.into(),
                 exit_code,
+            },
+        }
+    }
+
+    /// An owner-routed terminal-closed event (ADR-0103 D1): the host sends it only to the owning
+    /// connection, never device-wide. Host-synthesized, so the envelope ids are empty and
+    /// `sequence` is `0`.
+    pub fn terminal_closed(
+        id: impl Into<String>,
+        created_at: impl Into<String>,
+        session_id: String,
+        reason: impl Into<String>,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            session_id: String::new(),
+            run_id: String::new(),
+            sequence: 0,
+            created_at: created_at.into(),
+            payload: BridgeEventPayload::TerminalClosed {
+                session_id,
+                reason: reason.into(),
             },
         }
     }
@@ -1870,6 +1989,34 @@ pub enum BridgeEventPayload {
         reason: String,
         #[serde(rename = "exitCode", default, skip_serializing_if = "Option::is_none")]
         exit_code: Option<i32>,
+    },
+    /// A terminal session was opened (ADR-0103). Carries the `session_id` the client keys its
+    /// input / resize / close on, and echoes the opening request's `open_id` correlation nonce
+    /// so the requesting cockpit adopts its own session (this event is broadcast device-wide).
+    /// Host-synthesized (rejected from backend streams by the stream validator).
+    TerminalOpened {
+        #[serde(rename = "sessionId")]
+        session_id: String,
+        #[serde(rename = "openId", default, skip_serializing_if = "Option::is_none")]
+        open_id: Option<String>,
+    },
+    /// One chunk of terminal output (`data`, base64 of the raw PTY bytes). Host-synthesized,
+    /// device-wide; the cockpit routes it to the pane matching `session_id`. Never persisted
+    /// to any transcript, cache, or sync surface (D6: envelope-audit-only).
+    TerminalOutput {
+        #[serde(rename = "sessionId")]
+        session_id: String,
+        /// base64 of the raw output bytes (ANSI-bearing), byte-safe over the JSON wire.
+        data: String,
+    },
+    /// A terminal session ended: the operator closed it, the shell exited, or the host
+    /// retired it (device disconnect / token revocation / root removal / idle timeout, D5).
+    /// `reason` is a short opaque code for the pane's closed state. Host-synthesized,
+    /// device-wide.
+    TerminalClosed {
+        #[serde(rename = "sessionId")]
+        session_id: String,
+        reason: String,
     },
 }
 
@@ -3283,6 +3430,35 @@ mod tests {
     }
 
     #[test]
+    fn terminal_commands_serialize_camel_case_with_optional_open_id() {
+        assert_eq!(
+            serde_json::to_value(ClientCommand::TerminalOpen {
+                root: "C:/work".to_string(),
+                cols: 80,
+                rows: 24,
+                open_id: None,
+            })
+            .expect("serializes"),
+            json!({ "kind": "terminal_open", "root": "C:/work", "cols": 80, "rows": 24 })
+        );
+        assert_eq!(
+            serde_json::to_value(ClientCommand::TerminalInput {
+                session_id: "t1".to_string(),
+                data: "aGk=".to_string(),
+            })
+            .expect("serializes"),
+            json!({ "kind": "terminal_input", "sessionId": "t1", "data": "aGk=" })
+        );
+        assert_eq!(
+            serde_json::to_value(ClientCommand::TerminalClose {
+                session_id: "t1".to_string()
+            })
+            .expect("serializes"),
+            json!({ "kind": "terminal_close", "sessionId": "t1" })
+        );
+    }
+
+    #[test]
     fn launch_confirm_required_is_host_synthesized_and_camel_cased() {
         let event = BridgeEvent::launch_confirm_required(
             "e",
@@ -3341,5 +3517,30 @@ mod tests {
         let encoded = serde_json::to_value(&stopped.payload).expect("encode launch_stopped");
         assert_eq!(encoded["kind"], json!("launch_stopped"));
         assert_eq!(encoded["exitCode"], json!(0));
+    }
+
+    #[test]
+    fn terminal_events_are_host_synthesized_and_camel_cased() {
+        let at = "2026-07-07T00:00:00Z";
+        let opened =
+            BridgeEvent::terminal_opened("e", at, "t1".to_string(), Some("nonce-1".to_string()));
+        // Host-synthesized envelope: empty session/run ids, sequence 0.
+        assert_eq!(opened.session_id, "");
+        assert_eq!(opened.sequence, 0);
+        let encoded = serde_json::to_value(&opened.payload).expect("encode terminal_opened");
+        assert_eq!(encoded["kind"], json!("terminal_opened"));
+        // The terminal's own id and nonce ride the payload in camelCase, not the envelope.
+        assert_eq!(encoded["sessionId"], json!("t1"));
+        assert_eq!(encoded["openId"], json!("nonce-1"));
+
+        let output = BridgeEvent::terminal_output("e", at, "t1".to_string(), "aGk=".to_string());
+        let encoded = serde_json::to_value(&output.payload).expect("encode terminal_output");
+        assert_eq!(encoded["kind"], json!("terminal_output"));
+        assert_eq!(encoded["sessionId"], json!("t1"));
+
+        let closed = BridgeEvent::terminal_closed("e", at, "t1".to_string(), "exited");
+        let encoded = serde_json::to_value(&closed.payload).expect("encode terminal_closed");
+        assert_eq!(encoded["kind"], json!("terminal_closed"));
+        assert_eq!(encoded["reason"], json!("exited"));
     }
 }

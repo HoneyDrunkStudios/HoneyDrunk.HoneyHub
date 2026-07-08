@@ -1469,6 +1469,30 @@ fn validate_stream_payload(
                 "a backend stream must not emit device-wide launch-stopped events",
             ));
         }
+        BridgeEventPayload::TerminalOpened { .. } => {
+            // Host-synthesized, owner-routed terminal lifecycle, never carried on a backend stream
+            // (ADR-0103).
+            return Err(BridgeError::new(
+                "event_unexpected_terminal_opened",
+                "a backend stream must not emit host-synthesized terminal-opened events",
+            ));
+        }
+        BridgeEventPayload::TerminalOutput { .. } => {
+            // Host-synthesized, owner-routed terminal output, never carried on a backend stream
+            // (ADR-0103).
+            return Err(BridgeError::new(
+                "event_unexpected_terminal_output",
+                "a backend stream must not emit host-synthesized terminal output",
+            ));
+        }
+        BridgeEventPayload::TerminalClosed { .. } => {
+            // Host-synthesized, owner-routed terminal lifecycle, never carried on a backend stream
+            // (ADR-0103).
+            return Err(BridgeError::new(
+                "event_unexpected_terminal_closed",
+                "a backend stream must not emit host-synthesized terminal-closed events",
+            ));
+        }
     }
 
     Ok(())
@@ -3314,6 +3338,27 @@ mod tests {
                 exit_code: Some(0),
             }),
             "event_unexpected_launch_stopped"
+        );
+        assert_eq!(
+            err_code(BridgeEventPayload::TerminalOpened {
+                session_id: "t".to_string(),
+                open_id: None,
+            }),
+            "event_unexpected_terminal_opened"
+        );
+        assert_eq!(
+            err_code(BridgeEventPayload::TerminalOutput {
+                session_id: "t".to_string(),
+                data: String::new(),
+            }),
+            "event_unexpected_terminal_output"
+        );
+        assert_eq!(
+            err_code(BridgeEventPayload::TerminalClosed {
+                session_id: "t".to_string(),
+                reason: "closed".to_string(),
+            }),
+            "event_unexpected_terminal_closed"
         );
     }
 }

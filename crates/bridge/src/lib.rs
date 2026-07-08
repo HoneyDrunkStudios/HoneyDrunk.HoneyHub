@@ -29,6 +29,7 @@ pub mod sentry;
 pub mod servicebus;
 pub mod session;
 pub mod store;
+pub mod terminal;
 pub mod usage_probe;
 pub mod wire;
 pub mod work;

@@ -16,6 +16,15 @@ user-centered Jobs page.
   removal, or disconnect. Unlike the terminal, launch is relay-reachable, so a relay start does not
   spawn immediately: the host parks it and the owning cockpit must confirm before it runs
   (ADR-0104 D3).
+- **Integrated terminal** (PRD-0013 / ADR-0103): a Terminal page runs a real shell (via a PTY)
+  inside an allowlisted workspace root, rendered with xterm. It is desktop-local-only by design
+  (a relay connection is refused, ADR-0103 D3) and host-supervised: each session is owned by the
+  connection that opened it (only the owner can write, resize, or read its output; no other
+  cockpit sees the stream), registration re-checks the root allowlist under the same lock that
+  removes it (so a concurrent root removal cannot leave a shell in a de-authorized tree), the
+  per-connection session count is capped, and every session is tree-killed on close, shell exit,
+  idle timeout, root removal, or disconnect. Session contents are never logged; only an
+  open/close audit line (session id, root, owning connection) reaches the bridge console.
 - **Repo-wide search**: a Search panel on the activity rail greps every allowlisted workspace
   root from the bridge (read-posture, ADR-0090 D8), with per-file grouping and click-to-open.
   The same query also matches **file names**: files whose name contains the query (search for a
