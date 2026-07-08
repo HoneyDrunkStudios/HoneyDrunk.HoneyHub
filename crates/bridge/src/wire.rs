@@ -1783,10 +1783,12 @@ impl BridgeEvent {
 
     /// The debug configurations an allowlisted root offers (ADR-0106 D3 / Amendment 1), the
     /// host-owned answer to `DapListConfigs`. Returned to the requesting connection only; carries
+    /// the `root` it is for (so the client can match a response to its current selection) plus
     /// config ids and labels, never a filesystem path. Host-synthesized envelope.
     pub fn dap_configs(
         id: impl Into<String>,
         created_at: impl Into<String>,
+        root: impl Into<String>,
         configs: Vec<crate::dap::DebugConfig>,
     ) -> Self {
         Self {
@@ -1795,7 +1797,10 @@ impl BridgeEvent {
             run_id: String::new(),
             sequence: 0,
             created_at: created_at.into(),
-            payload: BridgeEventPayload::DapConfigs { configs },
+            payload: BridgeEventPayload::DapConfigs {
+                root: root.into(),
+                configs,
+            },
         }
     }
 
@@ -2176,9 +2181,11 @@ pub enum BridgeEventPayload {
         status: crate::dap::DapStatus,
     },
     /// The debug configurations a root offers (ADR-0106 D3 / Amendment 1), the answer to
-    /// `DapListConfigs`. Returned to the requesting connection only. Each entry carries a config
-    /// id and label, never a filesystem path. Host-synthesized (rejected from backend streams).
+    /// `DapListConfigs`. Returned to the requesting connection only. Carries the `root` it is for
+    /// (so the client matches it to its selection) and entries of config id + label, never a
+    /// filesystem path. Host-synthesized (rejected from backend streams).
     DapConfigs {
+        root: String,
         configs: Vec<crate::dap::DebugConfig>,
     },
     /// A debug session ended (operator-closed / disconnect / token-revoked / root-removed /
@@ -3763,9 +3770,10 @@ mod tests {
             language: "csharp".to_string(),
             adapter_id: "netcoredbg".to_string(),
         }];
-        let event = BridgeEvent::dap_configs("e", "2026-07-08T00:00:00Z", configs);
+        let event = BridgeEvent::dap_configs("e", "2026-07-08T00:00:00Z", "C:/work", configs);
         let encoded = serde_json::to_value(&event.payload).expect("encode dap_configs");
         assert_eq!(encoded["kind"], json!("dap_configs"));
+        assert_eq!(encoded["root"], json!("C:/work"));
         assert_eq!(encoded["configs"][0]["configId"], json!("dotnet:App"));
         assert_eq!(encoded["configs"][0]["label"], json!("App (net9.0)"));
         assert_eq!(encoded["configs"][0]["adapterId"], json!("netcoredbg"));

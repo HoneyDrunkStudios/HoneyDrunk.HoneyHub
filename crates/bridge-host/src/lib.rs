@@ -1784,7 +1784,12 @@ async fn handle_command(
                             honeyhub_bridge::dap::adapter_installed(&config.adapter_id)
                         })
                         .collect();
-                    one(BridgeEvent::dap_configs(new_id(), now_rfc3339(), configs))
+                    one(BridgeEvent::dap_configs(
+                        new_id(),
+                        now_rfc3339(),
+                        root,
+                        configs,
+                    ))
                 })
             }
             ClientCommand::DapSend { .. } | ClientCommand::DapStop { .. } => {
