@@ -1775,7 +1775,15 @@ async fn handle_command(
                 // and is returned to THIS connection (a config listing is a per-request answer, not
                 // a device-wide announcement).
                 require(runtime.workspace_allows(&root), "debug root").map(|()| {
-                    let configs = honeyhub_bridge::dap::detect_debug_configs(&root);
+                    // Only offer configs whose adapter is actually installed (D8 honest flag): a
+                    // detected .NET project whose debug adapter is absent must not advertise a
+                    // launchable Debug config that would later fail with `dap_adapter_not_installed`.
+                    let configs: Vec<_> = honeyhub_bridge::dap::detect_debug_configs(&root)
+                        .into_iter()
+                        .filter(|config| {
+                            honeyhub_bridge::dap::adapter_installed(&config.adapter_id)
+                        })
+                        .collect();
                     one(BridgeEvent::dap_configs(new_id(), now_rfc3339(), configs))
                 })
             }
@@ -2802,26 +2810,40 @@ async fn open_dap_session(
             "debugging is desktop-local-only; a relay connection cannot open a debug session by default (ADR-0106 D5)",
         ));
     }
-    // D2: resolve the adapter id against the host-owned table (deny unknown). An unknown id is
-    // never turned into a command line.
-    let Some(spec) = honeyhub_bridge::dap::resolve_adapter(&adapter_id) else {
+    // D3 (Firm) / Amendment 1: resolve the client-selected `config_id` to a HOST-OWNED debuggee
+    // BEFORE spawning anything. The host owns program / cwd / env AND the adapter; the client
+    // supplies only the selector. An unknown config is `dap_config_unknown`, an unbuilt one
+    // `dap_target_not_built` (the target is carried on the entry and injected into the host-owned
+    // `launch`; the client never supplies the debuggee, and its `launch` arguments are overwritten
+    // by the gate).
+    let target = honeyhub_bridge::dap::resolve_debug_target(&root, &config_id)?;
+    // D2: the adapter is the one the RESOLVED config requires, never a separately client-chosen id.
+    // If the client also named an adapter and it disagrees with the config's, refuse rather than
+    // silently spawn a different adapter than the config implies.
+    if !adapter_id.is_empty() && adapter_id != target.adapter_id {
+        return Err(BridgeError::new(
+            "dap_adapter_mismatch",
+            "the debug configuration uses a different adapter than the one requested",
+        ));
+    }
+    let Some(spec) = honeyhub_bridge::dap::resolve_adapter(&target.adapter_id) else {
         return Err(BridgeError::new(
             "dap_adapter_unknown",
-            format!("'{adapter_id}' is not an allowlisted debug adapter"),
+            format!(
+                "'{}' is not an allowlisted debug adapter",
+                target.adapter_id
+            ),
         ));
     };
-    // D3 (Firm) / Amendment 1: resolve the client-selected `config_id` to a HOST-OWNED debuggee
-    // BEFORE spawning anything. The host owns program / cwd / env; the client supplies only the
-    // selector. An unknown config is `dap_config_unknown`, an unbuilt one `dap_target_not_built`
-    // (the target is carried on the entry and injected into the host-owned `launch`; the client
-    // never supplies the debuggee, and its `launch` arguments are overwritten by the gate).
-    let target = honeyhub_bridge::dap::resolve_debug_target(&root, &config_id)?;
     // D2 (cont.): locate the operator-installed adapter binary. An absent adapter is the honest
     // "no debugger" signal (D8), not an error the client can turn into execution.
     let Some(program) = honeyhub_bridge::dap::locate(&spec) else {
         return Err(BridgeError::new(
             "dap_adapter_not_installed",
-            format!("the '{adapter_id}' debug adapter is not installed; Run is still available"),
+            format!(
+                "the '{}' debug adapter is not installed; Run is still available",
+                target.adapter_id
+            ),
         ));
     };
     let canonical = std::fs::canonicalize(&root)
@@ -2879,7 +2901,8 @@ async fn open_dap_session(
         // Audit line (ADR-0106 D7): session id, adapter id, workspace root, and owning connection,
         // so a debug session is traceable from the bridge console (steps / evaluates are NOT logged).
         eprintln!(
-            "[dap] {session_id} adapter={adapter_id} config={config_id} root={canonical} (conn {conn_id})"
+            "[dap] {session_id} adapter={} config={config_id} root={canonical} (conn {conn_id})",
+            spec.adapter_id
         );
         state.sessions.insert(
             session_id.clone(),
@@ -2900,7 +2923,7 @@ async fn open_dap_session(
         new_id(),
         now_rfc3339(),
         session_id.clone(),
-        adapter_id,
+        spec.adapter_id,
         open_id,
     ));
     spawn_dap_pump(
@@ -3061,8 +3084,8 @@ fn host_launch_request(
             "name": "HoneyHub Debug",
             "type": "coreclr",
             "request": "launch",
-            "program": target.program.to_string_lossy(),
-            "cwd": target.cwd.to_string_lossy(),
+            "program": strip_verbatim_prefix(&target.program),
+            "cwd": strip_verbatim_prefix(&target.cwd),
             "args": [],
             "env": host_debug_env(),
             "stopAtEntry": false,
@@ -3070,6 +3093,16 @@ fn host_launch_request(
             "console": "internalConsole",
         }
     })
+}
+
+/// Render a canonicalized path for a launch argument, stripping the Windows `\\?\` extended-length
+/// prefix that `canonicalize` adds. netcoredbg (and the .NET host) expect ordinary `C:\...` paths;
+/// a verbatim-prefixed path can fail to launch. A no-op on non-Windows paths.
+fn strip_verbatim_prefix(path: &std::path::Path) -> String {
+    let text = path.to_string_lossy();
+    text.strip_prefix(r"\\?\")
+        .map(str::to_string)
+        .unwrap_or_else(|| text.into_owned())
 }
 
 /// The environment the host hands the debuggee at launch (ADR-0106 Amendment 1). Built from a fixed
@@ -3717,15 +3750,24 @@ mod tests {
         // End to end through the gate with a REAL in-root target: a `launch` (in any casing, with
         // surrounding whitespace) is re-validated and rewritten to the host target.
         let (_dir, root, target) = built_target();
+        // The launch args carry the ordinary path form, with any Windows `\\?\` verbatim prefix
+        // (added by canonicalize) stripped so netcoredbg accepts it.
+        let expected_program = strip_verbatim_prefix(&target.program);
         for raw in ["launch", "Launch", " launch "] {
             let frame = serde_json::json!({ "command": raw, "arguments": { "program": "/x" } });
             let gated = gate_dap_request(frame, &target, &root)
                 .unwrap_or_else(|_| panic!("'{raw}' is rewritten, not denied"));
             assert_eq!(gated["command"], "launch");
             assert_eq!(
-                gated["arguments"]["program"],
-                target.program.to_string_lossy().as_ref(),
+                gated["arguments"]["program"], expected_program,
                 "the host program is substituted for '{raw}'"
+            );
+            assert!(
+                !gated["arguments"]["program"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .starts_with(r"\\?\"),
+                "the verbatim prefix is stripped for the adapter"
             );
         }
     }
@@ -3919,11 +3961,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn open_dap_session_resolves_a_valid_config_then_needs_the_adapter() {
-        // A KNOWN, built config resolves past the D3 config gate; the open then stops at the D2
-        // adapter-installed check (netcoredbg is not installed in CI). Reaching that error proves
-        // the config resolved (an unknown config would have failed earlier with dap_config_unknown),
-        // so the resolution is genuinely wired into the open path.
+    async fn open_dap_session_resolves_the_config_then_rejects_a_mismatched_adapter() {
+        // A KNOWN, built config resolves past the D3 config gate, and the open then rejects a
+        // client-named adapter that disagrees with the resolved config's adapter (D2: the host owns
+        // adapter selection). Reaching the mismatch error proves the config resolved (an unknown
+        // config would fail earlier with dap_config_unknown), so resolution is wired into open, and
+        // it is DETERMINISTIC regardless of whether netcoredbg is installed on the test machine.
         let project = tempfile::tempdir().expect("temp dir");
         std::fs::write(
             project.path().join("App.csproj"),
@@ -3942,13 +3985,13 @@ mod tests {
             7,
             &owner,
             project.path().to_string_lossy().into_owned(),
-            "netcoredbg".to_string(),
+            "codelldb".to_string(), // disagrees with the config's netcoredbg
             "dotnet:App".to_string(),
             None,
         )
         .await
-        .expect_err("netcoredbg is not installed in CI");
-        assert_eq!(err.code, "dap_adapter_not_installed");
+        .expect_err("a mismatched adapter is refused");
+        assert_eq!(err.code, "dap_adapter_mismatch");
         assert!(host.active_dap.lock().await.sessions.is_empty());
     }
 

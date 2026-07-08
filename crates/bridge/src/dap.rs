@@ -183,6 +183,14 @@ struct DebugCandidate {
     tfm: String,
 }
 
+/// Whether an allowlisted adapter id has its binary located on the host (operator-installed).
+/// The honest capability filter (ADR-0106 D8): a config is only offered for launch when the
+/// adapter that would run it actually exists, so the cockpit never advertises a Debug config that
+/// would fail at open with `dap_adapter_not_installed`.
+pub fn adapter_installed(adapter_id: &str) -> bool {
+    resolve_adapter(adapter_id).is_some_and(|spec| locate(&spec).is_some())
+}
+
 /// Detect the debug configurations an allowlisted `root` implies (ADR-0106 Amendment 1:
 /// host-derived-by-convention). For the netcoredbg adapter this enumerates the runnable .NET
 /// projects at the top of `root` (an app project, one config per target framework); a library
@@ -400,8 +408,8 @@ fn project_sdk(xml: &str) -> Option<String> {
 }
 
 /// The target frameworks a project declares: `<TargetFramework>` (one) or `<TargetFrameworks>`
-/// (semicolon-separated). Defaults to a single `net` placeholder only if neither is present, which
-/// then fails the existence check with a clear reason rather than guessing a wrong path.
+/// (semicolon-separated). Returns an EMPTY list when neither is present, so the project yields no
+/// debug config (the host never guesses a framework, which would resolve a wrong assembly path).
 fn target_frameworks(xml: &str) -> Vec<String> {
     if let Some(single) = csproj_value(xml, "TargetFramework") {
         return vec![single];
