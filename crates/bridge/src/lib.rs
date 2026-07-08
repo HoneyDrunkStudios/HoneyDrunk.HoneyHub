@@ -14,6 +14,7 @@ pub mod core;
 pub mod dap;
 pub mod dispatch;
 pub mod environment;
+pub mod framing;
 pub mod fsbrowse;
 pub mod git;
 pub mod grafana;

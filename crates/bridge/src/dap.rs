@@ -19,9 +19,9 @@ use crate::backend_catalog::resolve_program;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::ffi::OsString;
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{BufReader, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStdout, Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::sync::mpsc::{Receiver, SyncSender, TrySendError};
 use std::thread::JoinHandle;
 
@@ -144,88 +144,9 @@ pub fn dap_status(language_id: &str) -> DapStatus {
 
 /// Upper bound on a single inbound DAP message body, so a hostile or wedged adapter cannot
 /// force an unbounded allocation. DAP messages (stack traces, variable trees) are far below
-/// this; an over-cap body is consumed to stay framed, then dropped.
+/// this; an over-cap body is consumed to stay framed, then dropped. The Content-Length framing
+/// itself is shared with the LSP runner (see [`crate::framing`]).
 pub const MAX_DAP_MESSAGE_BYTES: usize = 16 * 1024 * 1024;
-
-/// Prefix `message` with a DAP `Content-Length` header framing its UTF-8 JSON body. DAP uses
-/// the same framing as LSP (`Content-Length: N\r\n\r\n<json>`), so this mirrors the ADR-0102
-/// runner exactly (ADR-0106 D2 reuses the ADR-0102 shape wholesale).
-pub fn frame_message(message: &Value) -> Vec<u8> {
-    let body = serde_json::to_vec(message).unwrap_or_else(|_| b"{}".to_vec());
-    let mut framed = format!("Content-Length: {}\r\n\r\n", body.len()).into_bytes();
-    framed.extend_from_slice(&body);
-    framed
-}
-
-/// Read DAP headers up to the blank line, returning the `Content-Length`. `None` on EOF or a
-/// header block without a length (which ends the reader, so the host observes adapter exit).
-pub fn read_content_length(reader: &mut impl BufRead) -> Option<usize> {
-    let mut content_length: Option<usize> = None;
-    loop {
-        let mut line = String::new();
-        match reader.read_line(&mut line) {
-            Ok(0) => return None, // EOF
-            Ok(_) => {}
-            Err(_) => return None,
-        }
-        let trimmed = line.trim_end_matches(['\r', '\n']);
-        if trimmed.is_empty() {
-            // Blank line ends the header block; `None` here means no length was seen.
-            return content_length;
-        }
-        if let Some(rest) = trimmed.strip_prefix("Content-Length:") {
-            content_length = rest.trim().parse::<usize>().ok();
-        }
-        // Other headers (e.g. Content-Type) are ignored.
-    }
-}
-
-/// Consume exactly `remaining` bytes from `reader`, discarding them (used to skip an over-cap
-/// body while keeping the frame stream in sync).
-pub fn discard_exact(reader: &mut impl Read, mut remaining: usize) -> std::io::Result<()> {
-    let mut buffer = [0_u8; 8192];
-    while remaining > 0 {
-        let want = remaining.min(buffer.len());
-        let read = reader.read(&mut buffer[..want])?;
-        if read == 0 {
-            return Err(std::io::Error::from(std::io::ErrorKind::UnexpectedEof));
-        }
-        remaining -= read;
-    }
-    Ok(())
-}
-
-/// Read Content-Length framed DAP messages off `reader` until EOF (adapter exit) or a
-/// malformed frame, sending each parsed message to `sender`. The reader ending is how the
-/// host observes the adapter's exit (the channel disconnects). Mirrors the ADR-0102 LSP
-/// reader; an over-cap body is drained to stay framed, then dropped. `sender` is a BOUNDED
-/// `SyncSender`, so a slow / wedged host pump backpressures this reader (and thus the adapter's
-/// stdout) instead of letting a chatty debuggee grow bridge memory without limit.
-fn read_frames(mut reader: BufReader<ChildStdout>, sender: &SyncSender<Value>) {
-    loop {
-        let Some(len) = read_content_length(&mut reader) else {
-            return;
-        };
-        if len == 0 {
-            continue;
-        }
-        if len > MAX_DAP_MESSAGE_BYTES {
-            if discard_exact(&mut reader, len).is_err() {
-                return;
-            }
-            continue;
-        }
-        let mut body = vec![0_u8; len];
-        if reader.read_exact(&mut body).is_err() {
-            return;
-        }
-        if let Ok(value) = serde_json::from_slice::<Value>(&body) {
-            if sender.send(value).is_err() {
-                return;
-            }
-        }
-    }
-}
 
 /// Bound on queued-but-unwritten outbound DAP frames per adapter. Writes happen on a
 /// dedicated writer thread so a slow or wedged adapter can never block the host (which would
@@ -330,7 +251,13 @@ impl DapAdapter {
         }
 
         let (sender, receiver) = std::sync::mpsc::sync_channel::<Value>(MAX_INBOUND_FRAMES);
-        let reader = std::thread::spawn(move || read_frames(BufReader::new(stdout), &sender));
+        // The bounded `sender` backpressures this reader (and thus the adapter's stdout) when the
+        // host pump is slow, so a chatty debuggee cannot grow bridge memory without limit.
+        let reader = std::thread::spawn(move || {
+            crate::framing::read_frames(BufReader::new(stdout), MAX_DAP_MESSAGE_BYTES, |value| {
+                sender.send(value).is_ok()
+            })
+        });
 
         // The writer thread owns stdin: callers enqueue frames (bounded, non-blocking) and
         // this thread does the blocking framed writes, so a slow adapter never blocks the
@@ -341,7 +268,7 @@ impl DapAdapter {
         let mut stdin = stdin;
         let writer = std::thread::spawn(move || {
             while let Ok(message) = writer_rx.recv() {
-                let framed = frame_message(&message);
+                let framed = crate::framing::frame_message(&message);
                 if stdin
                     .write_all(&framed)
                     .and_then(|()| stdin.flush())
@@ -428,7 +355,6 @@ impl DapAdapter {
 mod tests {
     use super::*;
     use serde_json::json;
-    use std::io::BufReader;
 
     #[test]
     fn resolves_allowlisted_adapters_and_denies_others() {
@@ -462,36 +388,6 @@ mod tests {
         let unknown = dap_status("python");
         assert_eq!(unknown.adapter_id, "");
         assert!(!unknown.installed);
-    }
-
-    #[test]
-    fn frames_a_message_with_a_byte_accurate_content_length() {
-        let framed = frame_message(&json!({ "seq": 1, "type": "request", "command": "next" }));
-        let text = String::from_utf8(framed).expect("framed message is UTF-8");
-        let (header, body) = text.split_once("\r\n\r\n").expect("header/body separator");
-        let declared: usize = header
-            .strip_prefix("Content-Length:")
-            .expect("Content-Length header")
-            .trim()
-            .parse()
-            .expect("length parses");
-        assert_eq!(
-            declared,
-            body.len(),
-            "declared length matches the JSON body bytes"
-        );
-    }
-
-    #[test]
-    fn reads_the_content_length_and_ignores_other_headers() {
-        let mut reader = BufReader::new(
-            &b"Content-Type: application/vscode-jsonrpc\r\nContent-Length: 42\r\n\r\n"[..],
-        );
-        assert_eq!(read_content_length(&mut reader), Some(42));
-
-        // EOF before any header block ends the reader (the host observes adapter exit).
-        let mut empty = BufReader::new(&b""[..]);
-        assert_eq!(read_content_length(&mut empty), None);
     }
 
     /// A trivial process that exits immediately, for the spawn/kill lifecycle test without a
@@ -532,16 +428,5 @@ mod tests {
             .write_message(&json!({ "seq": 1, "type": "request", "command": "next" }))
             .expect_err("writing to a closed adapter is refused, not a panic");
         assert_eq!(err.code, "dap_not_running");
-    }
-
-    #[test]
-    fn frame_round_trips_through_read_content_length() {
-        let framed = frame_message(&json!({ "type": "event", "event": "stopped" }));
-        let mut reader = BufReader::new(&framed[..]);
-        let len = read_content_length(&mut reader).expect("length is read back");
-        let mut body = vec![0_u8; len];
-        reader.read_exact(&mut body).expect("body reads exactly");
-        let value: Value = serde_json::from_slice(&body).expect("body is the JSON we framed");
-        assert_eq!(value["event"], "stopped");
     }
 }

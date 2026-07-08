@@ -46,10 +46,10 @@ use crate::pairing::WorkspaceAllowlist;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::ffi::OsString;
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{BufReader, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStdout, Command, Stdio};
-use std::sync::mpsc::{channel, Receiver, Sender};
+use std::process::{Child, Command, Stdio};
+use std::sync::mpsc::{channel, Receiver};
 use std::thread::JoinHandle;
 
 /// Cap one inbound LSP message body. rust-analyzer can emit large payloads (semantic
@@ -264,7 +264,11 @@ impl LspServer {
         }
 
         let (sender, receiver) = channel();
-        let reader = std::thread::spawn(move || read_frames(BufReader::new(stdout), &sender));
+        let reader = std::thread::spawn(move || {
+            crate::framing::read_frames(BufReader::new(stdout), MAX_LSP_MESSAGE_BYTES, |value| {
+                sender.send(value).is_ok()
+            })
+        });
 
         // The writer thread owns stdin: callers enqueue frames (bounded, non-blocking)
         // and this thread does the blocking framed writes, so a slow server never blocks
@@ -275,7 +279,7 @@ impl LspServer {
         let mut stdin = stdin;
         let writer = std::thread::spawn(move || {
             while let Ok(message) = writer_rx.recv() {
-                let framed = frame_message(&message);
+                let framed = crate::framing::frame_message(&message);
                 if stdin
                     .write_all(&framed)
                     .and_then(|()| stdin.flush())
@@ -781,88 +785,9 @@ fn hex_digit(byte: u8) -> Option<u8> {
     }
 }
 
-/// Prefix `message` with an LSP `Content-Length` header framing its UTF-8 JSON body.
-fn frame_message(message: &Value) -> Vec<u8> {
-    let body = serde_json::to_vec(message).unwrap_or_else(|_| b"{}".to_vec());
-    let mut framed = format!("Content-Length: {}\r\n\r\n", body.len()).into_bytes();
-    framed.extend_from_slice(&body);
-    framed
-}
-
-/// Read Content-Length framed LSP messages off `reader` until EOF (server exit) or a
-/// malformed frame, sending each parsed message to `sender`. The reader ending is how the
-/// host observes the server's exit (the channel disconnects).
-fn read_frames(mut reader: BufReader<ChildStdout>, sender: &Sender<Value>) {
-    loop {
-        let Some(len) = read_content_length(&mut reader) else {
-            return;
-        };
-        if len == 0 {
-            continue;
-        }
-        if len > MAX_LSP_MESSAGE_BYTES {
-            // Keep the stream framed by consuming the oversized body, but drop it.
-            if discard_exact(&mut reader, len).is_err() {
-                return;
-            }
-            continue;
-        }
-        let mut body = vec![0_u8; len];
-        if reader.read_exact(&mut body).is_err() {
-            return;
-        }
-        // A malformed frame is skipped (the length kept us in sync, so keep reading); a
-        // send error means the host dropped the receiver (server retired) — stop reading.
-        if let Ok(value) = serde_json::from_slice::<Value>(&body) {
-            if sender.send(value).is_err() {
-                return;
-            }
-        }
-    }
-}
-
-/// Read LSP headers up to the blank line, returning the `Content-Length`. `None` on EOF or
-/// a header block without a length (which ends the reader, so the host observes exit).
-fn read_content_length(reader: &mut impl BufRead) -> Option<usize> {
-    let mut content_length: Option<usize> = None;
-    loop {
-        let mut line = String::new();
-        match reader.read_line(&mut line) {
-            Ok(0) => return None, // EOF
-            Ok(_) => {}
-            Err(_) => return None,
-        }
-        let trimmed = line.trim_end_matches(['\r', '\n']);
-        if trimmed.is_empty() {
-            // Blank line ends the header block; `None` here means no length was seen.
-            return content_length;
-        }
-        if let Some(rest) = trimmed.strip_prefix("Content-Length:") {
-            content_length = rest.trim().parse::<usize>().ok();
-        }
-        // Other headers (e.g. Content-Type) are ignored.
-    }
-}
-
-/// Consume exactly `remaining` bytes from `reader`, discarding them (used to skip an
-/// over-cap body while keeping the frame stream in sync).
-fn discard_exact(reader: &mut impl Read, mut remaining: usize) -> std::io::Result<()> {
-    let mut buffer = [0_u8; 8192];
-    while remaining > 0 {
-        let want = remaining.min(buffer.len());
-        let read = reader.read(&mut buffer[..want])?;
-        if read == 0 {
-            return Err(std::io::Error::from(std::io::ErrorKind::UnexpectedEof));
-        }
-        remaining -= read;
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Cursor;
 
     #[test]
     fn resolves_allowlisted_languages_and_denies_others() {
@@ -912,25 +837,6 @@ mod tests {
         std::env::set_var(var, "/definitely/not/here/lsp-xyz");
         assert_eq!(locate_program(var, "also-not-real-xyz"), None);
         std::env::remove_var(var);
-    }
-
-    #[test]
-    fn frames_a_message_with_a_byte_accurate_content_length() {
-        let framed = frame_message(&serde_json::json!({"jsonrpc": "2.0", "id": 1}));
-        let text = String::from_utf8(framed).expect("utf8");
-        let (header, body) = text.split_once("\r\n\r\n").expect("header/body split");
-        assert_eq!(header, format!("Content-Length: {}", body.len()));
-        assert!(body.contains("\"jsonrpc\":\"2.0\""));
-    }
-
-    #[test]
-    fn reads_content_length_and_ignores_other_headers() {
-        let raw = "Content-Type: application/vscode-jsonrpc\r\nContent-Length: 42\r\n\r\n";
-        assert_eq!(read_content_length(&mut Cursor::new(raw)), Some(42));
-        // A header block with no length ends the reader.
-        assert_eq!(read_content_length(&mut Cursor::new("\r\n")), None);
-        // EOF mid-stream ends the reader.
-        assert_eq!(read_content_length(&mut Cursor::new("")), None);
     }
 
     /// A trivial, immediately-exiting command on each platform — enough to exercise
