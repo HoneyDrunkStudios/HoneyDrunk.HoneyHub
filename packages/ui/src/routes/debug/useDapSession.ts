@@ -202,8 +202,20 @@ export function useDapSession(
             supportsRunInTerminalRequest: false,
             supportsStartDebuggingRequest: false
           })
-            .then(() => request("launch", {}))
+            .then((initResponse) => {
+              // Only launch once initialize succeeded; a failed initialize surfaces as an error
+              // and no debuggee is started.
+              if (initResponse.success === false) {
+                setStatus("error");
+                setDetail(initResponse.message ?? "initialize failed");
+                return undefined;
+              }
+              return request("launch", {});
+            })
             .then((response) => {
+              if (response === undefined) {
+                return; // initialize failed; already surfaced
+              }
               if (response.success === false) {
                 setStatus("error");
                 setDetail(response.message ?? "launch failed");
@@ -250,7 +262,12 @@ export function useDapSession(
       // host-owned). We DENY it rather than run anything the adapter names. `startDebugging` (a
       // child-session request) is likewise not auto-honored in Slice B.
       if (message.type === "request" && typeof message.seq === "number") {
+        // A DAP response is itself a protocol message and needs its own `seq` (adapters that wait
+        // on the denied reverse-request can otherwise reject or hang on a malformed response).
+        const responseSeq = seqRef.current;
+        seqRef.current += 1;
         void client.sendDap(sessionIdRef.current, {
+          seq: responseSeq,
           type: "response",
           request_seq: message.seq,
           command: message.command,

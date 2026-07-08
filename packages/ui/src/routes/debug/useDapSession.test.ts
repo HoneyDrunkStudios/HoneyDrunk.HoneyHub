@@ -158,11 +158,32 @@ describe("useDapSession", () => {
         })
       )
     );
-    // The hook must answer with a FAILURE response and run nothing the adapter named.
+    // The hook must answer with a FAILURE response and run nothing the adapter named. The response
+    // carries its own protocol `seq` (a DAP response is a message too).
     const reply = calls.send.find((s) => s.message.request_seq === 99);
     expect(reply).toBeTruthy();
     expect(reply!.message.success).toBe(false);
     expect(reply!.message.command).toBe("runInTerminal");
+    expect(typeof reply!.message.seq).toBe("number");
+  });
+
+  it("surfaces an error and does not launch when initialize fails", async () => {
+    const { client, calls, emit } = fakeClient();
+    const { result } = renderHook(() => useDapSession(client, () => {}));
+    await act(async () => {
+      result.current.start("/repo", "netcoredbg", "dotnet:App");
+    });
+    const openId = calls.open[0]!.openId;
+    await act(async () => {
+      emit({ kind: "dap_session_opened", sessionId: "d1", adapterId: "netcoredbg", openId });
+    });
+    await act(async () => {
+      emit(dapMessage("d1", { type: "response", request_seq: seqOf(calls, "initialize"), command: "initialize", success: false, message: "no adapter" }));
+    });
+    expect(result.current.status).toBe("error");
+    expect(result.current.detail).toBe("no adapter");
+    // A failed initialize must NOT be followed by a launch.
+    expect(calls.send.some((s) => s.message.command === "launch")).toBe(false);
   });
 
   it("continues on resume, and stops the session", async () => {

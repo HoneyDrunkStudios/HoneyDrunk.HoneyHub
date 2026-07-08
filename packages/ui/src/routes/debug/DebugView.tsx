@@ -77,6 +77,9 @@ export function DebugView({
       setConfigs([]);
       return;
     }
+    // Clear the previous root's configs BEFORE the new list arrives, so the picker never briefly
+    // offers a stale config from another root that could be launched against this one.
+    setConfigs([]);
     const unsubscribe = client.subscribe((event) => {
       if (event.payload.kind === "dap_configs" && event.payload.root === root) {
         setConfigs(event.payload.configs);
