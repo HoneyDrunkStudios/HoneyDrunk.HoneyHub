@@ -3539,8 +3539,14 @@ mod tests {
         let now = now_millis();
         let stale = now.saturating_sub(idle_ms + 1_000);
         let fresh = now;
-        assert!(now.saturating_sub(stale) > idle_ms, "a stale session is reaped");
-        assert!(now.saturating_sub(fresh) <= idle_ms, "an active session survives");
+        assert!(
+            now.saturating_sub(stale) > idle_ms,
+            "a stale session is reaped"
+        );
+        assert!(
+            now.saturating_sub(fresh) <= idle_ms,
+            "an active session survives"
+        );
     }
 
     #[test]
