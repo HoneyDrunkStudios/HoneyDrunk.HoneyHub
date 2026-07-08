@@ -157,9 +157,11 @@ struct DapEntry {
     /// The supervised debug adapter. Dropping it tree-kills the adapter AND the debuggee it
     /// launched (shared process group).
     adapter: honeyhub_bridge::dap::DapAdapter,
-    /// The canonical allowlisted workspace root, re-checked on a workspace-root change so a
-    /// session whose root is removed is retired, and the `launch`-request gate forces the
-    /// debuggee's cwd to it (D3 / D6).
+    /// The canonical allowlisted workspace root the adapter was spawned in, re-checked on a
+    /// workspace-root change so a session whose root leaves the allowlist is retired (D6). It is
+    /// also the adapter subprocess's working directory. In this slice the client cannot start a
+    /// debuggee at all (`launch` / `restart` / `attach` are denied, D3 / Open-Question-#2), so
+    /// there is no client-supplied cwd to force here yet; host-resolved launch is a later slice.
     root: String,
     /// The connection that owns this session (ADR-0106 D6: bound to the opening paired device).
     /// Only the owner may drive it (`dap_send` is owner-checked by `conn_id`) or stop it; its
@@ -2751,9 +2753,14 @@ const DAP_IDLE_SWEEP: Duration = Duration::from_secs(60);
 
 /// The configured debug idle timeout in milliseconds (`0` disables the watchdog).
 fn dap_idle_ms() -> u64 {
-    std::env::var(DAP_IDLE_ENV)
-        .ok()
-        .and_then(|value| value.trim().parse::<u64>().ok())
+    idle_ms_from(std::env::var(DAP_IDLE_ENV).ok().as_deref())
+}
+
+/// Pure core of [`dap_idle_ms`]: turn a raw override into milliseconds, defaulting to
+/// [`DAP_IDLE_DEFAULT_SECS`] when it is absent or unparseable. Split out so the timeout policy is
+/// testable without mutating the ambient environment.
+fn idle_ms_from(raw: Option<&str>) -> u64 {
+    raw.and_then(|value| value.trim().parse::<u64>().ok())
         .unwrap_or(DAP_IDLE_DEFAULT_SECS)
         .saturating_mul(1000)
 }
@@ -2878,11 +2885,59 @@ async fn open_dap_session(
     Ok(None)
 }
 
+/// How long the DAP pump waits on a full owner outbound channel before it treats the owner as
+/// wedged and retires the session. A slow-but-draining cockpit is delivered to well within this;
+/// a stuck one must not pin the pump thread (and the `Arc<Host>` plus adapter receiver it holds)
+/// or delay teardown, so the session is retired instead of the pump blocking forever (ADR-0106
+/// D6: a slow client cannot delay enforcement).
+const DAP_OWNER_SEND_TIMEOUT: Duration = Duration::from_secs(10);
+/// Poll cadence while an owner outbound channel is momentarily full.
+const DAP_OWNER_SEND_POLL: Duration = Duration::from_millis(20);
+
+/// Outcome of a bounded owner delivery.
+enum OwnerSend {
+    /// The frame reached the owner's outbound channel.
+    Sent,
+    /// The owner disconnected; the pump should stop.
+    Closed,
+    /// The owner did not drain within the timeout; treat it as wedged and retire the session.
+    Wedged,
+}
+
+/// Deliver one frame to the owning connection's bounded outbound channel WITHOUT blocking the pump
+/// indefinitely. A momentarily full channel is retried until `timeout` elapses; if it still has
+/// not drained the owner is reported wedged so the caller retires the session, rather than letting
+/// a stuck cockpit pin the pump thread or delay enforcement (ADR-0106 D6). Runs on a std thread,
+/// so a non-async bounded `try_send` loop is the right primitive here.
+fn send_owner_bounded(
+    owner: &mpsc::Sender<WireFrame>,
+    frame: WireFrame,
+    timeout: Duration,
+) -> OwnerSend {
+    let deadline = std::time::Instant::now() + timeout;
+    let mut frame = frame;
+    loop {
+        match owner.try_send(frame) {
+            Ok(()) => return OwnerSend::Sent,
+            Err(mpsc::error::TrySendError::Closed(_)) => return OwnerSend::Closed,
+            Err(mpsc::error::TrySendError::Full(returned)) => {
+                if std::time::Instant::now() >= deadline {
+                    return OwnerSend::Wedged;
+                }
+                frame = returned;
+                std::thread::sleep(DAP_OWNER_SEND_POLL);
+            }
+        }
+    }
+}
+
 /// Spawn the per-session DAP message pump: a std thread draining the adapter's framed-message
 /// receiver and routing each frame as a `dap_message` to the OWNING connection ONLY (a DAP frame
 /// can carry stack frames and variable / evaluate results, which are the debuggee's runtime
 /// memory and potentially secret-bearing, ADR-0106 D7 / D9, so it never reaches another device).
-/// When the receiver disconnects (the adapter exited), it asks the reaper to retire the session.
+/// Delivery to the owner is bounded, not blocking: a wedged cockpit is retired rather than allowed
+/// to pin this pump or delay teardown (ADR-0106 D6). When the receiver disconnects (the adapter
+/// exited) it asks the reaper to retire the session.
 fn spawn_dap_pump(
     host: Arc<Host>,
     session_id: String,
@@ -2898,15 +2953,20 @@ fn spawn_dap_pump(
                 session_id.clone(),
                 message,
             ));
-            if owner.blocking_send(frame).is_err() {
-                break;
+            match send_owner_bounded(&owner, frame, DAP_OWNER_SEND_TIMEOUT) {
+                // Stamp AFTER a successful send: a session actively producing frames and draining
+                // is not idle. A wedged owner never reaches here (it is retired below), so the
+                // idle watchdog and this path never disagree about liveness (ADR-0106 D6).
+                OwnerSend::Sent => last_activity.store(now_millis(), Ordering::Relaxed),
+                // The owner disconnected: fall through to the reaper to retire the dead session.
+                OwnerSend::Closed => break,
+                // The owner stopped draining past the bound: a stuck cockpit must not pin this
+                // pump or delay enforcement, so retire the session rather than block (D6).
+                OwnerSend::Wedged => break,
             }
-            // Stamp AFTER the send so a session actively producing frames but merely backpressured
-            // on a slow owner is not mistaken for idle and reaped (ADR-0106 D6).
-            last_activity.store(now_millis(), Ordering::Relaxed);
         }
-        // The channel disconnected: the adapter exited. Ask the reaper to retire the dead session
-        // (announce its close once, drop anything left).
+        // The channel disconnected, the owner is wedged, or the owner is gone. Ask the reaper to
+        // retire the session (announce its close once, tree-kill anything left).
         let _ = host.dap_reaper.send(session_id);
     });
 }
@@ -3528,14 +3588,27 @@ mod tests {
 
     #[test]
     fn dap_idle_timeout_defaults_and_bounds_a_stale_session() {
-        // With no HONEYHUB_DAP_IDLE_SECS override, the debug idle watchdog uses the 30-minute
-        // default (ADR-0106 D6), so a connected cockpit cannot keep an adapter alive forever.
-        assert_eq!(dap_idle_ms(), DAP_IDLE_DEFAULT_SECS * 1000);
-        assert!(dap_idle_ms() > 0, "the idle watchdog is enabled by default");
+        // Timeout policy, exercised on the pure `idle_ms_from` core so the test does not depend on
+        // (or mutate) the ambient HONEYHUB_DAP_IDLE_SECS. With no override the watchdog uses the
+        // 30-minute default (ADR-0106 D6), so a connected cockpit cannot keep an adapter alive
+        // forever; an explicit `0` disables it; a valid value is taken verbatim.
+        assert_eq!(idle_ms_from(None), DAP_IDLE_DEFAULT_SECS * 1000);
+        assert!(idle_ms_from(None) > 0, "the idle watchdog is on by default");
+        assert_eq!(idle_ms_from(Some("0")), 0, "an explicit 0 disables it");
+        assert_eq!(
+            idle_ms_from(Some(" 120 ")),
+            120_000,
+            "a value is taken as-is"
+        );
+        assert_eq!(
+            idle_ms_from(Some("garbage")),
+            DAP_IDLE_DEFAULT_SECS * 1000,
+            "an unparseable override falls back to the default"
+        );
 
         // The reaper's expiry predicate (mirrored here): a session whose last activity is older
         // than the timeout is expired, while one that just had traffic is not.
-        let idle_ms = dap_idle_ms();
+        let idle_ms = DAP_IDLE_DEFAULT_SECS * 1000;
         let now = now_millis();
         let stale = now.saturating_sub(idle_ms + 1_000);
         let fresh = now;
@@ -3547,6 +3620,157 @@ mod tests {
             now.saturating_sub(fresh) <= idle_ms,
             "an active session survives"
         );
+    }
+
+    /// A stub backend adapter so a `Host` can be built for host-boundary tests without a real CLI.
+    /// The DAP relay gate returns before any adapter method is reached, so these are never called.
+    struct StubAdapter;
+
+    impl honeyhub_bridge::AgentBackendAdapter for StubAdapter {
+        fn backend(&self) -> honeyhub_bridge::AgentBackend {
+            honeyhub_bridge::AgentBackend::ClaudeLocal
+        }
+        fn capabilities(&self) -> honeyhub_bridge::CapabilityFlags {
+            honeyhub_bridge::CapabilityFlags::claude_local()
+        }
+        fn start(
+            &self,
+            _request: honeyhub_bridge::StartRunRequest,
+        ) -> Result<honeyhub_bridge::RunHandle, BridgeError> {
+            Err(BridgeError::new("unused", "stub adapter"))
+        }
+        fn stream(&self, _run_id: &str) -> Result<Vec<BridgeEvent>, BridgeError> {
+            Ok(Vec::new())
+        }
+        fn reply(&self, _run_id: &str, _text: &str) -> Result<(), BridgeError> {
+            Ok(())
+        }
+        fn stop(&self, _run_id: &str) -> Result<(), BridgeError> {
+            Ok(())
+        }
+        fn resume(&self, _s: &str) -> Result<honeyhub_bridge::RunHandle, BridgeError> {
+            Err(BridgeError::new("unused", "stub adapter"))
+        }
+    }
+
+    /// Build a minimal `Host` over the stub adapter for host-boundary unit tests.
+    fn test_host() -> Arc<Host> {
+        let runtime = honeyhub_bridge::BridgeRuntime::new(
+            StubAdapter,
+            honeyhub_bridge::WorkspaceAllowlist::new(Vec::new()),
+            honeyhub_bridge::BackendAllowlist::new(vec![
+                honeyhub_bridge::AgentBackend::ClaudeLocal,
+            ]),
+        );
+        let (events, _rx) = broadcast::channel(16);
+        let (terminal_reaper, _t) = mpsc::unbounded_channel();
+        let (dap_reaper, _d) = mpsc::unbounded_channel();
+        Arc::new(Host {
+            runtime: Mutex::new(runtime),
+            active_runs: Mutex::new(std::collections::HashSet::new()),
+            active_checks: Mutex::new(std::collections::HashSet::new()),
+            active_probes: Mutex::new(std::collections::HashSet::new()),
+            active_lsp: Mutex::new(LspState::default()),
+            connected_clients: std::sync::atomic::AtomicUsize::new(0),
+            events,
+            watcher: Mutex::new(None),
+            dispatch: None,
+            active_launches: Mutex::new(LaunchState::default()),
+            pending_launches: Mutex::new(HashMap::new()),
+            active_terminals: Mutex::new(TerminalState::default()),
+            terminal_reaper,
+            active_dap: Mutex::new(DapState::default()),
+            dap_reaper,
+            next_conn_id: AtomicU64::new(0),
+        })
+    }
+
+    #[tokio::test]
+    async fn open_dap_session_denies_a_relay_connection() {
+        // ADR-0106 D5: debugging is desktop-local-only by default. A non-local (relay) connection
+        // is refused BEFORE the adapter is resolved or spawned, so no debuggee ever starts for a
+        // remote cockpit. This is the direct assertion of the relay-denial boundary.
+        let host = test_host();
+        let (owner, _rx) = mpsc::channel(4);
+        let err = open_dap_session(
+            &host,
+            false, // local = false: a relay connection
+            7,
+            &owner,
+            std::env::temp_dir().to_string_lossy().into_owned(),
+            "netcoredbg".to_string(),
+            "cfg".to_string(),
+            None,
+        )
+        .await
+        .expect_err("a relay connection cannot open a debug session");
+        assert_eq!(err.code, "dap_denied");
+        // Nothing was registered: the denial happened before any session bookkeeping.
+        assert!(host.active_dap.lock().await.sessions.is_empty());
+    }
+
+    #[test]
+    fn send_owner_bounded_retires_a_wedged_owner_and_delivers_to_a_draining_one() {
+        // A draining owner takes the frame immediately.
+        let (owner, mut rx) = mpsc::channel::<WireFrame>(1);
+        let frame = server_event_frame(BridgeEvent::dap_session_closed(
+            new_id(),
+            now_rfc3339(),
+            "s".to_string(),
+            "test",
+        ));
+        assert!(matches!(
+            send_owner_bounded(&owner, frame, Duration::from_millis(50)),
+            OwnerSend::Sent
+        ));
+        assert!(
+            rx.try_recv().is_ok(),
+            "the draining owner received the frame"
+        );
+
+        // A wedged owner (capacity full, never drained) is reported wedged within the bound rather
+        // than pinning the caller forever (ADR-0106 D6). Fill the single slot, then a second send
+        // must give up.
+        let filler = server_event_frame(BridgeEvent::dap_session_closed(
+            new_id(),
+            now_rfc3339(),
+            "s".to_string(),
+            "fill",
+        ));
+        owner
+            .try_send(filler)
+            .expect("first send fills the channel");
+        let stuck = server_event_frame(BridgeEvent::dap_session_closed(
+            new_id(),
+            now_rfc3339(),
+            "s".to_string(),
+            "stuck",
+        ));
+        let start = std::time::Instant::now();
+        assert!(matches!(
+            send_owner_bounded(&owner, stuck, Duration::from_millis(60)),
+            OwnerSend::Wedged
+        ));
+        assert!(
+            start.elapsed() >= Duration::from_millis(60),
+            "it waited out the bound before giving up"
+        );
+        // `rx` is still alive but never drained: keep it so the channel stays Full, not Closed.
+        drop(rx);
+
+        // A closed owner (receiver dropped) is reported closed so the pump stops promptly.
+        let (owner2, rx2) = mpsc::channel::<WireFrame>(1);
+        drop(rx2);
+        let after_close = server_event_frame(BridgeEvent::dap_session_closed(
+            new_id(),
+            now_rfc3339(),
+            "s".to_string(),
+            "closed",
+        ));
+        assert!(matches!(
+            send_owner_bounded(&owner2, after_close, Duration::from_millis(50)),
+            OwnerSend::Closed
+        ));
     }
 
     #[test]
