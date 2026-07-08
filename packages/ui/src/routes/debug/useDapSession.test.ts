@@ -158,6 +158,90 @@ describe("useDapSession", () => {
     expect(result.current.status).toBe("terminated");
   });
 
+  it("streams output, evaluates in the top frame, and fetches variables", async () => {
+    const { client, calls, emit } = fakeClient();
+    const output: string[] = [];
+    const { result } = renderHook(() => useDapSession(client, (t) => output.push(t)));
+    await act(async () => {
+      result.current.start("/repo", "netcoredbg", "dotnet:run");
+    });
+    const openId = calls.open[0]!.openId;
+    act(() => emit({ kind: "dap_session_opened", sessionId: "d1", adapterId: "netcoredbg", openId }));
+
+    // An `output` event reaches the onOutput sink.
+    act(() => emit(dapMessage("d1", { type: "event", event: "output", body: { output: "hello\n" } })));
+    expect(output.join("")).toBe("hello\n");
+
+    // Stop so there is a top frame, then evaluate in it.
+    await act(async () => {
+      emit(dapMessage("d1", { type: "event", event: "stopped", body: { threadId: 1 } }));
+    });
+    const stackReq = calls.send.find((s) => s.message.command === "stackTrace");
+    await act(async () => {
+      emit(
+        dapMessage("d1", {
+          type: "response",
+          request_seq: stackReq!.message.seq,
+          command: "stackTrace",
+          success: true,
+          body: { stackFrames: [{ id: 5, name: "F", line: 1, column: 1 }] }
+        })
+      );
+    });
+    calls.send.length = 0;
+
+    let evalResult: Promise<string> | undefined;
+    await act(async () => {
+      evalResult = result.current.evaluate("1+1");
+    });
+    const evalReq = calls.send.find((s) => s.message.command === "evaluate");
+    expect(evalReq!.message.arguments).toMatchObject({ frameId: 5, context: "repl" });
+    await act(async () => {
+      emit(
+        dapMessage("d1", {
+          type: "response",
+          request_seq: evalReq!.message.seq,
+          command: "evaluate",
+          success: true,
+          body: { result: "2" }
+        })
+      );
+    });
+    await expect(evalResult!).resolves.toBe("2");
+
+    // variables() fetches a scope's children.
+    let vars: Promise<{ name: string }[]> | undefined;
+    await act(async () => {
+      vars = result.current.variables(1000) as Promise<{ name: string }[]>;
+    });
+    const varsReq = calls.send.find((s) => s.message.command === "variables");
+    expect(varsReq!.message.arguments).toMatchObject({ variablesReference: 1000 });
+    await act(async () => {
+      emit(
+        dapMessage("d1", {
+          type: "response",
+          request_seq: varsReq!.message.seq,
+          command: "variables",
+          success: true,
+          body: { variables: [{ name: "x", value: "7", variablesReference: 0 }] }
+        })
+      );
+    });
+    await expect(vars!).resolves.toEqual([{ name: "x", value: "7", variablesReference: 0 }]);
+  });
+
+  it("maps a generic start failure to error (not denied)", async () => {
+    const { client } = fakeClient();
+    (client as unknown as { openDapSession: () => Promise<void> }).openDapSession = () =>
+      Promise.reject({ code: "dap_spawn_failed", message: "boom" });
+    const { result } = renderHook(() => useDapSession(client, () => {}));
+    await act(async () => {
+      result.current.start("/repo", "netcoredbg", "dotnet:run");
+    });
+    expect(result.current.status).toBe("error");
+    expect(result.current.detail).toBe("boom");
+  });
+
   it("surfaces a relay denial on start", async () => {
     const { client, emit } = fakeClient();
     // Override openDapSession to reject with a dap_denied code.
