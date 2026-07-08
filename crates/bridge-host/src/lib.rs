@@ -2898,11 +2898,16 @@ async fn open_dap_session(
                 "the workspace root was removed from the allowlist before the debug session opened",
             ));
         }
-        // Audit line (ADR-0106 D7): session id, adapter id, workspace root, and owning connection,
-        // so a debug session is traceable from the bridge console (steps / evaluates are NOT logged).
+        // Audit line (ADR-0106 D7): session id, adapter id, workspace root, owning connection, AND
+        // the host-resolved debuggee identity (its program + cwd), so a debug session is fully
+        // traceable from the bridge console. Runtime memory (steps / evaluates / variable values)
+        // is still NEVER logged; the resolved program/cwd are host-owned launch inputs, not runtime
+        // state, and D7 calls for the debuggee cwd/path in the envelope audit.
         eprintln!(
-            "[dap] {session_id} adapter={} config={config_id} root={canonical} (conn {conn_id})",
-            spec.adapter_id
+            "[dap] {session_id} adapter={} config={config_id} root={canonical} program={} cwd={} (conn {conn_id})",
+            spec.adapter_id,
+            target.program.display(),
+            target.cwd.display()
         );
         state.sessions.insert(
             session_id.clone(),
@@ -3096,10 +3101,15 @@ fn host_launch_request(
 }
 
 /// Render a canonicalized path for a launch argument, stripping the Windows `\\?\` extended-length
-/// prefix that `canonicalize` adds. netcoredbg (and the .NET host) expect ordinary `C:\...` paths;
-/// a verbatim-prefixed path can fail to launch. A no-op on non-Windows paths.
+/// prefix that `canonicalize` adds. netcoredbg (and the .NET host) expect ordinary paths; a
+/// verbatim-prefixed path can fail to launch. A verbatim UNC path (`\\?\UNC\server\share\...`, for a
+/// workspace on a network share) is restored to its `\\server\share\...` form rather than the
+/// wrong `UNC\server\...`. A no-op on non-Windows paths.
 fn strip_verbatim_prefix(path: &std::path::Path) -> String {
     let text = path.to_string_lossy();
+    if let Some(unc) = text.strip_prefix(r"\\?\UNC\") {
+        return format!(r"\\{unc}");
+    }
     text.strip_prefix(r"\\?\")
         .map(str::to_string)
         .unwrap_or_else(|| text.into_owned())
@@ -3743,6 +3753,24 @@ mod tests {
         // DOTNET_STARTUP_HOOKS nor LD_PRELOAD is on it.
         assert!(args["env"].get("DOTNET_STARTUP_HOOKS").is_none());
         assert!(args["env"].get("LD_PRELOAD").is_none());
+    }
+
+    #[test]
+    fn strip_verbatim_prefix_handles_disk_unc_and_plain_paths() {
+        // A verbatim disk path loses the \\?\ prefix; a verbatim UNC path is restored to the
+        // \\server\share form (not the wrong UNC\server\share); a plain path is untouched.
+        assert_eq!(
+            strip_verbatim_prefix(std::path::Path::new(r"\\?\C:\repo\bin\App.dll")),
+            r"C:\repo\bin\App.dll"
+        );
+        assert_eq!(
+            strip_verbatim_prefix(std::path::Path::new(r"\\?\UNC\srv\share\App.dll")),
+            r"\\srv\share\App.dll"
+        );
+        assert_eq!(
+            strip_verbatim_prefix(std::path::Path::new("/home/me/app/bin/App.dll")),
+            "/home/me/app/bin/App.dll"
+        );
     }
 
     #[test]
