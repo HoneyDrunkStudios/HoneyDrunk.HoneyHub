@@ -125,9 +125,47 @@ struct Host {
     /// shell exits (the PTY reached EOF) so a tokio task can drop the now-dead entry off the
     /// map (a std pump thread cannot take the async terminals lock itself).
     terminal_reaper: mpsc::UnboundedSender<String>,
+    /// Live debug sessions (ADR-0106), keyed by session id, plus the allowlisted-roots snapshot
+    /// they are authorized against, behind ONE mutex (the atomic-revocation pattern). Each is a
+    /// supervised debug adapter owned by the connection that opened it (`conn_id`), tree-killed
+    /// with its debuggee on close / disconnect / token-revocation / opening-root-removal (D6).
+    /// Desktop-local-only: a relay connection is refused a debug session by default (D5).
+    active_dap: Mutex<DapState>,
+    /// Reaper channel: a debug adapter's message-pump thread posts its session id here when the
+    /// adapter exits (its stdout reached EOF) so a tokio task can retire the now-dead session
+    /// off the map (a std pump thread cannot take the async `active_dap` lock itself).
+    dap_reaper: mpsc::UnboundedSender<String>,
     /// Monotonic source of per-connection ids, so a launch (or terminal) can be tied to the
     /// socket that opened it and swept when that socket disconnects.
     next_conn_id: AtomicU64,
+}
+
+/// The live debug sessions plus the roots snapshot they are validated against, behind one mutex
+/// so a session's authorization check and its registration are atomic against root removal
+/// (ADR-0106 D6, the atomic-revocation pattern used for LSP / launch / terminal).
+#[derive(Default)]
+struct DapState {
+    sessions: HashMap<String, DapEntry>,
+    roots: honeyhub_bridge::WorkspaceAllowlist,
+}
+
+/// One live debug session and the bookkeeping to supervise it (ADR-0106 D6). netcoredbg is
+/// launch-with-debugger: the adapter spawns the debuggee as its OWN child, so the debuggee sits
+/// in the adapter's process group and the adapter's tree-kill takes it too (no separate handle
+/// for Slice A; launch-then-attach for node is Slice C).
+struct DapEntry {
+    /// The supervised debug adapter. Dropping it tree-kills the adapter AND the debuggee it
+    /// launched (shared process group).
+    adapter: honeyhub_bridge::dap::DapAdapter,
+    /// The canonical allowlisted workspace root, re-checked on a workspace-root change so a
+    /// session whose root is removed is retired, and the `launch`-request gate forces the
+    /// debuggee's cwd to it (D3 / D6).
+    root: String,
+    /// The connection that owns this session (ADR-0106 D6: bound to the opening paired device).
+    /// Only the owner may drive it (`dap_send` is owner-checked by `conn_id`) or stop it; its
+    /// `dap_message` frames are delivered only to the owner's sink (held by the pump thread, since
+    /// runtime memory is potentially secret, D7 / D9), while open/close go device-wide.
+    conn_id: u64,
 }
 
 /// The live launches plus the roots snapshot they are validated against, behind one mutex so a
@@ -345,10 +383,15 @@ pub async fn serve(
         ..LaunchState::default()
     };
     let initial_terminals = TerminalState {
-        roots: honeyhub_bridge::WorkspaceAllowlist::new(initial_roots),
+        roots: honeyhub_bridge::WorkspaceAllowlist::new(initial_roots.clone()),
         ..TerminalState::default()
     };
+    let initial_dap = DapState {
+        roots: honeyhub_bridge::WorkspaceAllowlist::new(initial_roots),
+        ..DapState::default()
+    };
     let (terminal_reaper, mut terminal_reaped) = mpsc::unbounded_channel::<String>();
+    let (dap_reaper, mut dap_reaped) = mpsc::unbounded_channel::<String>();
     let host = Arc::new(Host {
         runtime: Mutex::new(runtime),
         active_runs: Mutex::new(std::collections::HashSet::new()),
@@ -363,8 +406,22 @@ pub async fn serve(
         pending_launches: Mutex::new(HashMap::new()),
         active_terminals: Mutex::new(initial_terminals),
         terminal_reaper,
+        active_dap: Mutex::new(initial_dap),
+        dap_reaper,
         next_conn_id: AtomicU64::new(0),
     });
+
+    // Debug-adapter reaper (ADR-0106 D6): when an adapter exits, its message-pump thread posts
+    // the session id here; retire the dead session (announce its close once, tree-kill anything
+    // left) off the async worker.
+    {
+        let host = Arc::clone(&host);
+        tokio::spawn(async move {
+            while let Some(session_id) = dap_reaped.recv().await {
+                retire_dap(&host, &session_id, "adapter_exited").await;
+            }
+        });
+    }
 
     {
         let host = Arc::clone(&host);
@@ -828,6 +885,21 @@ async fn handle_socket(socket: WebSocket, host: Arc<Host>, local: bool) {
         retire_terminal(&host, &session_id, "disconnected").await;
     }
 
+    // Retire every debug session this connection opened (ADR-0106 D6: a session is tree-killed,
+    // adapter + debuggee, when the owning device disconnects).
+    let mine: Vec<String> = {
+        let state = host.active_dap.lock().await;
+        state
+            .sessions
+            .iter()
+            .filter(|(_, entry)| entry.conn_id == conn_id)
+            .map(|(id, _)| id.clone())
+            .collect()
+    };
+    for session_id in mine {
+        retire_dap(&host, &session_id, "disconnected").await;
+    }
+
     // ADR-0102 D-C: a language server never outlives the cockpit it serves. When the LAST
     // client disconnects, retire every running server (a second connected device keeps them
     // alive; a reconnecting cockpit restarts servers on demand). Drop happens off the async
@@ -914,6 +986,23 @@ async fn handle_command(
         return;
     }
 
+    // DapSend / DapStop touch only the DAP map, never the runtime, so handle them off-lock too.
+    // Owner-checked: only the connection that opened a debug session may drive or stop it.
+    if let ClientCommand::DapSend {
+        session_id,
+        message,
+    } = command
+    {
+        let result = handle_dap_send(host, &session_id, message, conn_id).await;
+        respond(outbound_tx, frame_id, result).await;
+        return;
+    }
+    if let ClientCommand::DapStop { session_id } = &command {
+        let result = stop_dap_session(host, session_id, conn_id).await;
+        respond(outbound_tx, frame_id, result).await;
+        return;
+    }
+
     let mut to_register: Option<String> = None;
     // Set when the workspace allowlist changes, so the watcher is re-pointed after the
     // runtime lock is released.
@@ -929,6 +1018,9 @@ async fn handle_command(
     // `SetWorkspaceRoots`, retired off-lock below (ADR-0103 D5: a session must not outlive its
     // authorization). Each is announced closed once and its shell tree-killed on drop.
     let mut terminal_orphans: Vec<(String, TerminalEntry)> = Vec::new();
+    // Debug sessions whose opening root fell out of the allowlist on the same `SetWorkspaceRoots`,
+    // retired off-lock below (ADR-0106 D6: a session must not outlive its authorization).
+    let mut dap_orphans: Vec<(String, DapEntry)> = Vec::new();
     // A content search validated under the runtime lock but executed after it is released
     // (grepping a big tree is slow filesystem work; holding the runtime lock through it
     // would stall every other client command).
@@ -941,6 +1033,10 @@ async fn handle_command(
     // released: openpty + shell spawn is blocking work that must not stall the poll loop.
     // Carries (root_allowed, root, cols, rows, open_id).
     let mut terminal_open_job: Option<(bool, String, u16, u16, Option<String>)> = None;
+    // A debug session gated under the runtime lock (root allowlist) but OPENED after it is
+    // released: adapter spawn is blocking work. Carries (local, root, adapter_id, config_id,
+    // open_id).
+    let mut dap_open_job: Option<(bool, String, String, String, Option<String>)> = None;
     let result: Result<Option<Vec<BridgeEvent>>, BridgeError> = {
         let mut runtime = host.runtime.lock().await;
         match command {
@@ -1039,6 +1135,25 @@ async fn handle_command(
                 for id in orphan_ids {
                     if let Some(entry) = term_state.terminals.remove(&id) {
                         terminal_orphans.push((id, entry));
+                    }
+                }
+                drop(term_state);
+                // Update the debug-session roots snapshot AND sweep orphaned sessions under the ONE
+                // active_dap lock, so authorization is atomic with the change: `open_dap_session`
+                // re-checks the same snapshot under this lock, so no session can be registered into
+                // a root this sweep just removed (ADR-0106 D6). Orphans are retired off-lock below.
+                let new_roots = runtime.workspace_roots();
+                let mut dap_state = host.active_dap.lock().await;
+                dap_state.roots = honeyhub_bridge::WorkspaceAllowlist::new(new_roots);
+                let orphan_ids: Vec<String> = dap_state
+                    .sessions
+                    .iter()
+                    .filter(|(_, entry)| !dap_state.roots.allows(&entry.root))
+                    .map(|(id, _)| id.clone())
+                    .collect();
+                for id in orphan_ids {
+                    if let Some(entry) = dap_state.sessions.remove(&id) {
+                        dap_orphans.push((id, entry));
                     }
                 }
                 Ok(None)
@@ -1601,14 +1716,25 @@ async fn handle_command(
                 // these arms exist only for match exhaustiveness and are never reached.
                 Ok(None)
             }
-            ClientCommand::DapStart { .. }
-            | ClientCommand::DapSend { .. }
-            | ClientCommand::DapStop { .. } => Err(BridgeError::new(
-                "dap_unavailable",
-                "the debug adapter runner is not wired yet (ADR-0106 Slice A): the adapter \
-                 table, DAP framing, adapter subprocess, and wire contract are landed; the \
-                 supervised two-process session runner and desktop-local-only gate are next",
-            )),
+            ClientCommand::DapStart {
+                root,
+                adapter_id,
+                config_id,
+                open_id,
+            } => {
+                // Gate the root under the runtime lock, DEFER the open: spawning the adapter is
+                // blocking work that must not stall the poll loop. The D5 desktop-local-only gate,
+                // the D2 adapter resolution, and the spawn happen off-lock in `open_dap_session`.
+                require(runtime.workspace_allows(&root), "debug root").map(|()| {
+                    dap_open_job = Some((local, root, adapter_id, config_id, open_id));
+                    None
+                })
+            }
+            ClientCommand::DapSend { .. } | ClientCommand::DapStop { .. } => {
+                // Handled before the runtime lock (see the early returns in `handle_command`);
+                // these arms exist only for match exhaustiveness and are never reached.
+                Ok(None)
+            }
             ClientCommand::Resume { .. } => Err(BridgeError::new(
                 "unsupported_command",
                 "resume is not driven by the host runtime yet",
@@ -1654,6 +1780,12 @@ async fn handle_command(
     // owner-channel send that a slow client could stall.
     for (session_id, entry) in terminal_orphans {
         kill_terminal_entry(&session_id, entry, "root_removed");
+    }
+    // Retire any de-authorized debug sessions off-lock (ADR-0106 D6). Each was already removed
+    // from the map under the active_dap lock, so exactly one path closes it. Kill first (adapter
+    // + debuggee tree-kill), then announce, like the launch/terminal orphan sweeps.
+    for (session_id, entry) in dap_orphans {
+        kill_dap_entry(&host.events, &session_id, entry, "root_removed");
     }
     // Run a gated content search off the runtime lock, on blocking work: only this client's
     // task waits for it, never every other command.
@@ -1706,6 +1838,25 @@ async fn handle_command(
                 root,
                 cols,
                 rows,
+                open_id,
+            )
+            .await
+        }
+        _ => result,
+    };
+
+    // Open a gated debug session off the runtime lock (adapter spawn is blocking). The D5
+    // desktop-local-only gate and D2 adapter resolution happen inside `open_dap_session`.
+    let result = match dap_open_job {
+        Some((local, root, adapter_id, config_id, open_id)) if result.is_ok() => {
+            open_dap_session(
+                host,
+                local,
+                conn_id,
+                outbound_tx,
+                root,
+                adapter_id,
+                config_id,
                 open_id,
             )
             .await
@@ -2553,6 +2704,317 @@ fn spawn_launch_pump(
     });
 }
 
+/// Cap on debug sessions a single connection may hold at once. Each is two coupled processes
+/// (adapter + debuggee), the heaviest supervised unit in the exec family (ADR-0106 D6), so the
+/// per-connection ceiling is low.
+const DAP_MAX_PER_CONN: usize = 4;
+
+/// Open a debug session (ADR-0106): the sharpest supervised-exec action after the terminal.
+/// Desktop-local-only (D5): a relay connection is refused. Host-owned adapter selection (D2):
+/// the named `adapter_id` is resolved against the allowlist table and located on PATH, never a
+/// client command line. Anchored to an allowlisted root, spawned off-lock, then registered under
+/// an atomic roots re-check. The open is announced DEVICE-WIDE (self-announcing, D6); subsequent
+/// `dap_message` frames go ONLY to the owning connection (they can carry runtime memory, D7/D9).
+#[allow(clippy::too_many_arguments)]
+async fn open_dap_session(
+    host: &Arc<Host>,
+    local: bool,
+    conn_id: u64,
+    owner: &mpsc::Sender<WireFrame>,
+    root: String,
+    adapter_id: String,
+    config_id: String,
+    open_id: Option<String>,
+) -> Result<Option<Vec<BridgeEvent>>, BridgeError> {
+    if !local {
+        return Err(BridgeError::new(
+            "dap_denied",
+            "debugging is desktop-local-only; a relay connection cannot open a debug session by default (ADR-0106 D5)",
+        ));
+    }
+    // D2: resolve the adapter id against the host-owned table (deny unknown), and locate the
+    // operator-installed binary. An absent adapter is the honest "no debugger" signal (D8), not
+    // an error the client can turn into execution.
+    let Some(spec) = honeyhub_bridge::dap::resolve_adapter(&adapter_id) else {
+        return Err(BridgeError::new(
+            "dap_adapter_unknown",
+            format!("'{adapter_id}' is not an allowlisted debug adapter"),
+        ));
+    };
+    let Some(program) = honeyhub_bridge::dap::locate(&spec) else {
+        return Err(BridgeError::new(
+            "dap_adapter_not_installed",
+            format!("the '{adapter_id}' debug adapter is not installed; Run is still available"),
+        ));
+    };
+    let canonical = std::fs::canonicalize(&root)
+        .map(|path| path.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| root.clone());
+
+    // Pre-spawn gate: roots + per-connection cap BEFORE spawning the adapter.
+    {
+        let state = host.active_dap.lock().await;
+        if !state.roots.allows(&canonical) {
+            return Err(BridgeError::new(
+                "dap_root_revoked",
+                "the workspace root was removed from the allowlist before the debug session opened",
+            ));
+        }
+        let open_here = state
+            .sessions
+            .values()
+            .filter(|entry| entry.conn_id == conn_id)
+            .count();
+        if open_here >= DAP_MAX_PER_CONN {
+            return Err(BridgeError::new(
+                "dap_limit",
+                format!("too many debug sessions on this connection (max {DAP_MAX_PER_CONN}); stop one first"),
+            ));
+        }
+    }
+
+    // Spawn the adapter OFF the lock (spawn is blocking and must not stall the poll loop or wedge
+    // the active_dap lock the reaper / stop / disconnect paths need).
+    let (adapter, receiver) =
+        honeyhub_bridge::dap::DapAdapter::spawn(program, spec.args, &canonical, spec.adapter_id)?;
+    let session_id = new_id();
+
+    // Register under the active_dap lock, re-checking the roots snapshot held in that same lock so
+    // authorization is atomic with the insert. If the root was removed while we spawned, kill the
+    // orphan and deny rather than leave an adapter running in a de-authorized tree.
+    {
+        let mut state = host.active_dap.lock().await;
+        if !state.roots.allows(&canonical) {
+            drop(state);
+            tokio::task::spawn_blocking(move || drop(adapter));
+            return Err(BridgeError::new(
+                "dap_root_revoked",
+                "the workspace root was removed from the allowlist before the debug session opened",
+            ));
+        }
+        // Audit line (ADR-0106 D7): session id, adapter id, workspace root, and owning connection,
+        // so a debug session is traceable from the bridge console (steps / evaluates are NOT logged).
+        eprintln!(
+            "[dap] {session_id} adapter={adapter_id} config={config_id} root={canonical} (conn {conn_id})"
+        );
+        state.sessions.insert(
+            session_id.clone(),
+            DapEntry {
+                adapter,
+                root: canonical,
+                conn_id,
+            },
+        );
+    }
+
+    // Announce the open DEVICE-WIDE (self-announcing anti-forgery, ADR-0106 D6): every device
+    // learns a debug session opened, and the owning cockpit adopts it by `open_id`. A running
+    // agent can neither open one nor hide one. The command itself just acks.
+    let _ = host.events.send(BridgeEvent::dap_session_opened(
+        new_id(),
+        now_rfc3339(),
+        session_id.clone(),
+        adapter_id,
+        open_id,
+    ));
+    spawn_dap_pump(Arc::clone(host), session_id, receiver, owner.clone());
+    Ok(None)
+}
+
+/// Spawn the per-session DAP message pump: a std thread draining the adapter's framed-message
+/// receiver and routing each frame as a `dap_message` to the OWNING connection ONLY (a DAP frame
+/// can carry stack frames and variable / evaluate results, which are the debuggee's runtime
+/// memory and potentially secret-bearing, ADR-0106 D7 / D9, so it never reaches another device).
+/// When the receiver disconnects (the adapter exited), it asks the reaper to retire the session.
+fn spawn_dap_pump(
+    host: Arc<Host>,
+    session_id: String,
+    receiver: std::sync::mpsc::Receiver<serde_json::Value>,
+    owner: mpsc::Sender<WireFrame>,
+) {
+    std::thread::spawn(move || {
+        while let Ok(message) = receiver.recv() {
+            let frame = server_event_frame(BridgeEvent::dap_message(
+                new_id(),
+                now_rfc3339(),
+                session_id.clone(),
+                message,
+            ));
+            if owner.blocking_send(frame).is_err() {
+                break;
+            }
+        }
+        // The channel disconnected: the adapter exited. Ask the reaper to retire the dead session
+        // (announce its close once, drop anything left).
+        let _ = host.dap_reaper.send(session_id);
+    });
+}
+
+/// Resolve `candidate` (absolute, or relative to `root`) and require it to canonicalize INSIDE the
+/// already-allowlisted `root` (ADR-0090 D8 containment). Used to gate the debuggee program and cwd
+/// a DAP `launch` request proposes, so a debug session cannot launch a program outside the root.
+fn path_within_root(candidate: &str, root: &str) -> bool {
+    let path = std::path::Path::new(candidate);
+    let joined = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::path::Path::new(root).join(path)
+    };
+    match (
+        joined.canonicalize(),
+        std::path::Path::new(root).canonicalize(),
+    ) {
+        (Ok(resolved), Ok(root)) => resolved == root || resolved.starts_with(&root),
+        _ => false,
+    }
+}
+
+/// Enforce the ADR-0106 D3 debuggee boundary on an outbound DAP frame before it reaches the
+/// adapter. A `launch` request is the one frame that starts a real process, so its `cwd` is forced
+/// to the session's allowlisted `root` and its `program` (and `cwd`, if the client set one) must
+/// resolve INSIDE that root, or the launch is denied. Every other frame (setBreakpoints, continue,
+/// stackTrace, variables, evaluate) passes through unchanged. `attach` is denied until Slice C.
+/// Full host-side program resolution per adapter is the ADR-0106 D3 / Open-Question-#2 follow-up;
+/// this enforces the enforceable allowlist-containment invariant in the meantime.
+fn gate_dap_request(
+    mut message: serde_json::Value,
+    root: &str,
+) -> Result<serde_json::Value, BridgeError> {
+    let is_request = message.get("type").and_then(serde_json::Value::as_str) == Some("request");
+    if !is_request {
+        return Ok(message);
+    }
+    match message.get("command").and_then(serde_json::Value::as_str) {
+        Some("attach") => Err(BridgeError::new(
+            "dap_attach_unsupported",
+            "launch-then-attach is not wired for this adapter yet (ADR-0106 D3, Slice C)",
+        )),
+        Some("launch") => {
+            // A client-proposed program/cwd must stay inside the allowlisted root; the cwd is then
+            // forced to the root so the debuggee runs where the host says, not where the client asks.
+            if message
+                .get("arguments")
+                .and_then(serde_json::Value::as_object)
+                .is_none()
+            {
+                message["arguments"] = serde_json::json!({});
+            }
+            let args = message
+                .get_mut("arguments")
+                .and_then(serde_json::Value::as_object_mut)
+                .expect("arguments is an object");
+            if let Some(program) = args.get("program").and_then(serde_json::Value::as_str) {
+                if !path_within_root(program, root) {
+                    return Err(BridgeError::new(
+                        "dap_debuggee_denied",
+                        "the debuggee program must resolve inside the allowlisted workspace root (ADR-0106 D3)",
+                    ));
+                }
+            } else {
+                return Err(BridgeError::new(
+                    "dap_debuggee_denied",
+                    "a debug launch must name a program inside the allowlisted workspace root (ADR-0106 D3)",
+                ));
+            }
+            args.insert(
+                "cwd".to_string(),
+                serde_json::Value::String(root.to_string()),
+            );
+            Ok(message)
+        }
+        _ => Ok(message),
+    }
+}
+
+/// Forward one DAP frame from the owning cockpit to the session's adapter, off the runtime lock
+/// (it touches only the DAP map). OWNER-CHECKED (ADR-0106 D6): only the connection that opened a
+/// session may drive it. The `launch` request is gated (D3) before it reaches the adapter.
+async fn handle_dap_send(
+    host: &Arc<Host>,
+    session_id: &str,
+    message: serde_json::Value,
+    conn_id: u64,
+) -> Result<Option<Vec<BridgeEvent>>, BridgeError> {
+    let mut state = host.active_dap.lock().await;
+    let Some(entry) = state.sessions.get_mut(session_id) else {
+        return Err(BridgeError::new(
+            "dap_not_open",
+            "no debug session with that id (it may have ended)",
+        ));
+    };
+    if entry.conn_id != conn_id {
+        return Err(BridgeError::new(
+            "dap_not_owner",
+            "that debug session belongs to a different connection",
+        ));
+    }
+    let gated = gate_dap_request(message, &entry.root)?;
+    entry.adapter.write_message(&gated)?;
+    Ok(None)
+}
+
+/// Stop a debug session the given connection OWNS (ADR-0106 D6): only the opening connection may
+/// stop it. An unknown id is a no-op (idempotent); a foreign id is denied.
+async fn stop_dap_session(
+    host: &Arc<Host>,
+    session_id: &str,
+    conn_id: u64,
+) -> Result<Option<Vec<BridgeEvent>>, BridgeError> {
+    {
+        let state = host.active_dap.lock().await;
+        match state.sessions.get(session_id) {
+            Some(entry) if entry.conn_id == conn_id => {}
+            Some(_) => {
+                return Err(BridgeError::new(
+                    "dap_not_owner",
+                    "that debug session belongs to a different connection",
+                ))
+            }
+            None => return Ok(None),
+        }
+    }
+    retire_dap(host, session_id, "operator_closed").await;
+    Ok(None)
+}
+
+/// Retire a debug session: remove it from the map (the mutex, so exactly one path retires and
+/// announces a given session) and tear it down.
+async fn retire_dap(host: &Arc<Host>, session_id: &str, reason: &str) {
+    let removed = host.active_dap.lock().await.sessions.remove(session_id);
+    if let Some(entry) = removed {
+        kill_dap_entry(&host.events, session_id, entry, reason);
+    }
+}
+
+/// Tear down a debug session entry we already removed from the map. **Kill first** (the round-3
+/// teardown lesson): a best-effort graceful DAP `disconnect` is queued, then the adapter is
+/// tree-killed (via `Drop`, which takes the debuggee sharing its process group, D6) on a blocking
+/// task BEFORE anything else, so a slow client can never delay enforcement. The `dap_session_closed`
+/// announcement is DEVICE-WIDE (self-announcing, D6) on the broadcast bus, whose `send` is
+/// non-blocking, so no detached task is needed.
+fn kill_dap_entry(
+    events: &broadcast::Sender<BridgeEvent>,
+    session_id: &str,
+    entry: DapEntry,
+    reason: &str,
+) {
+    let DapEntry { mut adapter, .. } = entry;
+    // Best-effort graceful disconnect (non-blocking); the tree-kill below is the guarantee.
+    let _ = adapter.write_message(&serde_json::json!({
+        "type": "request",
+        "command": "disconnect",
+        "arguments": { "terminateDebuggee": true }
+    }));
+    // KILL FIRST: Drop tree-kills the adapter and the debuggee it launched (shared process group).
+    tokio::task::spawn_blocking(move || drop(adapter));
+    let _ = events.send(BridgeEvent::dap_session_closed(
+        new_id(),
+        now_rfc3339(),
+        session_id.to_string(),
+        reason,
+    ));
+}
+
 /// Handle a terminal input / resize / close off the runtime lock (they touch only the terminals
 /// map). Each is OWNER-CHECKED (ADR-0103 D1): only the connection that opened a session may drive
 /// it, so a second local cockpit that learned a session id cannot feed, resize, or close it.
@@ -3001,6 +3463,81 @@ fn git_write_events(root: &str, op: &str, result: Result<String, BridgeError>) -
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ---- ADR-0106 D3 debuggee boundary: the DAP launch-request gate ----
+
+    #[test]
+    fn path_within_root_contains_and_rejects_escapes() {
+        let root = std::env::temp_dir().join(format!("hh-dap-root-{}", new_id()));
+        let inside = root.join("bin").join("app.dll");
+        std::fs::create_dir_all(inside.parent().expect("parent")).expect("mkdir");
+        std::fs::write(&inside, b"x").expect("write");
+        let root_s = root.to_string_lossy().into_owned();
+
+        // An absolute path inside the root, and its relative form, both pass.
+        assert!(path_within_root(&inside.to_string_lossy(), &root_s));
+        assert!(path_within_root("bin/app.dll", &root_s));
+        // A path outside the root is refused (the canonicalize + starts_with containment check).
+        assert!(!path_within_root("/etc/passwd", &root_s));
+        assert!(!path_within_root("../escape", &root_s));
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn gate_dap_request_enforces_the_debuggee_boundary() {
+        let root = std::env::temp_dir().join(format!("hh-dap-gate-{}", new_id()));
+        let program = root.join("bin").join("app.dll");
+        std::fs::create_dir_all(program.parent().expect("parent")).expect("mkdir");
+        std::fs::write(&program, b"x").expect("write");
+        let root_s = root.to_string_lossy().into_owned();
+
+        // A launch naming an in-root program passes, and its cwd is FORCED to the root (D3),
+        // overwriting whatever the client sent.
+        let launch = serde_json::json!({
+            "type": "request",
+            "command": "launch",
+            "arguments": { "program": program.to_string_lossy(), "cwd": "/tmp/attacker" }
+        });
+        let gated = gate_dap_request(launch, &root_s).expect("in-root launch is allowed");
+        assert_eq!(gated["arguments"]["cwd"], serde_json::json!(root_s));
+
+        // A launch naming a program OUTSIDE the root is denied (the RCE-injection the gate stops).
+        let escape = serde_json::json!({
+            "type": "request",
+            "command": "launch",
+            "arguments": { "program": "/usr/bin/whoami" }
+        });
+        let err = gate_dap_request(escape, &root_s).expect_err("out-of-root program is denied");
+        assert_eq!(err.code, "dap_debuggee_denied");
+
+        // A launch with no program is denied (a client can never omit it to get a default).
+        let no_program =
+            serde_json::json!({ "type": "request", "command": "launch", "arguments": {} });
+        assert_eq!(
+            gate_dap_request(no_program, &root_s)
+                .expect_err("program is required")
+                .code,
+            "dap_debuggee_denied"
+        );
+
+        // attach is not wired yet (Slice C); it is denied, never forwarded.
+        let attach = serde_json::json!({ "type": "request", "command": "attach", "arguments": {} });
+        assert_eq!(
+            gate_dap_request(attach, &root_s)
+                .expect_err("attach is unsupported")
+                .code,
+            "dap_attach_unsupported"
+        );
+
+        // A non-launch request (stepping, inspection) passes through UNCHANGED: the gate only
+        // constrains the one frame that starts a process.
+        let step = serde_json::json!({ "type": "request", "command": "next", "arguments": { "threadId": 1 } });
+        let gated = gate_dap_request(step.clone(), &root_s).expect("non-launch passes");
+        assert_eq!(gated, step);
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     #[test]
     fn initialize_coalescing_forwards_once_and_answers_the_rest() {
