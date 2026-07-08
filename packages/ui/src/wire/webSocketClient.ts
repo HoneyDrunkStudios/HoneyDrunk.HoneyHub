@@ -677,4 +677,8 @@ export class WebSocketWireClient implements WireClient {
   async stopDap(sessionId: string): Promise<void> {
     await this.dispatch({ kind: "dap_stop", sessionId });
   }
+
+  async listDapConfigs(root: string): Promise<void> {
+    await this.dispatch({ kind: "dap_list_configs", root });
+  }
 }

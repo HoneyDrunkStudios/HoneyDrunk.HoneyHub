@@ -1516,6 +1516,14 @@ fn validate_stream_payload(
                 "a backend stream must not emit host-synthesized debug-status events",
             ));
         }
+        BridgeEventPayload::DapConfigs { .. } => {
+            // Host-owned debug-configuration listing; a backend stream must not forge the set of
+            // debug configs a root offers (ADR-0106 D1 / D3).
+            return Err(BridgeError::new(
+                "event_unexpected_dap_configs",
+                "a backend stream must not emit host-synthesized debug-config listings",
+            ));
+        }
         BridgeEventPayload::DapSessionClosed { .. } => {
             // Host-synthesized debug lifecycle; a backend stream can neither close nor forge a
             // debug session (ADR-0106 D1 / D6).

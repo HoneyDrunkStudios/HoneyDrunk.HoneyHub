@@ -98,6 +98,7 @@ class FakeClient implements WireClient {
   async openDapSession(): Promise<void> {}
   async sendDap(): Promise<void> {}
   async stopDap(): Promise<void> {}
+  async listDapConfigs(): Promise<void> {}
 
   private emit(runId: string, payload: BridgeEventPayload): void {
     const event: BridgeEvent = {

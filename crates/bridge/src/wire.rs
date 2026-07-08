@@ -698,6 +698,13 @@ pub enum ClientCommand {
     DapStop {
         session_id: String,
     },
+    /// **Debug** (ADR-0106 D3 / Amendment 1): ask the host which debug configurations an
+    /// allowlisted `root` offers. The host detects them by convention (its own resolution, never
+    /// the client's) and answers with a [`BridgeEventPayload::DapConfigs`] carrying config ids and
+    /// labels only, never a filesystem path. The client then opens one by id via `DapStart`.
+    DapListConfigs {
+        root: String,
+    },
 }
 
 /// Default terminal width when a client opens without sizing (it resizes on mount).
@@ -1774,6 +1781,24 @@ impl BridgeEvent {
         }
     }
 
+    /// The debug configurations an allowlisted root offers (ADR-0106 D3 / Amendment 1), the
+    /// host-owned answer to `DapListConfigs`. Returned to the requesting connection only; carries
+    /// config ids and labels, never a filesystem path. Host-synthesized envelope.
+    pub fn dap_configs(
+        id: impl Into<String>,
+        created_at: impl Into<String>,
+        configs: Vec<crate::dap::DebugConfig>,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            session_id: String::new(),
+            run_id: String::new(),
+            sequence: 0,
+            created_at: created_at.into(),
+            payload: BridgeEventPayload::DapConfigs { configs },
+        }
+    }
+
     /// A device-wide, self-announcing debug-session-closed event (ADR-0106 D6). Host-
     /// synthesized envelope.
     pub fn dap_session_closed(
@@ -2149,6 +2174,12 @@ pub enum BridgeEventPayload {
     /// the cockpit offers Debug only when a resolvable adapter is installed, else Run-only.
     DapStatus {
         status: crate::dap::DapStatus,
+    },
+    /// The debug configurations a root offers (ADR-0106 D3 / Amendment 1), the answer to
+    /// `DapListConfigs`. Returned to the requesting connection only. Each entry carries a config
+    /// id and label, never a filesystem path. Host-synthesized (rejected from backend streams).
+    DapConfigs {
+        configs: Vec<crate::dap::DebugConfig>,
     },
     /// A debug session ended (operator-closed / disconnect / token-revoked / root-removed /
     /// idle-reaped / killed / debuggee-exited, D6). DEVICE-WIDE self-announcing. `reason` is a
@@ -3713,6 +3744,34 @@ mod tests {
         assert_eq!(send["kind"], json!("dap_send"));
         assert_eq!(send["sessionId"], json!("d1"));
         assert_eq!(send["message"]["command"], json!("stackTrace"));
+
+        let list = serde_json::to_value(ClientCommand::DapListConfigs {
+            root: "C:/work".to_string(),
+        })
+        .expect("serializes");
+        assert_eq!(
+            list,
+            json!({ "kind": "dap_list_configs", "root": "C:/work" })
+        );
+    }
+
+    #[test]
+    fn dap_configs_event_carries_ids_and_labels_but_no_path() {
+        let configs = vec![crate::dap::DebugConfig {
+            config_id: "dotnet:App".to_string(),
+            label: "App (net9.0)".to_string(),
+            language: "csharp".to_string(),
+            adapter_id: "netcoredbg".to_string(),
+        }];
+        let event = BridgeEvent::dap_configs("e", "2026-07-08T00:00:00Z", configs);
+        let encoded = serde_json::to_value(&event.payload).expect("encode dap_configs");
+        assert_eq!(encoded["kind"], json!("dap_configs"));
+        assert_eq!(encoded["configs"][0]["configId"], json!("dotnet:App"));
+        assert_eq!(encoded["configs"][0]["label"], json!("App (net9.0)"));
+        assert_eq!(encoded["configs"][0]["adapterId"], json!("netcoredbg"));
+        // The listing never leaks a filesystem path: only the four wire fields are present.
+        let obj = encoded["configs"][0].as_object().expect("a config object");
+        assert_eq!(obj.len(), 4, "config id, label, language, adapter id only");
     }
 
     #[test]

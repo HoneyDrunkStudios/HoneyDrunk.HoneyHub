@@ -1130,7 +1130,11 @@ export type ClientCommand =
   // opening cockpit adopts its own session.
   | { kind: "dap_start"; root: string; adapterId: string; configId: string; openId?: string }
   | { kind: "dap_send"; sessionId: string; message: unknown }
-  | { kind: "dap_stop"; sessionId: string };
+  | { kind: "dap_stop"; sessionId: string }
+  // Ask the host which debug configurations a root offers (ADR-0106 D3 / Amendment 1). The host
+  // detects them by convention and answers with a `dap_configs` event carrying ids + labels only,
+  // never a path. The client then opens one by id via `dap_start`.
+  | { kind: "dap_list_configs"; root: string };
 
 export interface ReconnectRequest {
   sessionId: string;
@@ -1253,6 +1257,10 @@ export type BridgeEventPayload =
   | { kind: "dap_session_opened"; sessionId: string; adapterId: string; openId?: string }
   | { kind: "dap_message"; sessionId: string; message: unknown }
   | { kind: "dap_status"; status: DapStatus }
+  // The debug configurations a root offers (ADR-0106 D3 / Amendment 1), the answer to
+  // `dap_list_configs`. Returned to the requesting connection only; each entry carries a config
+  // id + label, never a filesystem path.
+  | { kind: "dap_configs"; configs: DebugConfig[] }
   | { kind: "dap_session_closed"; sessionId: string; reason: string };
 
 /** A host-detected launch target (ADR-0104 D1). The cockpit shows `label` and badges by
@@ -1272,6 +1280,17 @@ export interface DapStatus {
   adapterId: string;
   installed: boolean;
   reason: string;
+}
+
+/** A host-detected debug configuration (ADR-0106 D3 / Amendment 1). The cockpit shows `label`
+    in a picker and opens one by sending `configId` back in `dap_start`; the host owns the
+    debuggee (program / cwd / env) that the id resolves to, so no filesystem path crosses the
+    wire. Mirrors the bridge's serde shape. */
+export interface DebugConfig {
+  configId: string;
+  label: string;
+  language: string;
+  adapterId: string;
 }
 
 /** A language-server lifecycle / capability signal (ADR-0102). Mirrors the bridge's serde

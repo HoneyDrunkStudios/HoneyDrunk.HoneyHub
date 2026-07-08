@@ -158,16 +158,19 @@ struct DapEntry {
     /// launched (shared process group).
     adapter: honeyhub_bridge::dap::DapAdapter,
     /// The canonical allowlisted workspace root the adapter was spawned in, re-checked on a
-    /// workspace-root change so a session whose root leaves the allowlist is retired (D6). It is
-    /// also the adapter subprocess's working directory. In this slice the client cannot start a
-    /// debuggee at all (`launch` / `restart` / `attach` are denied, D3 / Open-Question-#2), so
-    /// there is no client-supplied cwd to force here yet; host-resolved launch is a later slice.
+    /// workspace-root change so a session whose root leaves the allowlist is retired (D6). Also the
+    /// adapter subprocess's working directory.
     root: String,
     /// The connection that owns this session (ADR-0106 D6: bound to the opening paired device).
     /// Only the owner may drive it (`dap_send` is owner-checked by `conn_id`) or stop it; its
     /// `dap_message` frames are delivered only to the owner's sink (held by the pump thread, since
     /// runtime memory is potentially secret, D7 / D9), while open/close go device-wide.
     conn_id: u64,
+    /// The HOST-resolved debuggee for this session (ADR-0106 D3, Firm), resolved from the selected
+    /// `config_id` at open. The gate overwrites a client `launch` request's arguments with this
+    /// program / cwd / env allowlist, so the client can drive the DAP sequence but never chooses
+    /// what actually runs.
+    target: honeyhub_bridge::dap::DebugTarget,
     /// Unix-millis of the last DAP frame in either direction, for the idle-timeout watchdog
     /// (ADR-0106 D6). An `Arc` so the pump thread can stamp inbound activity lock-free.
     last_activity: Arc<AtomicU64>,
@@ -1765,6 +1768,25 @@ async fn handle_command(
                     None
                 })
             }
+            ClientCommand::DapListConfigs { root } => {
+                // The host-owned debug-config listing (ADR-0106 D3 / Amendment 1). Detection is a
+                // read over an allowlisted root (a shallow directory scan), gated like ReadFile /
+                // DetectLaunchTargets. The reply carries config ids + labels only, never a path,
+                // and is returned to THIS connection (a config listing is a per-request answer, not
+                // a device-wide announcement).
+                require(runtime.workspace_allows(&root), "debug root").map(|()| {
+                    // Only offer configs whose adapter is actually installed (D8 honest flag): a
+                    // detected .NET project whose debug adapter is absent must not advertise a
+                    // launchable Debug config that would later fail with `dap_adapter_not_installed`.
+                    let configs: Vec<_> = honeyhub_bridge::dap::detect_debug_configs(&root)
+                        .into_iter()
+                        .filter(|config| {
+                            honeyhub_bridge::dap::adapter_installed(&config.adapter_id)
+                        })
+                        .collect();
+                    one(BridgeEvent::dap_configs(new_id(), now_rfc3339(), configs))
+                })
+            }
             ClientCommand::DapSend { .. } | ClientCommand::DapStop { .. } => {
                 // Handled before the runtime lock (see the early returns in `handle_command`);
                 // these arms exist only for match exhaustiveness and are never reached.
@@ -2788,31 +2810,40 @@ async fn open_dap_session(
             "debugging is desktop-local-only; a relay connection cannot open a debug session by default (ADR-0106 D5)",
         ));
     }
-    // D3 (Firm): `config_id` names a HOST-OWNED debug configuration that the host resolves to a
-    // debuggee. That host-owned configuration table (and its `dap_list_configs` surface) is a
-    // later slice (ADR-0106 Amendment 1 / Open-Question-#2), so there is nothing to resolve a
-    // client-sent id against yet. Rather than accept an id as if it selected a validated
-    // host-owned config, deny any non-empty `config_id` before the adapter is spawned. Slice A
-    // opens only the adapter foundation (an empty id), and launch/restart/attach stay denied.
-    if !config_id.is_empty() {
+    // D3 (Firm) / Amendment 1: resolve the client-selected `config_id` to a HOST-OWNED debuggee
+    // BEFORE spawning anything. The host owns program / cwd / env AND the adapter; the client
+    // supplies only the selector. An unknown config is `dap_config_unknown`, an unbuilt one
+    // `dap_target_not_built` (the target is carried on the entry and injected into the host-owned
+    // `launch`; the client never supplies the debuggee, and its `launch` arguments are overwritten
+    // by the gate).
+    let target = honeyhub_bridge::dap::resolve_debug_target(&root, &config_id)?;
+    // D2: the adapter is the one the RESOLVED config requires, never a separately client-chosen id.
+    // If the client also named an adapter and it disagrees with the config's, refuse rather than
+    // silently spawn a different adapter than the config implies.
+    if !adapter_id.is_empty() && adapter_id != target.adapter_id {
         return Err(BridgeError::new(
-            "dap_config_unknown",
-            "no host-owned debug configuration matches that id; host-resolved launch is a later slice (ADR-0106 D3 / Amendment 1)",
+            "dap_adapter_mismatch",
+            "the debug configuration uses a different adapter than the one requested",
         ));
     }
-    // D2: resolve the adapter id against the host-owned table (deny unknown), and locate the
-    // operator-installed binary. An absent adapter is the honest "no debugger" signal (D8), not
-    // an error the client can turn into execution.
-    let Some(spec) = honeyhub_bridge::dap::resolve_adapter(&adapter_id) else {
+    let Some(spec) = honeyhub_bridge::dap::resolve_adapter(&target.adapter_id) else {
         return Err(BridgeError::new(
             "dap_adapter_unknown",
-            format!("'{adapter_id}' is not an allowlisted debug adapter"),
+            format!(
+                "'{}' is not an allowlisted debug adapter",
+                target.adapter_id
+            ),
         ));
     };
+    // D2 (cont.): locate the operator-installed adapter binary. An absent adapter is the honest
+    // "no debugger" signal (D8), not an error the client can turn into execution.
     let Some(program) = honeyhub_bridge::dap::locate(&spec) else {
         return Err(BridgeError::new(
             "dap_adapter_not_installed",
-            format!("the '{adapter_id}' debug adapter is not installed; Run is still available"),
+            format!(
+                "the '{}' debug adapter is not installed; Run is still available",
+                target.adapter_id
+            ),
         ));
     };
     let canonical = std::fs::canonicalize(&root)
@@ -2867,10 +2898,16 @@ async fn open_dap_session(
                 "the workspace root was removed from the allowlist before the debug session opened",
             ));
         }
-        // Audit line (ADR-0106 D7): session id, adapter id, workspace root, and owning connection,
-        // so a debug session is traceable from the bridge console (steps / evaluates are NOT logged).
+        // Audit line (ADR-0106 D7): session id, adapter id, workspace root, owning connection, AND
+        // the host-resolved debuggee identity (its program + cwd), so a debug session is fully
+        // traceable from the bridge console. Runtime memory (steps / evaluates / variable values)
+        // is still NEVER logged; the resolved program/cwd are host-owned launch inputs, not runtime
+        // state, and D7 calls for the debuggee cwd/path in the envelope audit.
         eprintln!(
-            "[dap] {session_id} adapter={adapter_id} config={config_id} root={canonical} (conn {conn_id})"
+            "[dap] {session_id} adapter={} config={config_id} root={canonical} program={} cwd={} (conn {conn_id})",
+            spec.adapter_id,
+            target.program.display(),
+            target.cwd.display()
         );
         state.sessions.insert(
             session_id.clone(),
@@ -2878,6 +2915,7 @@ async fn open_dap_session(
                 adapter,
                 root: canonical,
                 conn_id,
+                target,
                 last_activity: Arc::clone(&last_activity),
             },
         );
@@ -2890,7 +2928,7 @@ async fn open_dap_session(
         new_id(),
         now_rfc3339(),
         session_id.clone(),
-        adapter_id,
+        spec.adapter_id,
         open_id,
     ));
     spawn_dap_pump(
@@ -2990,29 +3028,123 @@ fn spawn_dap_pump(
 }
 
 /// Enforce the ADR-0106 D3 debuggee boundary on an outbound DAP frame before it reaches the
-/// adapter. Under D3 (Firm) the debuggee is **host-resolved**: the client selects a detected
-/// `config_id` and the host resolves the program / working directory / arguments; the client
-/// never hands over a launch command line. Host-side resolution of a debug configuration per
-/// adapter (e.g. locating netcoredbg's built assembly for a `dotnet` config) is not yet designed
-/// (ADR-0106 Open-Question-#2), so until it is, the frames that START or re-start a process
-/// (`launch` / `restart` / `attach`) are DENIED rather than accepting client-supplied process-start
-/// fields. Every other frame (setBreakpoints, continue, stackTrace, variables, evaluate) passes
-/// through unchanged. The gate keys on the `command` name, not on `type`, so it is fail-closed: a
-/// process-starting command cannot skip it by omitting `type`.
-fn gate_dap_request(message: serde_json::Value) -> Result<serde_json::Value, BridgeError> {
-    match message.get("command").and_then(serde_json::Value::as_str) {
-        Some("launch") | Some("restart") | Some("attach") => Err(BridgeError::new(
-            "dap_launch_unimplemented",
-            "a host-resolved debug launch is not implemented yet; the client may not supply the \
-             debuggee (ADR-0106 D3 / Open-Question-#2)",
+/// adapter. Under D3 (Firm) the debuggee is **host-resolved**: the client selects a `config_id`
+/// and the host owns the program / working directory / environment. The client may drive the DAP
+/// sequence (it sends `launch` at the right point), but the host **overwrites** that launch
+/// request's arguments with the session's resolved [`DebugTarget`] plus a fixed env allowlist, so
+/// nothing the client puts in `arguments` (a program path, extra args, `DOTNET_STARTUP_HOOKS` /
+/// `LD_PRELOAD` in env) can influence what runs. `restart` and `attach` (re-launch / attach to an
+/// arbitrary process) are refused for v1. Every interactive frame (setBreakpoints, continue,
+/// stackTrace, variables, evaluate) passes through unchanged. Keys on the `command` name, not on
+/// `type`, so a process-starting command cannot skip the gate by omitting `type`.
+fn gate_dap_request(
+    message: serde_json::Value,
+    target: &honeyhub_bridge::dap::DebugTarget,
+    root: &str,
+) -> Result<serde_json::Value, BridgeError> {
+    // Normalize the command before matching so a `launch` cannot slip past the gate by casing or
+    // surrounding whitespace (`"Launch"`, `" launch "`). The pass-through arm forwards the ORIGINAL
+    // frame unchanged; only the launch / restart / attach decision keys on the normalized name.
+    // NOTE (Slice C): this is a denylist of the process-starting commands, sound for netcoredbg
+    // because no other client->adapter request starts a HOST process (evaluate / setVariable and
+    // friends only touch the already-running debuggee, the accepted D4 surface). A future adapter
+    // that adds another process-starting request must be revisited (invert to an allowlist).
+    let command = message
+        .get("command")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase();
+    match command.as_str() {
+        "launch" => {
+            // D3 re-validation (TOCTOU): the target was validated at open, but this launch frame
+            // can arrive much later, so re-assert the debuggee is still an in-root regular file
+            // (a swapped-in symlink is caught) before the host-owned launch goes out.
+            honeyhub_bridge::dap::assert_target_in_root(&target.program, root)?;
+            Ok(host_launch_request(&message, target))
+        }
+        "restart" | "attach" => Err(BridgeError::new(
+            "dap_launch_unsupported",
+            "restart / attach are not supported yet; stop and start the debug session instead \
+             (ADR-0106 D3)",
         )),
         _ => Ok(message),
     }
 }
 
+/// Build the HOST-owned `launch` request from the client's frame (ADR-0106 D3, Firm). The client's
+/// `seq` / `type` / `command` are preserved so its launch response correlates, but `arguments` is
+/// entirely REPLACED with the host-resolved program / cwd and a fixed env allowlist. The client's
+/// own `arguments` are discarded, so a client-chosen program, extra args, or an injected env var
+/// never reaches the adapter.
+fn host_launch_request(
+    client: &serde_json::Value,
+    target: &honeyhub_bridge::dap::DebugTarget,
+) -> serde_json::Value {
+    serde_json::json!({
+        "seq": client.get("seq").cloned().unwrap_or_else(|| serde_json::json!(0)),
+        "type": "request",
+        "command": "launch",
+        "arguments": {
+            "name": "HoneyHub Debug",
+            "type": "coreclr",
+            "request": "launch",
+            "program": strip_verbatim_prefix(&target.program),
+            "cwd": strip_verbatim_prefix(&target.cwd),
+            "args": [],
+            "env": host_debug_env(),
+            "stopAtEntry": false,
+            "justMyCode": true,
+            "console": "internalConsole",
+        }
+    })
+}
+
+/// Render a canonicalized path for a launch argument, stripping the Windows `\\?\` extended-length
+/// prefix that `canonicalize` adds. netcoredbg (and the .NET host) expect ordinary paths; a
+/// verbatim-prefixed path can fail to launch. A verbatim UNC path (`\\?\UNC\server\share\...`, for a
+/// workspace on a network share) is restored to its `\\server\share\...` form rather than the
+/// wrong `UNC\server\...`. A no-op on non-Windows paths.
+fn strip_verbatim_prefix(path: &std::path::Path) -> String {
+    let text = path.to_string_lossy();
+    if let Some(unc) = text.strip_prefix(r"\\?\UNC\") {
+        return format!(r"\\{unc}");
+    }
+    text.strip_prefix(r"\\?\")
+        .map(str::to_string)
+        .unwrap_or_else(|| text.into_owned())
+}
+
+/// The environment the host hands the debuggee at launch (ADR-0106 Amendment 1). Built from a fixed
+/// ALLOWLIST of the host's own environment, never the client's, so code-injection vectors that ride
+/// in on environment variables (`DOTNET_STARTUP_HOOKS`, `DOTNET_ADDITIONAL_DEPS`, `LD_PRELOAD`,
+/// `DYLD_INSERT_LIBRARIES`) are structurally excluded: they are simply not on the list.
+fn host_debug_env() -> serde_json::Value {
+    // The keys a .NET debuggee needs to find its runtime and behave normally, and nothing else.
+    const ALLOWED: &[&str] = &[
+        "PATH",
+        "DOTNET_ROOT",
+        "HOME",
+        "USERPROFILE",
+        "TEMP",
+        "TMP",
+        "TMPDIR",
+        "LANG",
+        "LC_ALL",
+        "LC_CTYPE",
+    ];
+    let mut env = serde_json::Map::new();
+    for key in ALLOWED {
+        if let Ok(value) = std::env::var(key) {
+            env.insert((*key).to_string(), serde_json::Value::String(value));
+        }
+    }
+    serde_json::Value::Object(env)
+}
+
 /// Forward one DAP frame from the owning cockpit to the session's adapter, off the runtime lock
 /// (it touches only the DAP map). OWNER-CHECKED (ADR-0106 D6): only the connection that opened a
-/// session may drive it. The `launch` request is gated (D3) before it reaches the adapter.
+/// session may drive it. The `launch` request is host-rewritten (D3) before it reaches the adapter.
 async fn handle_dap_send(
     host: &Arc<Host>,
     session_id: &str,
@@ -3032,7 +3164,7 @@ async fn handle_dap_send(
             "that debug session belongs to a different connection",
         ));
     }
-    let gated = gate_dap_request(message)?;
+    let gated = gate_dap_request(message, &entry.target, &entry.root)?;
     entry.adapter.write_message(&gated)?;
     // Client activity keeps the session alive against the idle watchdog (ADR-0106 D6).
     entry.last_activity.store(now_millis(), Ordering::Relaxed);
@@ -3560,36 +3692,141 @@ mod tests {
 
     // ---- ADR-0106 D3 debuggee boundary: the DAP launch-request gate ----
 
+    fn sample_target() -> honeyhub_bridge::dap::DebugTarget {
+        honeyhub_bridge::dap::DebugTarget {
+            adapter_id: "netcoredbg".to_string(),
+            program: std::path::PathBuf::from("/repo/bin/Debug/net9.0/App.dll"),
+            cwd: std::path::PathBuf::from("/repo"),
+        }
+    }
+
+    /// A target pointing at a REAL on-disk assembly inside a temp root, so the launch path's
+    /// re-validation (`assert_target_in_root`) passes. Returns the temp dir (keep it alive), the
+    /// root string, and the target.
+    fn built_target() -> (tempfile::TempDir, String, honeyhub_bridge::dap::DebugTarget) {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let bin = dir.path().join("bin").join("Debug").join("net9.0");
+        std::fs::create_dir_all(&bin).expect("bin");
+        let program = bin.join("App.dll");
+        std::fs::write(&program, "MZ").expect("dll");
+        let root = dir.path().to_string_lossy().into_owned();
+        let target = honeyhub_bridge::dap::DebugTarget {
+            adapter_id: "netcoredbg".to_string(),
+            program: program.canonicalize().expect("canonical program"),
+            cwd: dir.path().canonicalize().expect("canonical cwd"),
+        };
+        (dir, root, target)
+    }
+
     #[test]
-    fn gate_dap_request_denies_client_launch_and_passes_interactive_frames() {
-        // D3 (Firm): the debuggee is host-resolved, never client-supplied. Host-side resolution
-        // per adapter is not designed yet (Open-Question-#2), so a client `launch` / `restart` /
-        // `attach` (the frames that start a process) is DENIED rather than trusting client fields.
-        for command in ["launch", "restart", "attach"] {
-            let frame = serde_json::json!({
-                "type": "request",
-                "command": command,
-                "arguments": { "program": "/usr/bin/whoami" }
-            });
-            let err = gate_dap_request(frame).expect_err("a process-starting frame is denied");
+    fn host_launch_request_overwrites_every_client_field() {
+        // D3 (Firm): the host OWNS the launch contents. Whatever program / cwd / args / env the
+        // client puts in `arguments` is discarded and replaced with the resolved target, so the
+        // client can never choose what runs or inject env vars. This tests the pure rewrite.
+        let target = sample_target();
+        let client_launch = serde_json::json!({
+            "seq": 7,
+            "type": "request",
+            "command": "launch",
+            "arguments": {
+                "program": "/usr/bin/whoami",
+                "args": ["--exfiltrate"],
+                "cwd": "/etc",
+                "env": { "DOTNET_STARTUP_HOOKS": "/tmp/evil.dll", "LD_PRELOAD": "/tmp/x.so" }
+            }
+        });
+        let rewritten = host_launch_request(&client_launch, &target);
+        assert_eq!(
+            rewritten["seq"], 7,
+            "the client's seq is preserved so its response correlates"
+        );
+        assert_eq!(rewritten["command"], "launch");
+        let args = &rewritten["arguments"];
+        assert_eq!(args["program"], "/repo/bin/Debug/net9.0/App.dll");
+        assert_eq!(args["cwd"], "/repo");
+        assert_eq!(
+            args["args"],
+            serde_json::json!([]),
+            "client args are discarded"
+        );
+        // The injected env vars are gone: the host env is a fixed allowlist, and neither
+        // DOTNET_STARTUP_HOOKS nor LD_PRELOAD is on it.
+        assert!(args["env"].get("DOTNET_STARTUP_HOOKS").is_none());
+        assert!(args["env"].get("LD_PRELOAD").is_none());
+    }
+
+    #[test]
+    fn strip_verbatim_prefix_handles_disk_unc_and_plain_paths() {
+        // A verbatim disk path loses the \\?\ prefix; a verbatim UNC path is restored to the
+        // \\server\share form (not the wrong UNC\server\share); a plain path is untouched.
+        assert_eq!(
+            strip_verbatim_prefix(std::path::Path::new(r"\\?\C:\repo\bin\App.dll")),
+            r"C:\repo\bin\App.dll"
+        );
+        assert_eq!(
+            strip_verbatim_prefix(std::path::Path::new(r"\\?\UNC\srv\share\App.dll")),
+            r"\\srv\share\App.dll"
+        );
+        assert_eq!(
+            strip_verbatim_prefix(std::path::Path::new("/home/me/app/bin/App.dll")),
+            "/home/me/app/bin/App.dll"
+        );
+    }
+
+    #[test]
+    fn gate_dap_request_rewrites_launch_and_normalizes_the_command_name() {
+        // End to end through the gate with a REAL in-root target: a `launch` (in any casing, with
+        // surrounding whitespace) is re-validated and rewritten to the host target.
+        let (_dir, root, target) = built_target();
+        // The launch args carry the ordinary path form, with any Windows `\\?\` verbatim prefix
+        // (added by canonicalize) stripped so netcoredbg accepts it.
+        let expected_program = strip_verbatim_prefix(&target.program);
+        for raw in ["launch", "Launch", " launch "] {
+            let frame = serde_json::json!({ "command": raw, "arguments": { "program": "/x" } });
+            let gated = gate_dap_request(frame, &target, &root)
+                .unwrap_or_else(|_| panic!("'{raw}' is rewritten, not denied"));
+            assert_eq!(gated["command"], "launch");
+            assert_eq!(
+                gated["arguments"]["program"], expected_program,
+                "the host program is substituted for '{raw}'"
+            );
             assert!(
-                err.code == "dap_launch_unimplemented" || err.code == "dap_attach_unsupported",
-                "{command} is denied, not forwarded: got {}",
-                err.code
+                !gated["arguments"]["program"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .starts_with(r"\\?\"),
+                "the verbatim prefix is stripped for the adapter"
             );
         }
+    }
 
-        // Fail-CLOSED on the command name: a launch that omits `type` is still denied.
-        let no_type = serde_json::json!({ "command": "launch", "arguments": { "program": "/x" } });
-        assert_eq!(
-            gate_dap_request(no_type)
-                .expect_err("launch without a type is still denied")
-                .code,
-            "dap_launch_unimplemented"
-        );
+    #[test]
+    fn gate_dap_request_refuses_launch_when_the_target_vanished() {
+        // D3 re-validation (TOCTOU): if the built assembly is gone (or swapped) by the time the
+        // launch frame arrives, the gate fails closed rather than launching a missing / redirected
+        // program.
+        let (dir, root, target) = built_target();
+        std::fs::remove_file(&target.program).expect("remove the built dll");
+        let frame = serde_json::json!({ "command": "launch", "arguments": {} });
+        let err = gate_dap_request(frame, &target, &root)
+            .expect_err("a vanished debuggee is refused at launch");
+        assert_eq!(err.code, "dap_target_not_built");
+        drop(dir);
+    }
+
+    #[test]
+    fn gate_dap_request_denies_restart_and_attach_and_passes_interactive_frames() {
+        let target = sample_target();
+        let root = "/repo";
+        for command in ["restart", "attach", "Restart", " attach "] {
+            let frame = serde_json::json!({ "type": "request", "command": command });
+            let err =
+                gate_dap_request(frame, &target, root).expect_err("restart / attach are refused");
+            assert_eq!(err.code, "dap_launch_unsupported", "{command} is refused");
+        }
 
         // Interactive frames (stepping, inspection) pass through UNCHANGED: the gate only
-        // constrains the frames that start a process.
+        // constrains the frames that start a process, and never touches the target for them.
         for command in [
             "setBreakpoints",
             "continue",
@@ -3599,7 +3836,8 @@ mod tests {
             "evaluate",
         ] {
             let frame = serde_json::json!({ "type": "request", "command": command });
-            let gated = gate_dap_request(frame.clone()).expect("interactive frame passes");
+            let gated =
+                gate_dap_request(frame.clone(), &target, root).expect("interactive frame passes");
             assert_eq!(gated, frame);
         }
     }
@@ -3728,25 +3966,60 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn open_dap_session_denies_a_client_supplied_config_id() {
-        // ADR-0106 D3 (Firm): `config_id` selects a HOST-OWNED debug configuration. No host-owned
-        // config table exists in Slice A, so a non-empty client id must be denied before any
-        // adapter spawn rather than accepted as if it were a validated host-owned selector.
+    async fn open_dap_session_denies_an_unknown_config_id() {
+        // ADR-0106 D3 (Firm): `config_id` selects a HOST-OWNED debug configuration. A config the
+        // host does not offer for the given root is denied (by `resolve_debug_target`) before any
+        // adapter spawn, rather than accepted as if it were a validated selector.
         let host = test_host();
         let (owner, _rx) = mpsc::channel(4);
         let err = open_dap_session(
             &host,
-            true, // local: so we pass D5 and reach the config gate
+            true, // local: so we pass D5 and reach the config resolution
             7,
             &owner,
-            std::env::temp_dir().to_string_lossy().into_owned(),
+            std::env::temp_dir().to_string_lossy().into_owned(), // no .csproj here
             "netcoredbg".to_string(),
-            "launch-my-app".to_string(), // a non-empty, client-invented config id
+            "dotnet:Nope".to_string(),
             None,
         )
         .await
-        .expect_err("a client-supplied config id is denied");
+        .expect_err("an unknown config id is denied");
         assert_eq!(err.code, "dap_config_unknown");
+        assert!(host.active_dap.lock().await.sessions.is_empty());
+    }
+
+    #[tokio::test]
+    async fn open_dap_session_resolves_the_config_then_rejects_a_mismatched_adapter() {
+        // A KNOWN, built config resolves past the D3 config gate, and the open then rejects a
+        // client-named adapter that disagrees with the resolved config's adapter (D2: the host owns
+        // adapter selection). Reaching the mismatch error proves the config resolved (an unknown
+        // config would fail earlier with dap_config_unknown), so resolution is wired into open, and
+        // it is DETERMINISTIC regardless of whether netcoredbg is installed on the test machine.
+        let project = tempfile::tempdir().expect("temp dir");
+        std::fs::write(
+            project.path().join("App.csproj"),
+            "<Project Sdk=\"Microsoft.NET.Sdk\"><PropertyGroup><OutputType>Exe</OutputType><TargetFramework>net9.0</TargetFramework></PropertyGroup></Project>",
+        )
+        .expect("write csproj");
+        let bin = project.path().join("bin").join("Debug").join("net9.0");
+        std::fs::create_dir_all(&bin).expect("create bin");
+        std::fs::write(bin.join("App.dll"), "MZ").expect("write dll");
+
+        let host = test_host();
+        let (owner, _rx) = mpsc::channel(4);
+        let err = open_dap_session(
+            &host,
+            true,
+            7,
+            &owner,
+            project.path().to_string_lossy().into_owned(),
+            "codelldb".to_string(), // disagrees with the config's netcoredbg
+            "dotnet:App".to_string(),
+            None,
+        )
+        .await
+        .expect_err("a mismatched adapter is refused");
+        assert_eq!(err.code, "dap_adapter_mismatch");
         assert!(host.active_dap.lock().await.sessions.is_empty());
     }
 
