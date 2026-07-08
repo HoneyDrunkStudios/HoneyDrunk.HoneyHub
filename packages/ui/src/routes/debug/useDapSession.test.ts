@@ -207,4 +207,93 @@ describe("useDapSession", () => {
     expect(result.current.detail).toBe("desktop-local-only");
     void emit;
   });
+
+  it("surfaces an error when the host launch fails", async () => {
+    const { client, calls, emit } = fakeClient();
+    const { result } = renderHook(() => useDapSession(client, () => {}));
+    await act(async () => {
+      result.current.start("/repo", "netcoredbg", "dotnet:App");
+    });
+    const openId = calls.open[0]!.openId;
+    await act(async () => {
+      emit({ kind: "dap_session_opened", sessionId: "d1", adapterId: "netcoredbg", openId });
+    });
+    await act(async () => {
+      emit(dapMessage("d1", { type: "response", request_seq: seqOf(calls, "initialize"), command: "initialize", success: true }));
+    });
+    // A failed launch response flips the session to error.
+    await act(async () => {
+      emit(dapMessage("d1", { type: "response", request_seq: seqOf(calls, "launch"), command: "launch", success: false, message: "not built" }));
+    });
+    expect(result.current.status).toBe("error");
+    expect(result.current.detail).toBe("not built");
+  });
+
+  it("streams output, steps, inspects, and terminates", async () => {
+    const outputs: string[] = [];
+    const { client, calls, emit } = fakeClient();
+    const { result } = renderHook(() => useDapSession(client, (t) => outputs.push(t)));
+    await act(async () => {
+      result.current.start("/repo", "netcoredbg", "dotnet:App");
+    });
+    const openId = calls.open[0]!.openId;
+    await act(async () => {
+      emit({ kind: "dap_session_opened", sessionId: "d1", adapterId: "netcoredbg", openId });
+    });
+
+    // An output event reaches the onOutput sink.
+    act(() => emit(dapMessage("d1", { type: "event", event: "output", body: { output: "hello\n" } })));
+    expect(outputs).toContain("hello\n");
+
+    // A breakpoint set while live is pushed immediately.
+    calls.send.length = 0;
+    act(() => result.current.setBreakpoints("/repo/Program.cs", [10]));
+    expect(calls.send.some((s) => s.message.command === "setBreakpoints")).toBe(true);
+
+    // Stop, then the step / inspect actions map to the right DAP requests.
+    act(() => emit(dapMessage("d1", { type: "event", event: "stopped", body: { threadId: 1 } })));
+    calls.send.length = 0;
+    act(() => {
+      result.current.stepOver();
+      result.current.stepIn();
+      result.current.stepOut();
+    });
+    const commands = calls.send.map((s) => s.message.command);
+    expect(commands).toEqual(["next", "stepIn", "stepOut"]);
+
+    // scopes / variables / evaluate resolve from their responses.
+    let scopesPromise!: Promise<unknown>;
+    act(() => {
+      scopesPromise = result.current.scopes(1);
+    });
+    const scopesSeq = calls.send.find((s) => s.message.command === "scopes")!.message.seq;
+    await act(async () => {
+      emit(dapMessage("d1", { type: "response", request_seq: scopesSeq, command: "scopes", success: true, body: { scopes: [{ name: "Locals", variablesReference: 5, expensive: false }] } }));
+    });
+    expect(await scopesPromise).toEqual([{ name: "Locals", variablesReference: 5, expensive: false }]);
+
+    let varsPromise!: Promise<unknown>;
+    act(() => {
+      varsPromise = result.current.variables(5);
+    });
+    const varsSeq = calls.send.find((s) => s.message.command === "variables")!.message.seq;
+    await act(async () => {
+      emit(dapMessage("d1", { type: "response", request_seq: varsSeq, command: "variables", success: true, body: { variables: [{ name: "x", value: "1", variablesReference: 0 }] } }));
+    });
+    expect(await varsPromise).toEqual([{ name: "x", value: "1", variablesReference: 0 }]);
+
+    let evalPromise!: Promise<string>;
+    act(() => {
+      evalPromise = result.current.evaluate("x + 1");
+    });
+    const evalSeq = calls.send.find((s) => s.message.command === "evaluate")!.message.seq;
+    await act(async () => {
+      emit(dapMessage("d1", { type: "response", request_seq: evalSeq, command: "evaluate", success: true, body: { result: "2" } }));
+    });
+    expect(await evalPromise).toBe("2");
+
+    // A terminated event ends the session.
+    act(() => emit(dapMessage("d1", { type: "event", event: "terminated", body: {} })));
+    expect(result.current.status).toBe("terminated");
+  });
 });
