@@ -1043,48 +1043,17 @@ export class MockWireClient implements WireClient {
     _configId: string,
     openId: string
   ): Promise<void> {
-    // The offline demo runs no real adapter; open a fake session and stream a minimal DAP
-    // handshake (an `initialized` event, then a `stopped`-at-entry) so the debug UI is
-    // exercisable without a host. dap_session_opened is device-wide (self-announcing); the
-    // openId is echoed so the caller adopts this session.
+    // The offline demo runs no real adapter, and the host-resolved debug launch is not
+    // implemented yet (ADR-0106 D3 / Open-Question-#2), so the mock only announces the session
+    // (device-wide, echoing openId) and does NOT fabricate a debug flow: pretending a debuggee
+    // stopped at a breakpoint would misrepresent behavior the bridge cannot yet perform.
     const sessionId = `mock-dap-${this.sequence}`;
     this.mockDapSessions.add(sessionId);
     this.emitDevice({ kind: "dap_session_opened", sessionId, adapterId, openId });
-    this.emitDevice({
-      kind: "dap_message",
-      sessionId,
-      message: { type: "event", event: "initialized" }
-    });
-    this.emitDevice({
-      kind: "dap_message",
-      sessionId,
-      message: { type: "event", event: "stopped", body: { reason: "entry", threadId: 1 } }
-    });
   }
 
-  async sendDap(sessionId: string, message: unknown): Promise<void> {
-    // Answer a couple of DAP requests with canned responses so the call-stack / variables
-    // panels populate in the offline demo.
-    if (!this.mockDapSessions.has(sessionId)) {
-      return;
-    }
-    const request = message as { seq?: number; command?: string };
-    if (request.command === "stackTrace") {
-      this.emitDevice({
-        kind: "dap_message",
-        sessionId,
-        message: {
-          type: "response",
-          request_seq: request.seq,
-          command: "stackTrace",
-          success: true,
-          body: {
-            stackFrames: [{ id: 1, name: "Main", line: 1, column: 1 }],
-            totalFrames: 1
-          }
-        }
-      });
-    }
+  async sendDap(_sessionId: string, _message: unknown): Promise<void> {
+    // No real adapter offline; DAP frames are dropped (the bridge denies launch, D3).
   }
 
   async stopDap(sessionId: string): Promise<void> {

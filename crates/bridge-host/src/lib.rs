@@ -2850,98 +2850,23 @@ fn spawn_dap_pump(
     });
 }
 
-/// Resolve `candidate` (absolute, or relative to `root`) and require it to canonicalize INSIDE the
-/// already-allowlisted `root` (ADR-0090 D8 containment). Used to gate the debuggee program and cwd
-/// a DAP `launch` request proposes, so a debug session cannot launch a program outside the root.
-fn path_within_root(candidate: &str, root: &str) -> bool {
-    let path = std::path::Path::new(candidate);
-    let joined = if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        std::path::Path::new(root).join(path)
-    };
-    match (
-        joined.canonicalize(),
-        std::path::Path::new(root).canonicalize(),
-    ) {
-        (Ok(resolved), Ok(root)) => resolved == root || resolved.starts_with(&root),
-        _ => false,
-    }
-}
-
-/// Apply the ADR-0106 D3 debuggee boundary to one launch configuration object (the `arguments` of
-/// a `launch`, or the nested `arguments.arguments` of a `restart`): the debuggee `program` must
-/// resolve INSIDE the allowlisted `root`, its `cwd` is FORCED to that root, and the client-supplied
-/// `env` is DROPPED. Dropping `env` is load-bearing: `DOTNET_STARTUP_HOOKS` / `CORECLR_PROFILER_PATH`
-/// / `LD_PRELOAD` / `DYLD_INSERT_LIBRARIES` and kin would load out-of-root code into a program that
-/// passed the in-root check, so the whole client environment is removed rather than denylisted key
-/// by key (host-owned env customization is a follow-up).
-fn gate_launch_config(
-    args: &mut serde_json::Map<String, serde_json::Value>,
-    root: &str,
-) -> Result<(), BridgeError> {
-    match args.get("program").and_then(serde_json::Value::as_str) {
-        Some(program) if path_within_root(program, root) => {}
-        _ => {
-            return Err(BridgeError::new(
-                "dap_debuggee_denied",
-                "a debug launch must name a program inside the allowlisted workspace root (ADR-0106 D3)",
-            ));
-        }
-    }
-    args.insert(
-        "cwd".to_string(),
-        serde_json::Value::String(root.to_string()),
-    );
-    args.remove("env");
-    args.remove("environment");
-    Ok(())
-}
-
 /// Enforce the ADR-0106 D3 debuggee boundary on an outbound DAP frame before it reaches the
-/// adapter. The frames that START a process are `launch` and `restart` (which MAY carry a fresh
-/// launch config in `arguments.arguments`); each is gated by [`gate_launch_config`] or denied.
-/// `attach` is denied until Slice C. Every other frame (setBreakpoints, continue, stackTrace,
-/// variables, evaluate) passes through unchanged. The gate keys on the `command` name, NOT on
-/// `type`, so it is fail-closed: a process-starting command cannot skip it by omitting `type`.
-/// Full host-side program resolution per adapter is the ADR-0106 D3 / Open-Question-#2 follow-up.
-fn gate_dap_request(
-    mut message: serde_json::Value,
-    root: &str,
-) -> Result<serde_json::Value, BridgeError> {
+/// adapter. Under D3 (Firm) the debuggee is **host-resolved**: the client selects a detected
+/// `config_id` and the host resolves the program / working directory / arguments; the client
+/// never hands over a launch command line. Host-side resolution of a debug configuration per
+/// adapter (e.g. locating netcoredbg's built assembly for a `dotnet` config) is not yet designed
+/// (ADR-0106 Open-Question-#2), so until it is, the frames that START or re-start a process
+/// (`launch` / `restart` / `attach`) are DENIED rather than accepting client-supplied process-start
+/// fields. Every other frame (setBreakpoints, continue, stackTrace, variables, evaluate) passes
+/// through unchanged. The gate keys on the `command` name, not on `type`, so it is fail-closed: a
+/// process-starting command cannot skip it by omitting `type`.
+fn gate_dap_request(message: serde_json::Value) -> Result<serde_json::Value, BridgeError> {
     match message.get("command").and_then(serde_json::Value::as_str) {
-        Some("attach") => Err(BridgeError::new(
-            "dap_attach_unsupported",
-            "launch-then-attach is not wired for this adapter yet (ADR-0106 D3, Slice C)",
+        Some("launch") | Some("restart") | Some("attach") => Err(BridgeError::new(
+            "dap_launch_unimplemented",
+            "a host-resolved debug launch is not implemented yet; the client may not supply the \
+             debuggee (ADR-0106 D3 / Open-Question-#2)",
         )),
-        Some("launch") => {
-            if !message
-                .get("arguments")
-                .map(serde_json::Value::is_object)
-                .unwrap_or(false)
-            {
-                message["arguments"] = serde_json::json!({});
-            }
-            let args = message
-                .get_mut("arguments")
-                .and_then(serde_json::Value::as_object_mut)
-                .expect("arguments is an object");
-            gate_launch_config(args, root)?;
-            Ok(message)
-        }
-        Some("restart") => {
-            // `restart` may carry a fresh launch config in `arguments.arguments`; gate it the same
-            // way. Absent → it re-runs the already-gated original config, which is safe.
-            if let Some(inner) = message
-                .get_mut("arguments")
-                .and_then(serde_json::Value::as_object_mut)
-                .and_then(|a| a.get_mut("arguments"))
-                .and_then(serde_json::Value::as_object_mut)
-            {
-                gate_launch_config(inner, root)?;
-            }
-            Ok(message)
-        }
         _ => Ok(message),
     }
 }
@@ -2968,7 +2893,7 @@ async fn handle_dap_send(
             "that debug session belongs to a different connection",
         ));
     }
-    let gated = gate_dap_request(message, &entry.root)?;
+    let gated = gate_dap_request(message)?;
     entry.adapter.write_message(&gated)?;
     Ok(None)
 }
@@ -3495,115 +3420,47 @@ mod tests {
     // ---- ADR-0106 D3 debuggee boundary: the DAP launch-request gate ----
 
     #[test]
-    fn path_within_root_contains_and_rejects_escapes() {
-        let root = std::env::temp_dir().join(format!("hh-dap-root-{}", new_id()));
-        let inside = root.join("bin").join("app.dll");
-        std::fs::create_dir_all(inside.parent().expect("parent")).expect("mkdir");
-        std::fs::write(&inside, b"x").expect("write");
-        let root_s = root.to_string_lossy().into_owned();
+    fn gate_dap_request_denies_client_launch_and_passes_interactive_frames() {
+        // D3 (Firm): the debuggee is host-resolved, never client-supplied. Host-side resolution
+        // per adapter is not designed yet (Open-Question-#2), so a client `launch` / `restart` /
+        // `attach` (the frames that start a process) is DENIED rather than trusting client fields.
+        for command in ["launch", "restart", "attach"] {
+            let frame = serde_json::json!({
+                "type": "request",
+                "command": command,
+                "arguments": { "program": "/usr/bin/whoami" }
+            });
+            let err = gate_dap_request(frame).expect_err("a process-starting frame is denied");
+            assert!(
+                err.code == "dap_launch_unimplemented" || err.code == "dap_attach_unsupported",
+                "{command} is denied, not forwarded: got {}",
+                err.code
+            );
+        }
 
-        // An absolute path inside the root, and its relative form, both pass.
-        assert!(path_within_root(&inside.to_string_lossy(), &root_s));
-        assert!(path_within_root("bin/app.dll", &root_s));
-        // A path outside the root is refused (the canonicalize + starts_with containment check).
-        assert!(!path_within_root("/etc/passwd", &root_s));
-        assert!(!path_within_root("../escape", &root_s));
-
-        let _ = std::fs::remove_dir_all(&root);
-    }
-
-    #[test]
-    fn gate_dap_request_enforces_the_debuggee_boundary() {
-        let root = std::env::temp_dir().join(format!("hh-dap-gate-{}", new_id()));
-        let program = root.join("bin").join("app.dll");
-        std::fs::create_dir_all(program.parent().expect("parent")).expect("mkdir");
-        std::fs::write(&program, b"x").expect("write");
-        let root_s = root.to_string_lossy().into_owned();
-
-        // A launch naming an in-root program passes; its cwd is FORCED to the root (D3), and the
-        // client-supplied `env` (a code-injection surface: DOTNET_STARTUP_HOOKS / LD_PRELOAD) is
-        // DROPPED, overwriting whatever the client sent.
-        let launch = serde_json::json!({
-            "type": "request",
-            "command": "launch",
-            "arguments": {
-                "program": program.to_string_lossy(),
-                "cwd": "/tmp/attacker",
-                "env": { "DOTNET_STARTUP_HOOKS": "/tmp/evil.dll" }
-            }
-        });
-        let gated = gate_dap_request(launch, &root_s).expect("in-root launch is allowed");
-        assert_eq!(gated["arguments"]["cwd"], serde_json::json!(root_s));
-        assert!(
-            gated["arguments"].get("env").is_none(),
-            "client env is stripped so it cannot load out-of-root code"
-        );
-
-        // Fail-CLOSED: a launch that omits `type` is still gated on the `command` name, so an
-        // out-of-root program cannot slip through by dropping the `type` field.
-        let no_type = serde_json::json!({
-            "command": "launch",
-            "arguments": { "program": "/usr/bin/whoami" }
-        });
+        // Fail-CLOSED on the command name: a launch that omits `type` is still denied.
+        let no_type = serde_json::json!({ "command": "launch", "arguments": { "program": "/x" } });
         assert_eq!(
-            gate_dap_request(no_type, &root_s)
-                .expect_err("out-of-root launch without a type is still denied")
+            gate_dap_request(no_type)
+                .expect_err("launch without a type is still denied")
                 .code,
-            "dap_debuggee_denied"
+            "dap_launch_unimplemented"
         );
 
-        // `restart` can carry a fresh launch config in `arguments.arguments`; it is gated the same
-        // way (out-of-root program denied; in-root forces cwd + strips env).
-        let restart_escape = serde_json::json!({
-            "type": "request",
-            "command": "restart",
-            "arguments": { "arguments": { "program": "/usr/bin/whoami" } }
-        });
-        assert_eq!(
-            gate_dap_request(restart_escape, &root_s)
-                .expect_err("restart with an out-of-root program is denied")
-                .code,
-            "dap_debuggee_denied"
-        );
-        // A restart with no fresh config re-runs the already-gated original: it passes untouched.
-        let restart_bare = serde_json::json!({ "type": "request", "command": "restart" });
-        assert!(gate_dap_request(restart_bare, &root_s).is_ok());
-
-        // A launch naming a program OUTSIDE the root is denied (the RCE-injection the gate stops).
-        let escape = serde_json::json!({
-            "type": "request",
-            "command": "launch",
-            "arguments": { "program": "/usr/bin/whoami" }
-        });
-        let err = gate_dap_request(escape, &root_s).expect_err("out-of-root program is denied");
-        assert_eq!(err.code, "dap_debuggee_denied");
-
-        // A launch with no program is denied (a client can never omit it to get a default).
-        let no_program =
-            serde_json::json!({ "type": "request", "command": "launch", "arguments": {} });
-        assert_eq!(
-            gate_dap_request(no_program, &root_s)
-                .expect_err("program is required")
-                .code,
-            "dap_debuggee_denied"
-        );
-
-        // attach is not wired yet (Slice C); it is denied, never forwarded.
-        let attach = serde_json::json!({ "type": "request", "command": "attach", "arguments": {} });
-        assert_eq!(
-            gate_dap_request(attach, &root_s)
-                .expect_err("attach is unsupported")
-                .code,
-            "dap_attach_unsupported"
-        );
-
-        // A non-launch request (stepping, inspection) passes through UNCHANGED: the gate only
-        // constrains the one frame that starts a process.
-        let step = serde_json::json!({ "type": "request", "command": "next", "arguments": { "threadId": 1 } });
-        let gated = gate_dap_request(step.clone(), &root_s).expect("non-launch passes");
-        assert_eq!(gated, step);
-
-        let _ = std::fs::remove_dir_all(&root);
+        // Interactive frames (stepping, inspection) pass through UNCHANGED: the gate only
+        // constrains the frames that start a process.
+        for command in [
+            "setBreakpoints",
+            "continue",
+            "next",
+            "stackTrace",
+            "variables",
+            "evaluate",
+        ] {
+            let frame = serde_json::json!({ "type": "request", "command": command });
+            let gated = gate_dap_request(frame.clone()).expect("interactive frame passes");
+            assert_eq!(gated, frame);
+        }
     }
 
     #[test]

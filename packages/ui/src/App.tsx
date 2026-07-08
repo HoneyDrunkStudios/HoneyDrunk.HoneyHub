@@ -26,7 +26,6 @@ import { AgentsView } from "./routes/agents/AgentsView";
 import { RepositoriesView } from "./routes/repositories/RepositoriesView";
 import { LaunchView } from "./routes/launch/LaunchView";
 import { TerminalView } from "./routes/terminal/TerminalView";
-import { DebugView } from "./routes/debug/DebugView";
 import {
   applyRunEvent,
   orderRuns,
@@ -83,7 +82,6 @@ export type View =
   | "repositories"
   | "launch"
   | "terminal"
-  | "debug"
   | "spend"
   | "coaching"
   | "agents"
@@ -112,7 +110,6 @@ const PRIMARY_NAV: NavItem[] = [
   { view: "repositories", label: "Repositories", icon: <IconFiles /> },
   { view: "launch", label: "Launch", icon: <IconRocket /> },
   { view: "terminal", label: "Terminal", icon: <IconTerminal /> },
-  { view: "debug", label: "Debug", icon: <IconBug /> },
   { view: "work", label: "Work", icon: <IconInbox /> },
   { view: "groups", label: "Groups", icon: <IconGroups /> },
   { view: "plan", label: "Plan", icon: <IconMap /> },
@@ -550,17 +547,6 @@ export function App({ client }: AppProps = {}) {
             />
           </div>
 
-          <div hidden={view !== "debug"}>
-            <DebugView
-              client={wireClient}
-              active={view === "debug"}
-              workspaceRoots={settings.workspaceRoots}
-              {...(settings.defaultWorkspaceRoot === undefined
-                ? {}
-                : { defaultWorkspaceRoot: settings.defaultWorkspaceRoot })}
-            />
-          </div>
-
           <div hidden={view !== "spend"}>
             <SpendView client={wireClient} active={view === "spend"} />
           </div>
@@ -762,18 +748,6 @@ function IconTerminal() {
     <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2">
       <rect x="3" y="4" width="18" height="16" rx="1.5" />
       <path d="M7 9l3 3-3 3M13 15h4" strokeLinecap="round" strokeLinejoin="round" />
-    </svg>
-  );
-}
-
-function IconBug() {
-  return (
-    <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2">
-      <rect x="8" y="7" width="8" height="12" rx="4" />
-      <path
-        d="M12 3v3M9 5l1.5 2M15 5l-1.5 2M4 11h4M16 11h4M4 16h4M16 16h4M9 19l-2 2M15 19l2 2"
-        strokeLinecap="round"
-      />
     </svg>
   );
 }
