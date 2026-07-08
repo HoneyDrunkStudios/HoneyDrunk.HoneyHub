@@ -2788,6 +2788,18 @@ async fn open_dap_session(
             "debugging is desktop-local-only; a relay connection cannot open a debug session by default (ADR-0106 D5)",
         ));
     }
+    // D3 (Firm): `config_id` names a HOST-OWNED debug configuration that the host resolves to a
+    // debuggee. That host-owned configuration table (and its `dap_list_configs` surface) is a
+    // later slice (ADR-0106 Amendment 1 / Open-Question-#2), so there is nothing to resolve a
+    // client-sent id against yet. Rather than accept an id as if it selected a validated
+    // host-owned config, deny any non-empty `config_id` before the adapter is spawned. Slice A
+    // opens only the adapter foundation (an empty id), and launch/restart/attach stay denied.
+    if !config_id.is_empty() {
+        return Err(BridgeError::new(
+            "dap_config_unknown",
+            "no host-owned debug configuration matches that id; host-resolved launch is a later slice (ADR-0106 D3 / Amendment 1)",
+        ));
+    }
     // D2: resolve the adapter id against the host-owned table (deny unknown), and locate the
     // operator-installed binary. An absent adapter is the honest "no debugger" signal (D8), not
     // an error the client can turn into execution.
@@ -2807,7 +2819,13 @@ async fn open_dap_session(
         .map(|path| path.to_string_lossy().into_owned())
         .unwrap_or_else(|_| root.clone());
 
-    // Pre-spawn gate: roots + per-connection cap BEFORE spawning the adapter.
+    // Pre-spawn gate: roots + per-connection cap BEFORE spawning the adapter. The cap is counted
+    // here, released before the off-lock spawn, and NOT re-checked at registration. That is sound
+    // because a single connection's commands are handled serially (one socket, one sequential
+    // read loop), so a connection cannot have two `open_dap_session` calls in flight at once to
+    // race past the cap. The roots snapshot, by contrast, IS re-checked atomically at registration
+    // below, because a CONCURRENT `SetWorkspaceRoots` from the same or another connection can
+    // remove the root while this one spawns off-lock.
     {
         let state = host.active_dap.lock().await;
         if !state.roots.allows(&canonical) {
@@ -3706,6 +3724,29 @@ mod tests {
         .expect_err("a relay connection cannot open a debug session");
         assert_eq!(err.code, "dap_denied");
         // Nothing was registered: the denial happened before any session bookkeeping.
+        assert!(host.active_dap.lock().await.sessions.is_empty());
+    }
+
+    #[tokio::test]
+    async fn open_dap_session_denies_a_client_supplied_config_id() {
+        // ADR-0106 D3 (Firm): `config_id` selects a HOST-OWNED debug configuration. No host-owned
+        // config table exists in Slice A, so a non-empty client id must be denied before any
+        // adapter spawn rather than accepted as if it were a validated host-owned selector.
+        let host = test_host();
+        let (owner, _rx) = mpsc::channel(4);
+        let err = open_dap_session(
+            &host,
+            true, // local: so we pass D5 and reach the config gate
+            7,
+            &owner,
+            std::env::temp_dir().to_string_lossy().into_owned(),
+            "netcoredbg".to_string(),
+            "launch-my-app".to_string(), // a non-empty, client-invented config id
+            None,
+        )
+        .await
+        .expect_err("a client-supplied config id is denied");
+        assert_eq!(err.code, "dap_config_unknown");
         assert!(host.active_dap.lock().await.sessions.is_empty());
     }
 
