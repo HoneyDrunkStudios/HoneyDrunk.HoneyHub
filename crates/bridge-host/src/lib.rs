@@ -1601,6 +1601,14 @@ async fn handle_command(
                 // these arms exist only for match exhaustiveness and are never reached.
                 Ok(None)
             }
+            ClientCommand::DapStart { .. }
+            | ClientCommand::DapSend { .. }
+            | ClientCommand::DapStop { .. } => Err(BridgeError::new(
+                "dap_unavailable",
+                "the debug adapter runner is not wired yet (ADR-0106 Slice A): the adapter \
+                 table, DAP framing, adapter subprocess, and wire contract are landed; the \
+                 supervised two-process session runner and desktop-local-only gate are next",
+            )),
             ClientCommand::Resume { .. } => Err(BridgeError::new(
                 "unsupported_command",
                 "resume is not driven by the host runtime yet",

@@ -674,6 +674,30 @@ pub enum ClientCommand {
     TerminalClose {
         session_id: String,
     },
+    /// **Debug** (ADR-0106): open a debug session. The host resolves the named `adapter_id`
+    /// against its allowlist table (D2) and the detected `config_id` to a debuggee launched
+    /// through the ADR-0104 substrate (D3), spawns the adapter, and proxies DAP. Desktop-local-
+    /// only: a relay connection is refused (D5). `open_id` is a correlation nonce echoed on the
+    /// resulting `dap_session_opened` so the cockpit adopts its own session.
+    DapStart {
+        root: String,
+        adapter_id: String,
+        config_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        open_id: Option<String>,
+    },
+    /// **Debug**: forward one DAP JSON-RPC frame from the cockpit's DAP client to the adapter
+    /// (setBreakpoints / continue / next / stackTrace / variables / evaluate). Owner-checked;
+    /// the host intercepts `launch` / `attach` requests so the debuggee stays host-resolved (D3).
+    DapSend {
+        session_id: String,
+        message: serde_json::Value,
+    },
+    /// **Debug**: stop a debug session, tree-killing both the adapter and the debuggee (D6).
+    /// Prefers a graceful DAP `disconnect`, then a process-group tree-kill. Idempotent.
+    DapStop {
+        session_id: String,
+    },
 }
 
 /// Default terminal width when a client opens without sizing (it resizes on mount).
@@ -1689,6 +1713,88 @@ impl BridgeEvent {
         }
     }
 
+    /// A device-wide, self-announcing debug-session-opened event (ADR-0106 D6). Host-
+    /// synthesized, so the envelope ids are empty and `sequence` is `0`.
+    pub fn dap_session_opened(
+        id: impl Into<String>,
+        created_at: impl Into<String>,
+        session_id: String,
+        adapter_id: impl Into<String>,
+        open_id: Option<String>,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            session_id: String::new(),
+            run_id: String::new(),
+            sequence: 0,
+            created_at: created_at.into(),
+            payload: BridgeEventPayload::DapSessionOpened {
+                session_id,
+                adapter_id: adapter_id.into(),
+                open_id,
+            },
+        }
+    }
+
+    /// An owner-routed DAP message from the adapter (ADR-0106 D7 / D9): the host sends it only
+    /// to the owning connection, since it can carry runtime memory. Host-synthesized envelope.
+    pub fn dap_message(
+        id: impl Into<String>,
+        created_at: impl Into<String>,
+        session_id: String,
+        message: serde_json::Value,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            session_id: String::new(),
+            run_id: String::new(),
+            sequence: 0,
+            created_at: created_at.into(),
+            payload: BridgeEventPayload::DapMessage {
+                session_id,
+                message,
+            },
+        }
+    }
+
+    /// A device-wide debug-adapter capability signal (ADR-0106 D8), like `lsp_status`. Host-
+    /// synthesized envelope.
+    pub fn dap_status(
+        id: impl Into<String>,
+        created_at: impl Into<String>,
+        status: crate::dap::DapStatus,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            session_id: String::new(),
+            run_id: String::new(),
+            sequence: 0,
+            created_at: created_at.into(),
+            payload: BridgeEventPayload::DapStatus { status },
+        }
+    }
+
+    /// A device-wide, self-announcing debug-session-closed event (ADR-0106 D6). Host-
+    /// synthesized envelope.
+    pub fn dap_session_closed(
+        id: impl Into<String>,
+        created_at: impl Into<String>,
+        session_id: String,
+        reason: impl Into<String>,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            session_id: String::new(),
+            run_id: String::new(),
+            sequence: 0,
+            created_at: created_at.into(),
+            payload: BridgeEventPayload::DapSessionClosed {
+                session_id,
+                reason: reason.into(),
+            },
+        }
+    }
+
     /// A device-wide persisted-session-list event. Not scoped to a run or session, so
     /// `session_id`/`run_id` are empty and `sequence` is `0`.
     pub fn session_list(
@@ -2014,6 +2120,40 @@ pub enum BridgeEventPayload {
     /// `reason` is a short opaque code for the pane's closed state. Host-synthesized,
     /// device-wide.
     TerminalClosed {
+        #[serde(rename = "sessionId")]
+        session_id: String,
+        reason: String,
+    },
+    /// A debug session was opened (ADR-0106). DEVICE-WIDE and self-announcing (D6): a running
+    /// agent can neither open a debug session nor hide one. Echoes the opening request's
+    /// `open_id` so the cockpit adopts its own session. Host-synthesized (rejected from backend
+    /// streams by the stream validator).
+    DapSessionOpened {
+        #[serde(rename = "sessionId")]
+        session_id: String,
+        #[serde(rename = "adapterId")]
+        adapter_id: String,
+        #[serde(rename = "openId", default, skip_serializing_if = "Option::is_none")]
+        open_id: Option<String>,
+    },
+    /// One DAP JSON-RPC frame FROM the adapter (stackTrace / variables / evaluate results /
+    /// output). Routed ONLY to the owning connection: variable and evaluate results expose the
+    /// debuggee's runtime memory, which is potentially secret-bearing (D7 / D9), so it never
+    /// reaches another device and is never persisted. Host-synthesized.
+    DapMessage {
+        #[serde(rename = "sessionId")]
+        session_id: String,
+        message: serde_json::Value,
+    },
+    /// The debug-adapter honest capability flag (ADR-0106 D8). Device-wide, like `lsp_status`:
+    /// the cockpit offers Debug only when a resolvable adapter is installed, else Run-only.
+    DapStatus {
+        status: crate::dap::DapStatus,
+    },
+    /// A debug session ended (operator-closed / disconnect / token-revoked / root-removed /
+    /// idle-reaped / killed / debuggee-exited, D6). DEVICE-WIDE self-announcing. `reason` is a
+    /// short opaque code. Host-synthesized.
+    DapSessionClosed {
         #[serde(rename = "sessionId")]
         session_id: String,
         reason: String,
@@ -3542,5 +3682,82 @@ mod tests {
         let encoded = serde_json::to_value(&closed.payload).expect("encode terminal_closed");
         assert_eq!(encoded["kind"], json!("terminal_closed"));
         assert_eq!(encoded["reason"], json!("exited"));
+    }
+
+    #[test]
+    fn dap_commands_serialize_camel_case() {
+        // ClientCommand auto-camelCases its fields; the DAP frame rides `message` verbatim.
+        let start = serde_json::to_value(ClientCommand::DapStart {
+            root: "C:/work".to_string(),
+            adapter_id: "netcoredbg".to_string(),
+            config_id: "dotnet:run".to_string(),
+            open_id: Some("nonce-1".to_string()),
+        })
+        .expect("serializes");
+        assert_eq!(
+            start,
+            json!({
+                "kind": "dap_start",
+                "root": "C:/work",
+                "adapterId": "netcoredbg",
+                "configId": "dotnet:run",
+                "openId": "nonce-1"
+            })
+        );
+
+        let send = serde_json::to_value(ClientCommand::DapSend {
+            session_id: "d1".to_string(),
+            message: json!({ "seq": 3, "type": "request", "command": "stackTrace" }),
+        })
+        .expect("serializes");
+        assert_eq!(send["kind"], json!("dap_send"));
+        assert_eq!(send["sessionId"], json!("d1"));
+        assert_eq!(send["message"]["command"], json!("stackTrace"));
+    }
+
+    #[test]
+    fn dap_events_are_host_synthesized_and_camel_cased() {
+        let at = "2026-07-07T00:00:00Z";
+
+        // dap_session_opened is device-wide + self-announcing; its ids ride the payload
+        // in camelCase (the wire-contract lesson: BridgeEventPayload renames the tag, not
+        // fields, so each multi-word field needs an explicit rename).
+        let opened = BridgeEvent::dap_session_opened(
+            "e",
+            at,
+            "d1".to_string(),
+            "netcoredbg",
+            Some("nonce-1".to_string()),
+        );
+        assert_eq!(opened.session_id, "");
+        assert_eq!(opened.sequence, 0);
+        let encoded = serde_json::to_value(&opened.payload).expect("encode dap_session_opened");
+        assert_eq!(encoded["kind"], json!("dap_session_opened"));
+        assert_eq!(encoded["sessionId"], json!("d1"));
+        assert_eq!(encoded["adapterId"], json!("netcoredbg"));
+        assert_eq!(encoded["openId"], json!("nonce-1"));
+
+        let message = BridgeEvent::dap_message(
+            "e",
+            at,
+            "d1".to_string(),
+            json!({ "type": "event", "event": "stopped" }),
+        );
+        let encoded = serde_json::to_value(&message.payload).expect("encode dap_message");
+        assert_eq!(encoded["kind"], json!("dap_message"));
+        assert_eq!(encoded["sessionId"], json!("d1"));
+        assert_eq!(encoded["message"]["event"], json!("stopped"));
+
+        let status = BridgeEvent::dap_status("e", at, crate::dap::dap_status("csharp"));
+        let encoded = serde_json::to_value(&status.payload).expect("encode dap_status");
+        assert_eq!(encoded["kind"], json!("dap_status"));
+        assert_eq!(encoded["status"]["languageId"], json!("csharp"));
+        assert_eq!(encoded["status"]["adapterId"], json!("netcoredbg"));
+
+        let closed = BridgeEvent::dap_session_closed("e", at, "d1".to_string(), "operator_closed");
+        let encoded = serde_json::to_value(&closed.payload).expect("encode dap_session_closed");
+        assert_eq!(encoded["kind"], json!("dap_session_closed"));
+        assert_eq!(encoded["sessionId"], json!("d1"));
+        assert_eq!(encoded["reason"], json!("operator_closed"));
     }
 }

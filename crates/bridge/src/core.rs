@@ -1493,6 +1493,37 @@ fn validate_stream_payload(
                 "a backend stream must not emit host-synthesized terminal-closed events",
             ));
         }
+        BridgeEventPayload::DapSessionOpened { .. } => {
+            // Host-synthesized debug lifecycle; a backend stream can neither open nor forge a
+            // debug session (ADR-0106 D1 / D6).
+            return Err(BridgeError::new(
+                "event_unexpected_dap_session_opened",
+                "a backend stream must not emit host-synthesized debug-session-opened events",
+            ));
+        }
+        BridgeEventPayload::DapMessage { .. } => {
+            // Host-synthesized, owner-routed DAP frame (runtime memory); never on a backend
+            // stream (ADR-0106 D1 / D7).
+            return Err(BridgeError::new(
+                "event_unexpected_dap_message",
+                "a backend stream must not emit host-synthesized debug-adapter messages",
+            ));
+        }
+        BridgeEventPayload::DapStatus { .. } => {
+            // Host-synthesized debug capability flag; never on a backend stream (ADR-0106 D1).
+            return Err(BridgeError::new(
+                "event_unexpected_dap_status",
+                "a backend stream must not emit host-synthesized debug-status events",
+            ));
+        }
+        BridgeEventPayload::DapSessionClosed { .. } => {
+            // Host-synthesized debug lifecycle; a backend stream can neither close nor forge a
+            // debug session (ADR-0106 D1 / D6).
+            return Err(BridgeError::new(
+                "event_unexpected_dap_session_closed",
+                "a backend stream must not emit host-synthesized debug-session-closed events",
+            ));
+        }
     }
 
     Ok(())
@@ -3359,6 +3390,34 @@ mod tests {
                 reason: "closed".to_string(),
             }),
             "event_unexpected_terminal_closed"
+        );
+        assert_eq!(
+            err_code(BridgeEventPayload::DapSessionOpened {
+                session_id: "d".to_string(),
+                adapter_id: "netcoredbg".to_string(),
+                open_id: None,
+            }),
+            "event_unexpected_dap_session_opened"
+        );
+        assert_eq!(
+            err_code(BridgeEventPayload::DapMessage {
+                session_id: "d".to_string(),
+                message: serde_json::Value::Null,
+            }),
+            "event_unexpected_dap_message"
+        );
+        assert_eq!(
+            err_code(BridgeEventPayload::DapStatus {
+                status: crate::dap::dap_status("csharp"),
+            }),
+            "event_unexpected_dap_status"
+        );
+        assert_eq!(
+            err_code(BridgeEventPayload::DapSessionClosed {
+                session_id: "d".to_string(),
+                reason: "operator_closed".to_string(),
+            }),
+            "event_unexpected_dap_session_closed"
         );
     }
 }
