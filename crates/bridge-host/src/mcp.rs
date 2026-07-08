@@ -271,7 +271,7 @@ mod tests {
         StartRunRequest, WorkspaceAllowlist,
     };
     use rmcp::model::CallToolResult;
-    use std::collections::HashSet;
+    use std::collections::{HashMap, HashSet};
     use std::sync::{Arc, Mutex as StdMutex};
     use tokio::sync::{broadcast, Mutex};
 
@@ -372,6 +372,8 @@ mod tests {
             events: events_tx,
             watcher: Mutex::new(None),
             dispatch: Some(governor.clone()),
+            active_launches: Mutex::new(crate::LaunchState::default()),
+            pending_launches: Mutex::new(HashMap::new()),
             active_terminals: Mutex::new(crate::TerminalState::default()),
             terminal_reaper,
             next_conn_id: std::sync::atomic::AtomicU64::new(0),

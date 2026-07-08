@@ -5,6 +5,17 @@
 Dogfooding round: smarter cost signals, hardened group checks, a resizable chat dock, and a
 user-centered Jobs page.
 
+- **Project launch** (PRD-0013 / ADR-0104): a Launch page detects how each allowlisted repo runs
+  (a host-owned table maps `.sln`/`.csproj` to dotnet, `package.json` scripts to npm, `Cargo.toml`
+  to cargo) and runs a chosen target as a supervised child process, streaming its stdout/stderr to
+  a scrolling log. The offered targets are host-owned and a start is resolved against them, so an
+  unknown or un-offered id is refused (never an arbitrary command over the wire); a single-project
+  folder offers `run`, but an ambiguous solution offers only build/test. Each launch runs in its
+  own process group with sensitive-named env vars scrubbed, is owned by the connection that started
+  it (only the owner sees its output or can stop it), and is tree-killed on stop, exit, root
+  removal, or disconnect. Unlike the terminal, launch is relay-reachable, so a relay start does not
+  spawn immediately: the host parks it and the owning cockpit must confirm before it runs
+  (ADR-0104 D3).
 - **Integrated terminal** (PRD-0013 / ADR-0103): a Terminal page runs a real shell (via a PTY)
   inside an allowlisted workspace root, rendered with xterm. It is desktop-local-only by design
   (a relay connection is refused, ADR-0103 D3) and host-supervised: each session is owned by the

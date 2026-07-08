@@ -24,6 +24,7 @@ import { SpendView } from "./routes/spend/SpendView";
 import { CoachingView } from "./routes/coaching/CoachingView";
 import { AgentsView } from "./routes/agents/AgentsView";
 import { RepositoriesView } from "./routes/repositories/RepositoriesView";
+import { LaunchView } from "./routes/launch/LaunchView";
 import { TerminalView } from "./routes/terminal/TerminalView";
 import {
   applyRunEvent,
@@ -79,6 +80,7 @@ export type View =
   | "jobs"
   | "observe"
   | "repositories"
+  | "launch"
   | "terminal"
   | "spend"
   | "coaching"
@@ -106,6 +108,7 @@ const PRIMARY_NAV: NavItem[] = [
   { view: "run", label: "Chat", icon: <IconChat />, mobileOnly: true },
   // Repositories (the IDE surface) and Work lead the agent-first nav, right after the Hub.
   { view: "repositories", label: "Repositories", icon: <IconFiles /> },
+  { view: "launch", label: "Launch", icon: <IconRocket /> },
   { view: "terminal", label: "Terminal", icon: <IconTerminal /> },
   { view: "work", label: "Work", icon: <IconInbox /> },
   { view: "groups", label: "Groups", icon: <IconGroups /> },
@@ -522,6 +525,17 @@ export function App({ client }: AppProps = {}) {
             />
           </div>
 
+          <div hidden={view !== "launch"}>
+            <LaunchView
+              client={wireClient}
+              active={view === "launch"}
+              workspaceRoots={settings.workspaceRoots}
+              {...(settings.defaultWorkspaceRoot === undefined
+                ? {}
+                : { defaultWorkspaceRoot: settings.defaultWorkspaceRoot })}
+            />
+          </div>
+
           <div hidden={view !== "terminal"}>
             <TerminalView
               client={wireClient}
@@ -715,6 +729,16 @@ function IconFiles() {
   return (
     <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2">
       <path d="M3 6.5A1.5 1.5 0 014.5 5H9l2 2.5h8.5A1.5 1.5 0 0121 9v8.5a1.5 1.5 0 01-1.5 1.5h-15A1.5 1.5 0 013 17.5v-11z" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+function IconRocket() {
+  return (
+    <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2">
+      <path d="M12 3c3 1 5 4 5 8l-2 2H9l-2-2c0-4 2-7 5-8z" strokeLinejoin="round" />
+      <path d="M9 15l-2 4M15 15l2 4M12 15v5" strokeLinecap="round" />
+      <circle cx="12" cy="9" r="1.4" />
     </svg>
   );
 }

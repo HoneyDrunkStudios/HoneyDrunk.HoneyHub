@@ -201,7 +201,7 @@ describe("App", () => {
     expect(await screen.findByRole("heading", { name: "Agents" })).toBeTruthy();
   });
 
-  it("orders the primary nav Hub → Repositories → Terminal → Work", () => {
+  it("orders the primary nav Hub → Repositories → Launch → Terminal → Work", () => {
     renderCockpit();
     openHive();
 
@@ -211,7 +211,8 @@ describe("App", () => {
     const hub = labels.indexOf("Hub");
     expect(hub).toBeGreaterThanOrEqual(0);
     expect(labels[hub + 1]).toBe("Repositories");
-    expect(labels[hub + 2]).toBe("Terminal");
-    expect(labels[hub + 3]).toBe("Work");
+    expect(labels[hub + 2]).toBe("Launch");
+    expect(labels[hub + 3]).toBe("Terminal");
+    expect(labels[hub + 4]).toBe("Work");
   });
 });

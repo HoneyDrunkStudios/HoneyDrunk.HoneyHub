@@ -267,6 +267,23 @@ export interface WireClient {
   lspSend(root: string, languageId: string, message: unknown): Promise<void>;
   /** **LSP**: stop the language server for (`languageId`, `root`). Resolves on the ack. */
   lspStop(root: string, languageId: string): Promise<void>;
+  /** **Launch** (ADR-0104): detect the launch targets an allowlisted `root` implies. The host
+      answers with a `launch_targets` event via `subscribe` (empty for an unrecognized repo). */
+  detectLaunchTargets(root: string): Promise<void>;
+  /** **Launch**: start the detected target `targetId` in `root` (the client picks a detected
+      id, never a command line). Launch is mobile-safe (a relay session may start one). `openId`
+      is a correlation nonce echoed on the broadcast `launch_started` so the caller adopts its
+      own launch; output then streams as `launch_output` events via `subscribe`. */
+  startLaunch(root: string, targetId: string, openId: string): Promise<void>;
+  /** **Launch**: confirm a parked relay launch (ADR-0104 D3). After a relay `startLaunch`, the
+      host answers with a `launch_confirm_required` event; this returns its `confirmId` to spawn
+      the held launch. Local launches never need this. */
+  confirmLaunch(confirmId: string): Promise<void>;
+  /** **Launch**: discard a parked relay launch the operator declined, freeing its host slot. */
+  cancelLaunch(confirmId: string): Promise<void>;
+  /** **Launch**: stop a running launch, tree-killing its process group. The host answers with a
+      final `launch_stopped` event via `subscribe`. Idempotent. */
+  stopLaunch(launchId: string): Promise<void>;
   /** **Terminal** (ADR-0103): open a PTY-backed interactive shell in the allowlisted `root`,
       sized `cols` x `rows`. Desktop-local-only: a relay connection is refused with a
       `terminal_denied` error. `openId` is a correlation nonce echoed on the broadcast

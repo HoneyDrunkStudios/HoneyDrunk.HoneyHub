@@ -1102,6 +1102,18 @@ export type ClientCommand =
   | { kind: "lsp_start"; root: string; languageId: string }
   | { kind: "lsp_send"; root: string; languageId: string; message: unknown }
   | { kind: "lsp_stop"; root: string; languageId: string }
+  // Project launch (ADR-0104): detect a repo's launch targets (a host-owned read), start a
+  // detected target by id (never a command line; launch is mobile-safe / relay-reachable), and
+  // stop a running launch. `openId` is a correlation nonce echoed on the broadcast
+  // `launch_started` so the caller adopts its own launch.
+  | { kind: "detect_launch_targets"; root: string }
+  | { kind: "launch_start"; root: string; targetId: string; openId?: string }
+  // Confirm a parked RELAY launch (ADR-0104 D3): the host holds a relay launch_start and answers
+  // with launch_confirm_required; this returns the host confirmId to actually spawn it.
+  | { kind: "launch_confirm"; confirmId: string }
+  // Discard a parked relay launch the operator declined, freeing its slot before the host TTL.
+  | { kind: "launch_cancel"; confirmId: string }
+  | { kind: "launch_stop"; launchId: string }
   // Integrated terminal (ADR-0103): open a PTY-backed shell in an allowlisted root
   // (desktop-local-only; a relay connection is refused), feed it base64 keystrokes, resize
   // its PTY, and close it (tree-killing the shell). `data` is base64 of the raw bytes.
@@ -1205,6 +1217,16 @@ export type BridgeEventPayload =
   // is the honest degradation flag (keep in-file IntelliSense when installed/running false).
   | { kind: "lsp_message"; root: string; languageId: string; message: unknown }
   | { kind: "lsp_status"; status: LspStatus }
+  // Project launch (ADR-0104): the detected targets for a root, a launch started (echoing the
+  // request's openId nonce), a relay launch awaiting the operator's confirmation (D3), one output
+  // chunk (base64, tagged stdout/stderr), and a launch ended. All host-synthesized; the
+  // started/confirm/output/stopped events are routed ONLY to the owning connection (raw output is
+  // sensitive work content, D2/D11), while launch_targets is a device-wide detection answer.
+  | { kind: "launch_targets"; root: string; targets: LaunchTarget[] }
+  | { kind: "launch_started"; launchId: string; targetId: string; openId?: string }
+  | { kind: "launch_confirm_required"; confirmId: string; targetId: string; openId?: string }
+  | { kind: "launch_output"; launchId: string; stream: string; data: string }
+  | { kind: "launch_stopped"; launchId: string; reason: string; exitCode?: number }
   // Integrated terminal (ADR-0103): a session opened, one chunk of output (`data` is base64
   // of the raw PTY bytes), and a session's end (`reason` is a short opaque code). All three
   // are host-synthesized + device-wide (empty session/run ids); the cockpit routes them to
@@ -1212,6 +1234,15 @@ export type BridgeEventPayload =
   | { kind: "terminal_opened"; sessionId: string; openId?: string }
   | { kind: "terminal_output"; sessionId: string; data: string }
   | { kind: "terminal_closed"; sessionId: string; reason: string };
+
+/** A host-detected launch target (ADR-0104 D1). The cockpit shows `label` and badges by
+    `kind`; it starts a launch by sending the `id` back, never a command line. The program and
+    args stay host-side and never cross the wire. */
+export interface LaunchTarget {
+  id: string;
+  label: string;
+  kind: "run" | "build" | "test" | "script";
+}
 
 /** A language-server lifecycle / capability signal (ADR-0102). Mirrors the bridge's serde
     shape. `installed`/`running` are the graceful-degradation flags: when either is false the

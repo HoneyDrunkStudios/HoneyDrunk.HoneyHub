@@ -48,6 +48,16 @@ const FS_PATHS_CAP: usize = 64;
 /// Default poll cadence for draining the runtime's event stream.
 pub const DEFAULT_POLL_INTERVAL: Duration = Duration::from_millis(80);
 
+/// Cap on project launches a single connection may hold at once, so a buggy or hostile client
+/// cannot spawn unbounded long-lived processes (ADR-0104 D2 supervised lifecycle).
+const LAUNCH_MAX_PER_CONN: usize = 8;
+/// Cap on relay launches a single connection may have parked awaiting confirmation, so an
+/// unconfirmed-launch flood cannot grow the pending map without bound.
+const PENDING_LAUNCH_MAX_PER_CONN: usize = 8;
+/// A parked relay launch expires if not confirmed within this window (swept by the watchdog).
+const PENDING_LAUNCH_TTL_MS: u64 = 5 * 60 * 1000;
+/// How often the launch watchdog polls each launch for process exit.
+const LAUNCH_EXIT_POLL: Duration = Duration::from_secs(1);
 /// Cap on integrated terminals a single connection may hold open at once, so a buggy or
 /// hostile client cannot spawn unbounded shells (ADR-0103 D5 supervised lifecycle).
 const TERMINAL_MAX_PER_CONN: usize = 8;
@@ -90,6 +100,18 @@ struct Host {
     /// poll loop can **revoke** a run's per-run capability token the moment the run reaches a
     /// terminal state, so a token cannot outlive the parent run it was minted for.
     dispatch: Option<Arc<DispatchGovernor>>,
+    /// Live project launches plus the allowlisted-roots snapshot they are authorized against,
+    /// behind ONE mutex (ADR-0104 D2). Keeping the roots snapshot inside the same lock that guards
+    /// the launch map makes a launch's root-authorization check atomic with its registration: a
+    /// concurrent `SetWorkspaceRoots` cannot slip a launch into a just-removed root (the
+    /// atomic-revocation pattern already used for LSP). Launch is mobile-safe (relay-reachable),
+    /// so a relay connection may start one (D3).
+    active_launches: Mutex<LaunchState>,
+    /// Relay launches held awaiting the operator's confirmation (ADR-0104 D3): a relay
+    /// `LaunchStart` does not spawn; it parks here keyed by a host `confirm_id` and spawns only on
+    /// the matching `LaunchConfirm` from the same connection. Cleared on that connection's
+    /// disconnect and swept for staleness.
+    pending_launches: Mutex<HashMap<String, PendingLaunch>>,
     /// Live integrated-terminal sessions (ADR-0103), keyed by session id. Each is a PTY-backed
     /// shell owned by the connection that opened it (`conn_id`), tree-killed when that
     /// connection disconnects, when its opening root leaves the allowlist, on idle timeout, or
@@ -103,9 +125,46 @@ struct Host {
     /// shell exits (the PTY reached EOF) so a tokio task can drop the now-dead entry off the
     /// map (a std pump thread cannot take the async terminals lock itself).
     terminal_reaper: mpsc::UnboundedSender<String>,
-    /// Monotonic source of per-connection ids, so a terminal can be tied to the socket that
-    /// opened it and swept when that socket disconnects.
+    /// Monotonic source of per-connection ids, so a launch (or terminal) can be tied to the
+    /// socket that opened it and swept when that socket disconnects.
     next_conn_id: AtomicU64,
+}
+
+/// The live launches plus the roots snapshot they are validated against, behind one mutex so a
+/// launch's authorization check and its registration are atomic against root removal.
+#[derive(Default)]
+struct LaunchState {
+    launches: HashMap<String, LaunchEntry>,
+    roots: honeyhub_bridge::WorkspaceAllowlist,
+}
+
+/// A relay launch held awaiting the operator's confirmation (ADR-0104 D3).
+struct PendingLaunch {
+    /// The canonical allowlisted project root (gated at request time; re-checked atomically at spawn).
+    root: String,
+    /// The detected target id the operator will confirm; the host re-resolves it to an argv at spawn.
+    target_id: String,
+    /// The connection that requested it; only that connection may confirm (and the confirming
+    /// connection's own outbound sink is used at spawn, so the parked entry holds no sender).
+    conn_id: u64,
+    /// The client's correlation nonce, echoed on the eventual `LaunchStarted`.
+    open_id: Option<String>,
+    /// Unix-millis when parked, for the staleness sweep.
+    created_at: u64,
+}
+
+/// One live project launch and the bookkeeping to supervise it (ADR-0104 D2).
+struct LaunchEntry {
+    /// The supervised child. Dropping it tree-kills the process group.
+    session: honeyhub_bridge::launch::LaunchSession,
+    /// The canonical allowlisted project root, re-checked on a workspace-root change so a launch
+    /// whose root is removed is retired (D2).
+    root: String,
+    /// The connection that owns this launch (swept on that connection's disconnect).
+    conn_id: u64,
+    /// The owning connection's outbound sink. Every event for this launch (started/output/stopped)
+    /// is routed here so raw process output never reaches another device (ADR-0104 D2, D11).
+    owner: mpsc::Sender<WireFrame>,
 }
 
 /// The live terminals plus the roots snapshot they are validated against, behind one mutex so a
@@ -281,6 +340,10 @@ pub async fn serve(
         roots: honeyhub_bridge::WorkspaceAllowlist::new(initial_roots.clone()),
         ..LspState::default()
     };
+    let initial_launches = LaunchState {
+        roots: honeyhub_bridge::WorkspaceAllowlist::new(initial_roots.clone()),
+        ..LaunchState::default()
+    };
     let initial_terminals = TerminalState {
         roots: honeyhub_bridge::WorkspaceAllowlist::new(initial_roots),
         ..TerminalState::default()
@@ -296,6 +359,8 @@ pub async fn serve(
         events: events_tx,
         watcher: Mutex::new(None),
         dispatch: dispatch.clone(),
+        active_launches: Mutex::new(initial_launches),
+        pending_launches: Mutex::new(HashMap::new()),
         active_terminals: Mutex::new(initial_terminals),
         terminal_reaper,
         next_conn_id: AtomicU64::new(0),
@@ -308,6 +373,39 @@ pub async fn serve(
             loop {
                 ticker.tick().await;
                 poll_active_runs(&host).await;
+            }
+        });
+    }
+
+    // Launch exit watchdog (ADR-0104 D2): poll each launch's process for exit. This detects a
+    // finished launch by its PROCESS exiting, independent of its output pipes, so a launch whose
+    // descendant still holds a pipe open is still reaped (and gives the real exit code the wire
+    // reports). Retiring tree-kills, which also closes any pipe a lingering descendant held.
+    {
+        let host = Arc::clone(&host);
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(LAUNCH_EXIT_POLL);
+            loop {
+                ticker.tick().await;
+                let exited: Vec<(String, Option<i32>)> = {
+                    let mut state = host.active_launches.lock().await;
+                    state
+                        .launches
+                        .iter_mut()
+                        .filter_map(|(id, entry)| {
+                            entry.session.poll_exit().map(|code| (id.clone(), code))
+                        })
+                        .collect()
+                };
+                for (launch_id, code) in exited {
+                    retire_launch(&host, &launch_id, "exited", code).await;
+                }
+                // Expire relay launches parked awaiting confirmation past the TTL, so an
+                // unconfirmed launch does not linger in the pending map indefinitely.
+                let now = now_millis();
+                host.pending_launches.lock().await.retain(|_, pending| {
+                    now.saturating_sub(pending.created_at) < PENDING_LAUNCH_TTL_MS
+                });
             }
         });
     }
@@ -398,6 +496,8 @@ pub async fn serve(
     let app = app.with_state(state);
 
     // Carry the peer address into handlers (`ConnectInfo<SocketAddr>`) so the WS handshake can
+    // classify a connection as desktop-local (loopback) or relay (off-box), which the launch
+    // audit records (ADR-0104 D3/D7) and the cockpit uses to decide the relay confirmation.
     // classify a connection as desktop-local (loopback) or relay (off-box). The integrated
     // terminal is refused to relay connections (ADR-0103 D3), the same posture that gates the
     // dispatch `/mcp` endpoint above.
@@ -422,6 +522,28 @@ async fn ws_handler(
     if !authorized {
         return (StatusCode::UNAUTHORIZED, "invalid pairing token").into_response();
     }
+    // Revocation posture (ADR-0103 D5 / ADR-0104 D2 "killed on unpair"): the registry is an
+    // immutable startup snapshot (`Arc<PairingRegistry>`) and v1 exposes NO live-revoke wire
+    // command, so a device cannot be revoked while its socket is open. Unpairing is a config edit
+    // that takes effect on the next bridge start, and a restart drops every socket, which the
+    // disconnect sweep in `handle_socket` turns into a tree-kill of that connection's terminals and
+    // launches (and the process death tree-kills them regardless). So the "kill on unpair" guarantee
+    // holds transitively today. If a live-revoke command is ever added, bind the resource entries to
+    // the owning device id here and add a device-keyed retirement sweep; the teardown mechanism it
+    // would call (`kill_launch_entry` / terminal retirement) already kills-first.
+    // A loopback peer is the desktop shell's own cockpit (local); anything else reached the
+    // bridge over the LAN / tailnet relay. This `local` flag is the gate a relay launch's
+    // confirmation hangs on: a local launch spawns directly, a relay launch is parked awaiting
+    // `LaunchConfirm` (ADR-0104 D3).
+    //
+    // Honest limitation (ADR-0090 D4): this trusts the transport peer address, which correctly
+    // labels the supported relay topology (a Tailscale peer arrives with its 100.64/10 address, so
+    // it is classified relay and gated). A peer reaching the bridge THROUGH a localhost-terminating
+    // forwarder the operator deliberately set up (an `ssh -L` tunnel, a 127.0.0.1-bound reverse
+    // proxy) presents as loopback and is treated local, spawning without the confirmation. That is
+    // the operator choosing to expose a local surface, the same way port-forwarding exposes any
+    // localhost service; a hardened remote-debug/-launch posture behind an explicit host opt-in is
+    // the ADR-0104 D5 / ADR-0106 D5 follow-up, and this classifier does not claim to defeat it.
     // Revocation posture (ADR-0103 D5 "killed on unpair"): the registry is an immutable startup
     // snapshot (`Arc<PairingRegistry>`) and v1 exposes NO live-revoke wire command, so a device
     // cannot be revoked while its socket is open. Unpairing is a config edit that takes effect on
@@ -587,6 +709,7 @@ async fn poll_active_runs(host: &Arc<Host>) {
 async fn handle_socket(socket: WebSocket, host: Arc<Host>, local: bool) {
     host.connected_clients
         .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    // A per-connection id so the launches this socket starts can be swept on disconnect.
     // A per-connection id so the terminals this socket opens can be swept when it disconnects.
     let conn_id = host.next_conn_id.fetch_add(1, Ordering::Relaxed);
     let (mut sink, mut stream) = socket.split();
@@ -670,6 +793,26 @@ async fn handle_socket(socket: WebSocket, host: Arc<Host>, local: bool) {
 
     writer.abort();
 
+    // Retire every launch this connection started (ADR-0104 D2: a launch is tree-killed on the
+    // owning device's disconnect; a mobile launch lives only as long as the phone is connected).
+    let mine: Vec<String> = {
+        let state = host.active_launches.lock().await;
+        state
+            .launches
+            .iter()
+            .filter(|(_, entry)| entry.conn_id == conn_id)
+            .map(|(id, _)| id.clone())
+            .collect()
+    };
+    for launch_id in mine {
+        retire_launch(&host, &launch_id, "disconnected", None).await;
+    }
+    // Drop any relay launches this connection parked but never confirmed (nothing spawned yet).
+    host.pending_launches
+        .lock()
+        .await
+        .retain(|_, pending| pending.conn_id != conn_id);
+
     // Retire every integrated terminal this connection opened (ADR-0103 D5: a session is
     // killed on device disconnect). Dropping each session tree-kills its shell.
     let mine: Vec<String> = {
@@ -732,6 +875,14 @@ async fn handle_command(
         return;
     }
 
+    // LaunchStop touches only the launches map, never the runtime, so handle it off-lock too.
+    // Owner-checked: only the connection that started a launch may stop it.
+    if let ClientCommand::LaunchStop { launch_id } = &command {
+        let result = stop_owned_launch(host, launch_id, conn_id).await;
+        respond(outbound_tx, frame_id, result).await;
+        return;
+    }
+
     // Terminal input/resize/close touch only the terminals map, never the runtime, the same
     // rationale as LSP send/stop above: a keystroke must not queue behind a backend run.
     // Terminal *open* still goes through the main match, where it gates the root (ADR-0103).
@@ -746,6 +897,23 @@ async fn handle_command(
         return;
     }
 
+    // LaunchConfirm confirms a parked RELAY launch and spawns it, off the runtime lock.
+    if let ClientCommand::LaunchConfirm { confirm_id } = &command {
+        let result = confirm_relay_launch(host, confirm_id, conn_id, outbound_tx).await;
+        respond(outbound_tx, frame_id, result).await;
+        return;
+    }
+
+    // LaunchCancel discards a parked RELAY launch the operator declined (frees its slot now).
+    if let ClientCommand::LaunchCancel { confirm_id } = &command {
+        host.pending_launches
+            .lock()
+            .await
+            .retain(|id, pending| !(id == confirm_id && pending.conn_id == conn_id));
+        respond(outbound_tx, frame_id, Ok(None)).await;
+        return;
+    }
+
     let mut to_register: Option<String> = None;
     // Set when the workspace allowlist changes, so the watcher is re-pointed after the
     // runtime lock is released.
@@ -754,6 +922,9 @@ async fn handle_command(
     // out under the lock and dropped off-lock below (a supervised server must never outlive
     // its authorization; the reader-thread join is kept off the async worker).
     let mut lsp_orphans: Vec<honeyhub_bridge::LspServer> = Vec::new();
+    // Launches whose project root fell out of the allowlist on the same `SetWorkspaceRoots`,
+    // retired off-lock below (ADR-0104 D2: a launch must not outlive its authorization).
+    let mut launch_orphans: Vec<(String, LaunchEntry)> = Vec::new();
     // Integrated terminals whose opening root fell out of the allowlist on the same
     // `SetWorkspaceRoots`, retired off-lock below (ADR-0103 D5: a session must not outlive its
     // authorization). Each is announced closed once and its shell tree-killed on drop.
@@ -762,6 +933,10 @@ async fn handle_command(
     // (grepping a big tree is slow filesystem work; holding the runtime lock through it
     // would stall every other client command).
     let mut search_job: Option<(String, String, honeyhub_bridge::ContentSearchOptions)> = None;
+    // A launch gated under the runtime lock (root allowlist + host-owned target resolution) but
+    // SPAWNED after it is released: spawning a process is blocking work that must not stall the
+    // poll loop. Carries (local, root, target_id, open_id).
+    let mut launch_job: Option<(bool, String, String, Option<String>)> = None;
     // A terminal open gated under the runtime lock (root allowlist) but SPAWNED after it is
     // released: openpty + shell spawn is blocking work that must not stall the poll loop.
     // Carries (root_allowed, root, cols, rows, open_id).
@@ -828,6 +1003,26 @@ async fn handle_command(
                     }
                 }
                 drop(state);
+                // Update the launch roots snapshot AND sweep orphaned launches under the ONE
+                // active_launches lock, so a launch's authorization is atomic with the change:
+                // `start_launch` re-checks the same snapshot under this lock, so no launch can be
+                // registered into a root this sweep just removed (ADR-0104 D2). Orphans are
+                // retired off-lock below.
+                let new_roots = runtime.workspace_roots();
+                let mut launch_state = host.active_launches.lock().await;
+                launch_state.roots = honeyhub_bridge::WorkspaceAllowlist::new(new_roots);
+                let orphan_ids: Vec<String> = launch_state
+                    .launches
+                    .iter()
+                    .filter(|(_, entry)| !launch_state.roots.allows(&entry.root))
+                    .map(|(id, _)| id.clone())
+                    .collect();
+                for id in orphan_ids {
+                    if let Some(entry) = launch_state.launches.remove(&id) {
+                        launch_orphans.push((id, entry));
+                    }
+                }
+                drop(launch_state);
                 // Update the terminal roots snapshot AND sweep orphaned terminals under the ONE
                 // active_terminals lock, so authorization is atomic with the change: `open_terminal`
                 // re-checks the same snapshot under this lock, so no shell can be registered into a
@@ -1352,6 +1547,38 @@ async fn handle_command(
                 // this arm exists only for match exhaustiveness and is never reached.
                 Ok(None)
             }
+            ClientCommand::DetectLaunchTargets { root } => {
+                // Detection is a read over an allowlisted root (ADR-0104 D1), gated like ReadFile.
+                require(runtime.workspace_allows(&root), "launch root").map(|()| {
+                    let targets = honeyhub_bridge::launch::detect_targets(&root);
+                    one(BridgeEvent::launch_targets(
+                        new_id(),
+                        now_rfc3339(),
+                        root,
+                        targets,
+                    ))
+                })
+            }
+            ClientCommand::LaunchStart {
+                root,
+                target_id,
+                open_id,
+            } => {
+                // Gate the root under the runtime lock, but DEFER the spawn: starting a process
+                // is blocking work that must not stall the poll loop. The host-owned target
+                // resolution + spawn happen off-lock in `start_launch` (below).
+                require(runtime.workspace_allows(&root), "launch root").map(|()| {
+                    launch_job = Some((local, root, target_id, open_id));
+                    None
+                })
+            }
+            ClientCommand::LaunchStop { .. }
+            | ClientCommand::LaunchConfirm { .. }
+            | ClientCommand::LaunchCancel { .. } => {
+                // Handled before the runtime lock (see the early returns in `handle_command`);
+                // these arms exist only for match exhaustiveness and are never reached.
+                Ok(None)
+            }
             ClientCommand::TerminalOpen {
                 root,
                 cols,
@@ -1393,6 +1620,26 @@ async fn handle_command(
     for server in lsp_orphans {
         tokio::task::spawn_blocking(move || drop(server));
     }
+    // Retire any de-authorized launches off-lock. Each was already removed from the map under the
+    // launches lock, so exactly one path announces its stop. Kill first, then notify (see
+    // `kill_launch_entry`): a removed root must stop the process immediately, never after an
+    // owner-channel send that a slow client could stall.
+    for (launch_id, entry) in launch_orphans {
+        kill_launch_entry(&launch_id, entry, "root_removed", None);
+    }
+    // Run the gated launch off the runtime lock (starting a process is blocking). A LOCAL launch
+    // spawns directly; a RELAY launch is host-gated (ADR-0104 D3): it does not spawn, it parks
+    // awaiting the operator's confirmation and answers with `launch_confirm_required`.
+    let result = match launch_job {
+        Some((launch_local, root, target_id, open_id)) if result.is_ok() => {
+            if launch_local {
+                start_launch(host, true, conn_id, outbound_tx, root, target_id, open_id).await
+            } else {
+                park_relay_launch(host, conn_id, outbound_tx, root, target_id, open_id).await
+            }
+        }
+        _ => result,
+    };
     // Retire any de-authorized terminals off-lock. Each was already removed from the map under the
     // terminals lock, so exactly one path closes it. Kill first, then notify (see
     // `kill_terminal_entry`): a removed root must kill the shell immediately, never after an
@@ -1895,6 +2142,15 @@ fn server_event_frame(event: BridgeEvent) -> WireFrame {
     WireFrame::server_event(new_id(), event, now_rfc3339())
 }
 
+/// Unix-millis wall clock, for the pending-launch TTL (monotonicity is not required, just a
+/// coarse "has it been parked too long" check).
+fn now_millis() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_millis() as u64)
+        .unwrap_or(0)
+}
+
 /// Run a plan-usage probe without holding the runtime lock: resolve the backend's
 /// CLI program (honoring the same env overrides the adapters use), execute the PTY
 /// probe on a blocking thread, and **broadcast** the report so every connected
@@ -2007,6 +2263,111 @@ fn spawn_check(host: &Arc<Host>, root: String, check: String) {
     });
 }
 
+/// Start a project launch off the runtime lock (ADR-0104 D1/D2): resolve the host-owned target id
+/// (deny an unknown id), spawn the supervised child WITHOUT holding a lock (spawning is blocking),
+/// then register it under the launches lock only after re-checking the roots snapshot held in that
+/// same lock. Keeping the roots snapshot inside the launches lock makes the authorization check
+/// atomic with registration, so a concurrent `SetWorkspaceRoots` cannot leave a launch running in
+/// a just-removed root; if it did remove the root during the spawn, the just-spawned child is
+/// killed and the launch denied.
+async fn start_launch(
+    host: &Arc<Host>,
+    local: bool,
+    conn_id: u64,
+    owner: &mpsc::Sender<WireFrame>,
+    root: String,
+    target_id: String,
+    open_id: Option<String>,
+) -> Result<Option<Vec<BridgeEvent>>, BridgeError> {
+    let canonical = std::fs::canonicalize(&root)
+        .map(|path| path.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| root.clone());
+    // Host-owned resolution: re-detect and find the id; an unknown id runs nothing (D1).
+    let Some(target) = honeyhub_bridge::launch::resolve_target(&canonical, &target_id) else {
+        return Err(BridgeError::new(
+            "launch_denied",
+            format!("no detected launch target '{target_id}' in this project"),
+        ));
+    };
+
+    // Pre-spawn gate: check the roots snapshot AND the per-connection cap BEFORE spawning, so an
+    // over-limit (or de-authorized) request never briefly runs repository code before being
+    // killed. (A rare concurrent double-start could exceed the cap by one; that is a bounded
+    // over-count, not an un-gated spawn.)
+    {
+        let state = host.active_launches.lock().await;
+        if !state.roots.allows(&canonical) {
+            return Err(BridgeError::new(
+                "launch_root_revoked",
+                "the project root was removed from the workspace allowlist before launch",
+            ));
+        }
+        let open_here = state
+            .launches
+            .values()
+            .filter(|entry| entry.conn_id == conn_id)
+            .count();
+        if open_here >= LAUNCH_MAX_PER_CONN {
+            return Err(BridgeError::new(
+                "launch_limit",
+                format!(
+                    "too many launches on this connection (max {LAUNCH_MAX_PER_CONN}); stop one first"
+                ),
+            ));
+        }
+    }
+
+    // Spawn OFF the lock (CreateProcess is blocking and must not stall the poll loop or wedge the
+    // launches lock the reaper/stop/disconnect paths need).
+    let (session, receiver) = honeyhub_bridge::launch::LaunchSession::spawn(&target, &canonical)?;
+
+    // Register under the launches lock, re-checking the roots snapshot held in that same lock so
+    // the authorization is atomic with the insert. If the root was removed while we spawned, kill
+    // the orphan and deny rather than leave it running in a de-authorized tree.
+    let launch_id = new_id();
+    {
+        let mut state = host.active_launches.lock().await;
+        if !state.roots.allows(&canonical) {
+            drop(state);
+            tokio::task::spawn_blocking(move || drop(session));
+            return Err(BridgeError::new(
+                "launch_root_revoked",
+                "the project root was removed from the workspace allowlist before launch",
+            ));
+        }
+        // Audit line (ADR-0104 D7): target id, project root, and whether the launch was local or
+        // relay-reached, so a launch is traceable from the bridge console.
+        eprintln!(
+            "[launch] {launch_id} target={target_id} root={canonical} {} (conn {conn_id})",
+            if local { "local" } else { "relay" }
+        );
+        state.launches.insert(
+            launch_id.clone(),
+            LaunchEntry {
+                session,
+                root: canonical,
+                conn_id,
+                owner: owner.clone(),
+            },
+        );
+    }
+
+    // Announce the start to the OWNING connection, on the SAME sink the output rides, BEFORE
+    // spawning the pump, so the cockpit adopts the launch id before the first output chunk and no
+    // other device ever sees this launch's stream. The command itself just acks.
+    let _ = owner
+        .send(server_event_frame(BridgeEvent::launch_started(
+            new_id(),
+            now_rfc3339(),
+            launch_id.clone(),
+            target_id,
+            open_id,
+        )))
+        .await;
+    spawn_launch_pump(launch_id, receiver, owner.clone());
+    Ok(None)
+}
+
 /// Open an integrated terminal (ADR-0103), gated as the sharpest D9 supervised-exec action:
 /// refused to a relay connection (desktop-local-only, D3), anchored to an allowlisted root
 /// (D2), and capped per connection. Spawned off-lock, then registered under an atomic roots
@@ -2111,6 +2472,77 @@ async fn open_terminal(
         pump_closed,
     );
     Ok(None)
+}
+
+/// Retire a launch: remove it from the map, announce its stop to the OWNING connection, and
+/// tree-kill the process group on a blocking task (Drop kills the tree). The map removal is the
+/// mutex: whichever path removes an entry announces its stop, and a second path finds it already
+/// gone, so the stop is announced exactly once. `exit_code` is the process exit code on the
+/// natural-exit path (from the watchdog), and `None` when the launch was killed.
+async fn retire_launch(host: &Arc<Host>, launch_id: &str, reason: &str, exit_code: Option<i32>) {
+    let removed = host.active_launches.lock().await.launches.remove(launch_id);
+    if let Some(entry) = removed {
+        kill_launch_entry(launch_id, entry, reason, exit_code);
+    }
+}
+
+/// Tear down a launch entry we already removed from the map. **Kill first**: the process group is
+/// tree-killed (via `Drop`) on a blocking task BEFORE anything touches the owner channel, so a full
+/// or slow owner sink can never delay enforcement (forced stop, idle, root removal) while the
+/// process keeps running. Only after the kill is scheduled do we deliver the stop event, and we
+/// deliver it on a DETACHED task so a backpressured client cannot stall the caller's teardown loop
+/// (the exit watchdog and the root-removal sweep both retire in a loop). The map removal is the
+/// mutex, so exactly one path reaches here for a given launch and the stop is announced once.
+fn kill_launch_entry(launch_id: &str, entry: LaunchEntry, reason: &str, exit_code: Option<i32>) {
+    let LaunchEntry { session, owner, .. } = entry;
+    // KILL FIRST (Drop tree-kills the process group; spawn_blocking keeps the join off the runtime).
+    tokio::task::spawn_blocking(move || drop(session));
+    // The frame is built synchronously (so `reason` need not outlive this call); only the owner
+    // sink and the built frame move into the detached notifier.
+    let frame = server_event_frame(BridgeEvent::launch_stopped(
+        new_id(),
+        now_rfc3339(),
+        launch_id.to_string(),
+        reason,
+        exit_code,
+    ));
+    tokio::spawn(async move {
+        let _ = owner.send(frame).await;
+    });
+}
+
+/// Spawn the per-launch output pump: a std thread draining the process's tagged byte channel,
+/// base64ing each chunk, and routing it as a `launch_output` to the OWNING connection ONLY (raw
+/// process output is sensitive work content, ADR-0104 D2 / D11, so it never reaches another
+/// device). `blocking_send` backpressures a slow owner; a send error means the owner disconnected,
+/// so the pump stops. Process exit is detected by the launch watchdog (which polls the child and
+/// retires it with its exit code), so a descendant that keeps an output pipe open does not prevent
+/// the launch from being reaped.
+fn spawn_launch_pump(
+    launch_id: String,
+    receiver: std::sync::mpsc::Receiver<honeyhub_bridge::launch::LaunchChunk>,
+    owner: mpsc::Sender<WireFrame>,
+) {
+    std::thread::spawn(move || {
+        use base64::Engine;
+        while let Ok(chunk) = receiver.recv() {
+            let stream = match chunk.stream {
+                honeyhub_bridge::launch::LaunchStream::Stdout => "stdout",
+                honeyhub_bridge::launch::LaunchStream::Stderr => "stderr",
+            };
+            let encoded = base64::engine::general_purpose::STANDARD.encode(&chunk.data);
+            let frame = server_event_frame(BridgeEvent::launch_output(
+                new_id(),
+                now_rfc3339(),
+                launch_id.clone(),
+                stream,
+                encoded,
+            ));
+            if owner.blocking_send(frame).is_err() {
+                break;
+            }
+        }
+    });
 }
 
 /// Handle a terminal input / resize / close off the runtime lock (they touch only the terminals
@@ -2246,6 +2678,8 @@ fn kill_terminal_entry(session_id: &str, entry: TerminalEntry, reason: &str) {
 
 /// Spawn the per-session output pump: a std thread draining the PTY's byte channel, base64ing
 /// each chunk, and routing it as a `terminal_output` to the OWNING connection ONLY (ADR-0103 D1:
+/// Spawn the per-session output pump: a std thread draining the PTY's byte channel, base64ing
+/// each chunk, and routing it as a `terminal_output` to the OWNING connection ONLY (ADR-0103 D1:
 /// a shell's stream is never delivered to another cockpit). `blocking_send` backpressures the PTY
 /// when the owner is slow; a send error means the owner disconnected, so the pump stops. When the
 /// channel disconnects (the shell exited), it announces the close once and asks the reaper to
@@ -2291,13 +2725,127 @@ fn spawn_terminal_pump(
     });
 }
 
-/// Unix-millis wall clock, for the terminal idle-timeout comparison (monotonicity is not
-/// required, just a coarse "has it been quiet for N minutes" check).
-fn now_millis() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|elapsed| elapsed.as_millis() as u64)
-        .unwrap_or(0)
+/// Stop a launch the given connection OWNS (ADR-0104): only the connection that started a launch
+/// may stop it. An unknown id is a no-op (idempotent); a foreign id is denied.
+async fn stop_owned_launch(
+    host: &Arc<Host>,
+    launch_id: &str,
+    conn_id: u64,
+) -> Result<Option<Vec<BridgeEvent>>, BridgeError> {
+    {
+        let state = host.active_launches.lock().await;
+        match state.launches.get(launch_id) {
+            Some(entry) if entry.conn_id == conn_id => {}
+            Some(_) => {
+                return Err(BridgeError::new(
+                    "launch_not_owner",
+                    "that launch belongs to a different connection",
+                ))
+            }
+            None => return Ok(None),
+        }
+    }
+    retire_launch(host, launch_id, "stopped", None).await;
+    Ok(None)
+}
+
+/// Park a RELAY launch awaiting the operator's confirmation (ADR-0104 D3, host-enforced): resolve
+/// the target now (deny an unknown id before parking), cap the pending queue, then ask the owning
+/// connection to confirm. The launch does NOT spawn until the matching `LaunchConfirm` arrives.
+async fn park_relay_launch(
+    host: &Arc<Host>,
+    conn_id: u64,
+    owner: &mpsc::Sender<WireFrame>,
+    root: String,
+    target_id: String,
+    open_id: Option<String>,
+) -> Result<Option<Vec<BridgeEvent>>, BridgeError> {
+    let canonical = std::fs::canonicalize(&root)
+        .map(|path| path.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| root.clone());
+    // Host-owned resolution up front: an unknown id is denied rather than parked (D1).
+    if honeyhub_bridge::launch::resolve_target(&canonical, &target_id).is_none() {
+        return Err(BridgeError::new(
+            "launch_denied",
+            format!("no detected launch target '{target_id}' in this project"),
+        ));
+    }
+    let confirm_id = new_id();
+    {
+        let mut pending = host.pending_launches.lock().await;
+        let parked_here = pending.values().filter(|p| p.conn_id == conn_id).count();
+        if parked_here >= PENDING_LAUNCH_MAX_PER_CONN {
+            return Err(BridgeError::new(
+                "launch_limit",
+                "too many launches awaiting confirmation; confirm or cancel one first",
+            ));
+        }
+        pending.insert(
+            confirm_id.clone(),
+            PendingLaunch {
+                root: canonical,
+                target_id: target_id.clone(),
+                conn_id,
+                open_id: open_id.clone(),
+                created_at: now_millis(),
+            },
+        );
+    }
+    let _ = owner
+        .send(server_event_frame(BridgeEvent::launch_confirm_required(
+            new_id(),
+            now_rfc3339(),
+            confirm_id,
+            target_id,
+            open_id,
+        )))
+        .await;
+    Ok(None)
+}
+
+/// Confirm a parked relay launch and spawn it (ADR-0104 D3). Only the connection that requested it
+/// may confirm; `start_launch` re-resolves the target and re-checks the root atomically, so a root
+/// removed between park and confirm still denies the spawn.
+async fn confirm_relay_launch(
+    host: &Arc<Host>,
+    confirm_id: &str,
+    conn_id: u64,
+    owner: &mpsc::Sender<WireFrame>,
+) -> Result<Option<Vec<BridgeEvent>>, BridgeError> {
+    let pending = {
+        let mut map = host.pending_launches.lock().await;
+        match map.get(confirm_id) {
+            Some(entry) if entry.conn_id == conn_id => map.remove(confirm_id),
+            Some(_) => {
+                return Err(BridgeError::new(
+                    "launch_confirm_denied",
+                    "that confirmation belongs to a different connection",
+                ))
+            }
+            None => {
+                return Err(BridgeError::new(
+                    "launch_confirm_unknown",
+                    "no launch is awaiting that confirmation (it may have expired)",
+                ))
+            }
+        }
+    };
+    let Some(pending) = pending else {
+        return Err(BridgeError::new(
+            "launch_confirm_unknown",
+            "no launch is awaiting that confirmation",
+        ));
+    };
+    start_launch(
+        host,
+        false,
+        conn_id,
+        owner,
+        pending.root,
+        pending.target_id,
+        pending.open_id,
+    )
+    .await
 }
 
 /// The configured terminal idle timeout in milliseconds (`0` disables the watchdog).

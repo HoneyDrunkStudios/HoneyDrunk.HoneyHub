@@ -86,6 +86,11 @@ class FakeClient implements WireClient {
   async lspStart(): Promise<void> {}
   async lspSend(): Promise<void> {}
   async lspStop(): Promise<void> {}
+  async detectLaunchTargets(): Promise<void> {}
+  async startLaunch(): Promise<void> {}
+  async confirmLaunch(): Promise<void> {}
+  async cancelLaunch(): Promise<void> {}
+  async stopLaunch(): Promise<void> {}
   async openTerminal(): Promise<void> {}
   async sendTerminalInput(): Promise<void> {}
   async resizeTerminal(): Promise<void> {}
