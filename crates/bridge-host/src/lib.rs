@@ -166,6 +166,9 @@ struct DapEntry {
     /// `dap_message` frames are delivered only to the owner's sink (held by the pump thread, since
     /// runtime memory is potentially secret, D7 / D9), while open/close go device-wide.
     conn_id: u64,
+    /// Unix-millis of the last DAP frame in either direction, for the idle-timeout watchdog
+    /// (ADR-0106 D6). An `Arc` so the pump thread can stamp inbound activity lock-free.
+    last_activity: Arc<AtomicU64>,
 }
 
 /// The live launches plus the roots snapshot they are validated against, behind one mutex so a
@@ -517,6 +520,36 @@ pub async fn serve(
         });
     }
 
+    // Debug idle watchdog (ADR-0106 D6): retire any debug session with no DAP traffic in either
+    // direction for longer than the idle timeout, so a connected cockpit cannot keep an adapter
+    // (and its debuggee) alive indefinitely. Disabled when the timeout is `0`.
+    let dap_idle_ms = dap_idle_ms();
+    if dap_idle_ms > 0 {
+        let host = Arc::clone(&host);
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(DAP_IDLE_SWEEP);
+            loop {
+                ticker.tick().await;
+                let now = now_millis();
+                let expired: Vec<String> = {
+                    let state = host.active_dap.lock().await;
+                    state
+                        .sessions
+                        .iter()
+                        .filter(|(_, entry)| {
+                            now.saturating_sub(entry.last_activity.load(Ordering::Relaxed))
+                                > dap_idle_ms
+                        })
+                        .map(|(id, _)| id.clone())
+                        .collect()
+                };
+                for session_id in expired {
+                    retire_dap(&host, &session_id, "idle_timeout").await;
+                }
+            }
+        });
+    }
+
     // Install the filesystem watcher so Browse + Git update near-instantly on disk changes
     // (debounced) instead of polling.
     install_fs_watcher(&host).await;
@@ -579,15 +612,15 @@ async fn ws_handler(
     if !authorized {
         return (StatusCode::UNAUTHORIZED, "invalid pairing token").into_response();
     }
-    // Revocation posture (ADR-0103 D5 / ADR-0104 D2 "killed on unpair"): the registry is an
-    // immutable startup snapshot (`Arc<PairingRegistry>`) and v1 exposes NO live-revoke wire
+    // Revocation posture (ADR-0103 D5 / ADR-0104 D2 / ADR-0106 D6 "killed on unpair"): the registry
+    // is an immutable startup snapshot (`Arc<PairingRegistry>`) and v1 exposes NO live-revoke wire
     // command, so a device cannot be revoked while its socket is open. Unpairing is a config edit
     // that takes effect on the next bridge start, and a restart drops every socket, which the
-    // disconnect sweep in `handle_socket` turns into a tree-kill of that connection's terminals and
-    // launches (and the process death tree-kills them regardless). So the "kill on unpair" guarantee
-    // holds transitively today. If a live-revoke command is ever added, bind the resource entries to
-    // the owning device id here and add a device-keyed retirement sweep; the teardown mechanism it
-    // would call (`kill_launch_entry` / terminal retirement) already kills-first.
+    // disconnect sweep in `handle_socket` turns into a tree-kill of that connection's terminals,
+    // launches, AND debug sessions (and the process death tree-kills them regardless). So the "kill
+    // on unpair" guarantee holds transitively today. If a live-revoke command is ever added, bind
+    // the resource entries to the owning device id here and add a device-keyed retirement sweep; the
+    // teardown it would call (`kill_launch_entry` / terminal retirement / `retire_dap`) kills-first.
     // A loopback peer is the desktop shell's own cockpit (local); anything else reached the
     // bridge over the LAN / tailnet relay. This `local` flag is the gate a relay launch's
     // confirmation hangs on: a local launch spawns directly, a relay launch is parked awaiting
@@ -2708,6 +2741,22 @@ fn spawn_launch_pump(
 /// (adapter + debuggee), the heaviest supervised unit in the exec family (ADR-0106 D6), so the
 /// per-connection ceiling is low.
 const DAP_MAX_PER_CONN: usize = 4;
+/// Environment override (seconds) for the debug idle-timeout watchdog; `0` disables it. A debug
+/// session with no DAP traffic in either direction past this is retired (ADR-0106 D6).
+const DAP_IDLE_ENV: &str = "HONEYHUB_DAP_IDLE_SECS";
+/// Default debug idle timeout: 30 minutes of no DAP traffic.
+const DAP_IDLE_DEFAULT_SECS: u64 = 30 * 60;
+/// How often the debug idle watchdog sweeps for expired sessions.
+const DAP_IDLE_SWEEP: Duration = Duration::from_secs(60);
+
+/// The configured debug idle timeout in milliseconds (`0` disables the watchdog).
+fn dap_idle_ms() -> u64 {
+    std::env::var(DAP_IDLE_ENV)
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .unwrap_or(DAP_IDLE_DEFAULT_SECS)
+        .saturating_mul(1000)
+}
 
 /// Open a debug session (ADR-0106): the sharpest supervised-exec action after the terminal.
 /// Desktop-local-only (D5): a relay connection is refused. Host-owned adapter selection (D2):
@@ -2778,6 +2827,7 @@ async fn open_dap_session(
     let (adapter, receiver) =
         honeyhub_bridge::dap::DapAdapter::spawn(program, spec.args, &canonical, spec.adapter_id)?;
     let session_id = new_id();
+    let last_activity = Arc::new(AtomicU64::new(now_millis()));
 
     // Register under the active_dap lock, re-checking the roots snapshot held in that same lock so
     // authorization is atomic with the insert. If the root was removed while we spawned, kill the
@@ -2803,6 +2853,7 @@ async fn open_dap_session(
                 adapter,
                 root: canonical,
                 conn_id,
+                last_activity: Arc::clone(&last_activity),
             },
         );
     }
@@ -2817,7 +2868,13 @@ async fn open_dap_session(
         adapter_id,
         open_id,
     ));
-    spawn_dap_pump(Arc::clone(host), session_id, receiver, owner.clone());
+    spawn_dap_pump(
+        Arc::clone(host),
+        session_id,
+        receiver,
+        owner.clone(),
+        last_activity,
+    );
     Ok(None)
 }
 
@@ -2831,6 +2888,7 @@ fn spawn_dap_pump(
     session_id: String,
     receiver: std::sync::mpsc::Receiver<serde_json::Value>,
     owner: mpsc::Sender<WireFrame>,
+    last_activity: Arc<AtomicU64>,
 ) {
     std::thread::spawn(move || {
         while let Ok(message) = receiver.recv() {
@@ -2843,6 +2901,9 @@ fn spawn_dap_pump(
             if owner.blocking_send(frame).is_err() {
                 break;
             }
+            // Stamp AFTER the send so a session actively producing frames but merely backpressured
+            // on a slow owner is not mistaken for idle and reaped (ADR-0106 D6).
+            last_activity.store(now_millis(), Ordering::Relaxed);
         }
         // The channel disconnected: the adapter exited. Ask the reaper to retire the dead session
         // (announce its close once, drop anything left).
@@ -2895,6 +2956,8 @@ async fn handle_dap_send(
     }
     let gated = gate_dap_request(message)?;
     entry.adapter.write_message(&gated)?;
+    // Client activity keeps the session alive against the idle watchdog (ADR-0106 D6).
+    entry.last_activity.store(now_millis(), Ordering::Relaxed);
     Ok(None)
 }
 
@@ -3461,6 +3524,23 @@ mod tests {
             let gated = gate_dap_request(frame.clone()).expect("interactive frame passes");
             assert_eq!(gated, frame);
         }
+    }
+
+    #[test]
+    fn dap_idle_timeout_defaults_and_bounds_a_stale_session() {
+        // With no HONEYHUB_DAP_IDLE_SECS override, the debug idle watchdog uses the 30-minute
+        // default (ADR-0106 D6), so a connected cockpit cannot keep an adapter alive forever.
+        assert_eq!(dap_idle_ms(), DAP_IDLE_DEFAULT_SECS * 1000);
+        assert!(dap_idle_ms() > 0, "the idle watchdog is enabled by default");
+
+        // The reaper's expiry predicate (mirrored here): a session whose last activity is older
+        // than the timeout is expired, while one that just had traffic is not.
+        let idle_ms = dap_idle_ms();
+        let now = now_millis();
+        let stale = now.saturating_sub(idle_ms + 1_000);
+        let fresh = now;
+        assert!(now.saturating_sub(stale) > idle_ms, "a stale session is reaped");
+        assert!(now.saturating_sub(fresh) <= idle_ms, "an active session survives");
     }
 
     #[test]
