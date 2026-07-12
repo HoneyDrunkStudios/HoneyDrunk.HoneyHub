@@ -1061,11 +1061,13 @@ export class MockWireClient implements WireClient {
     }
   }
 
-  async listDapConfigs(_root: string): Promise<void> {
+  async listDapConfigs(root: string): Promise<void> {
     // Offline, answer with one host-derived-by-convention config so a picker is exercisable
-    // (ADR-0106 D3 / Amendment 1). Ids + labels only, never a path, mirroring the bridge.
+    // (ADR-0106 D3 / Amendment 1). Ids + labels only, never a path, mirroring the bridge; the
+    // event carries the requested root so the cockpit can match it to its selection.
     this.emitDevice({
       kind: "dap_configs",
+      root,
       configs: [
         {
           configId: "dotnet:App",

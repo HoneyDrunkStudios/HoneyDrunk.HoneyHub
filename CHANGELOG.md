@@ -25,6 +25,16 @@ user-centered Jobs page.
   environment allowlist, so a client-supplied program, extra arguments, or an injected environment
   variable (`DOTNET_STARTUP_HOOKS`, `LD_PRELOAD`) is discarded. `restart` and `attach` are refused
   for now.
+- **Debugger, cockpit page** (PRD-0013 / ADR-0106, Slice B): a Debug page runs the debug loop. It
+  lists the debug configurations the selected root offers (host-detected, ids and labels only),
+  starts a session under the resolved adapter, and drives the DAP handshake so a real debuggee
+  launches host-resolved. The debuggee's output streams to a console, the call stack appears when
+  it stops, and continue / step-over / step-in / step-out / stop controls drive it. Debugging is
+  desktop-local-only and honestly degraded: a root with no runnable project or no installed adapter
+  shows "Debug unavailable; Run is still available" rather than an error. A `runInTerminal` /
+  `startDebugging` reverse-request from the adapter is denied client-side (execution stays
+  host-owned). Setting breakpoints from the Monaco gutter and the variables / watch panels are the
+  next follow-up.
 - **Project launch** (PRD-0013 / ADR-0104): a Launch page detects how each allowlisted repo runs
   (a host-owned table maps `.sln`/`.csproj` to dotnet, `package.json` scripts to npm, `Cargo.toml`
   to cargo) and runs a chosen target as a supervised child process, streaming its stdout/stderr to

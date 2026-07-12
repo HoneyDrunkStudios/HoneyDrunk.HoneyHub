@@ -1258,9 +1258,10 @@ export type BridgeEventPayload =
   | { kind: "dap_message"; sessionId: string; message: unknown }
   | { kind: "dap_status"; status: DapStatus }
   // The debug configurations a root offers (ADR-0106 D3 / Amendment 1), the answer to
-  // `dap_list_configs`. Returned to the requesting connection only; each entry carries a config
-  // id + label, never a filesystem path.
-  | { kind: "dap_configs"; configs: DebugConfig[] }
+  // `dap_list_configs`. Returned to the requesting connection only; carries the `root` it is for
+  // (to match a response to the client's current selection) and entries of config id + label,
+  // never a filesystem path.
+  | { kind: "dap_configs"; root?: string; configs: DebugConfig[] }
   | { kind: "dap_session_closed"; sessionId: string; reason: string };
 
 /** A host-detected launch target (ADR-0104 D1). The cockpit shows `label` and badges by
